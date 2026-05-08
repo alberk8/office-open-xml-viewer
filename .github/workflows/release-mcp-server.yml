@@ -10,7 +10,9 @@ name: Release MCP Server Binaries
 
 on:
   release:
-    types: [created, published]
+    # Only `created` — `gh release create` fires both `created` and `published`,
+    # so listening to both would build every binary twice.
+    types: [created]
   workflow_dispatch:
     inputs:
       tag:

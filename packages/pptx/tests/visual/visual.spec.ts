@@ -26,6 +26,10 @@ const PIXEL_THRESHOLD = 0.20;
 // Set to null to always pass (report-only mode).
 const FAIL_ABOVE_PCT: number | null = 20;
 
+// UPDATE_REFS=1 pnpm vrt → adopt the current canvas output as the new reference.
+// Skips diff comparison and writes the screenshot straight into references/.
+const UPDATE_REFS = process.env.UPDATE_REFS === '1';
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 test.describe('visual regression', () => {
   for (const { name, slideCount } of PPTX_FILES) {
@@ -62,6 +66,14 @@ test.describe('visual regression', () => {
 
         mkdirSync(`tests/visual/screenshots/${name}`, { recursive: true });
         writeFileSync(`tests/visual/screenshots/${name}/slide-${slideNum}.png`, actualBuf);
+
+        // ── UPDATE_REFS mode: adopt the current canvas output as the new reference ─
+        if (UPDATE_REFS) {
+          mkdirSync(`tests/visual/references/${name}`, { recursive: true });
+          writeFileSync(`tests/visual/references/${name}/slide-${slideNum}.png`, actualBuf);
+          console.log(`  ${name} slide ${slideNum}: reference updated`);
+          return;
+        }
 
         // ── Load reference ─────────────────────────────────────────────────
         const refBuf = readFileSync(`tests/visual/references/${name}/slide-${slideNum}.png`);

@@ -524,8 +524,10 @@ pnpm storybook
 # Type-check all packages
 pnpm typecheck
 
-# Run visual regression tests
+# Run visual regression tests (local only — not run in CI)
 pnpm vrt
+# Adopt the current rendering as the new reference baseline
+UPDATE_REFS=1 pnpm vrt
 
 # Build the library
 pnpm build

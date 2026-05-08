@@ -1,15 +1,15 @@
 import { defineConfig } from '@playwright/test';
 
 export default defineConfig({
-  testDir: './packages/pptx/tests/visual',
+  testDir: './tests/visual',
   testMatch: '**/*.spec.ts',
   fullyParallel: false,
   reporter: [
     ['list'],
-    ['html', { outputFolder: 'packages/pptx/tests/visual/report', open: 'never' }],
+    ['html', { outputFolder: 'tests/visual/report', open: 'never' }],
   ],
   use: {
-    baseURL: 'http://localhost:5173',
+    baseURL: 'http://localhost:5175',
     actionTimeout: 30_000,
   },
   projects: [
@@ -23,8 +23,8 @@ export default defineConfig({
     },
   ],
   webServer: {
-    command: 'pnpm --filter @silurus/ooxml-pptx dev --port 5173',
-    url: 'http://localhost:5173/sample-1.pptx',
+    command: 'npx vite --port 5175 --strictPort',
+    url: 'http://localhost:5175/tests/visual/fixture.html',
     reuseExistingServer: !process.env.CI,
     timeout: 60_000,
   },

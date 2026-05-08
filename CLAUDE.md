@@ -92,13 +92,18 @@ pnpm build-storybook  # storybook-static/ にビルド
 pnpm build:wasm       # 全パッケージの WASM をビルド（Storybook ビルド前に必要）
 ```
 
-## テスト実行
+## テスト実行 (VRT)
+
+VRT は **ローカル専用**。CI では走らない（`private/sample-*` が再配布禁止で repo に含められないため）。`demo/sample-*` の reference 画像のみ `packages/*/tests/visual/references/demo/` にコミットされており、`private/*` の reference は手元生成かつ gitignore。
 
 ```bash
-npx playwright test --reporter=list
-# または
-pnpm vrt
+pnpm build:wasm                 # 必須: 各 parser を最新ソースから再ビルド
+pnpm vrt                        # 全パッケージ (pptx + docx + xlsx) の VRT 実行
+UPDATE_REFS=1 pnpm vrt          # 現状のレンダリング結果で reference を一括更新
+pnpm --filter @silurus/ooxml-pptx vrt   # 単一パッケージ
 ```
+
+`UPDATE_REFS=1` は意図的に reference を上書きするときだけ使う（renderer 改善後 / 新規サンプル追加時 / 大幅リファクタ後）。日常テストでは付けない。
 
 ## リリース手順
 

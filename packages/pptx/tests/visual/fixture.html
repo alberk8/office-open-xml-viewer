@@ -18,7 +18,7 @@
   </style>
 </head>
 <body>
-  <div id="container"></div>
+  <canvas id="canvas"></canvas>
 
   <script type="module">
     import { PptxViewer } from '/src/index.ts';
@@ -27,12 +27,9 @@
     const slideIdx = Math.max(0, parseInt(params.get('slide') ?? '0', 10));
     const pptxName = params.get('pptx') ?? 'sample';
 
-    const viewer = new PptxViewer(document.getElementById('container'), {
+    const canvas = document.getElementById('canvas');
+    const viewer = new PptxViewer(canvas, {
       width: 1280,
-      onSlideChange: (_index, _total) => {
-        // Signal Playwright that the current slide finished rendering
-        document.body.dataset.status = 'ready';
-      },
       onError: (err) => {
         document.body.dataset.status = 'error';
         document.body.dataset.errorMessage = err.message;
@@ -44,12 +41,11 @@
       const resp = await fetch(`/${pptxName}.pptx`);
       if (!resp.ok) throw new Error(`fetch failed: ${resp.status}`);
       const buf = await resp.arrayBuffer();
-      // load() renders slide 0 and fires onSlideChange.
-      // goToSlide() re-renders the target and fires onSlideChange again.
       await viewer.load(buf);
       if (slideIdx !== 0) {
         await viewer.goToSlide(slideIdx);
       }
+      document.body.dataset.status = 'ready';
     } catch (err) {
       document.body.dataset.status = 'error';
       document.body.dataset.errorMessage = String(err);

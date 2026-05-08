@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>XLSX Viewer – VRT fixture</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #ffffff; }
+    canvas { display: block; }
+  </style>
+</head>
+<body>
+<canvas id="canvas"></canvas>
+<script type="module">
+  import { XlsxWorkbook } from '/src/index.ts';
+
+  const params = new URLSearchParams(location.search);
+  const file   = params.get('file') ?? 'demo/sample-1.xlsx';
+  const sheet  = parseInt(params.get('sheet') ?? '0', 10);
+  // Viewport in cells (origin row=1, col=1 = A1; default rows×cols was tuned for the demo workbook).
+  const row    = parseInt(params.get('row')   ?? '1', 10);
+  const col    = parseInt(params.get('col')   ?? '1', 10);
+  const rows   = parseInt(params.get('rows')  ?? '30', 10);
+  const cols   = parseInt(params.get('cols')  ?? '12', 10);
+  const width  = parseInt(params.get('width') ?? '1280', 10);
+  const height = parseInt(params.get('height') ?? '720', 10);
+
+  const canvas = document.getElementById('canvas');
+  canvas.width  = width;
+  canvas.height = height;
+  canvas.style.width  = width + 'px';
+  canvas.style.height = height + 'px';
+
+  try {
+    const wb = new XlsxWorkbook();
+    await wb.load('/' + file);
+    const idx = Math.max(0, Math.min(sheet, wb.sheetNames.length - 1));
+    await wb.renderViewport(canvas, idx, { row, col, rows, cols }, { width, height, dpr: 1 });
+    document.body.dataset.status = 'ready';
+  } catch (e) {
+    document.body.dataset.status = 'error';
+    document.body.dataset.errorMessage = e instanceof Error ? e.message : String(e);
+    console.error(e);
+  }
+</script>
+</body>
+</html>

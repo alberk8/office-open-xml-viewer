@@ -9,9 +9,8 @@ src/wasm/*.ts
 !src/wasm/.gitkeep
 public/private/
 tests/visual/references/private/
-tests/visual/references/sample-*/
 tests/visual/screenshots/
 tests/visual/diffs/
 tests/visual/report/
-# Local-only Storybook stories that load sample DOCX files
+# Local-only Storybook stories that load sample XLSX files
 src/*.privateDemo.stories.ts

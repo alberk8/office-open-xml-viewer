@@ -3,12 +3,39 @@ import { mkdirSync, readFileSync, writeFileSync } from 'fs';
 import { PNG } from 'pngjs';
 import pixelmatch from 'pixelmatch';
 
-const DOCX_FILES: { name: string; pageCount: number; width: number }[] = [
-  { name: 'private/sample-1', pageCount: 1, width: 612 },
-  { name: 'private/sample-2', pageCount: 1, width: 595 },
-  { name: 'private/sample-3', pageCount: 3, width: 595 },
-  { name: 'private/sample-4', pageCount: 1, width: 595 },
-  { name: 'demo/sample-1', pageCount: 6, width: 595 },
+// ── Test targets ──────────────────────────────────────────────────────────────
+// Each entry needs:
+//   name       : path stem (loads /{name}.xlsx, reads references/{name}/)
+//   sheetCount : number of sheets to test (sheet-1.png .. sheet-N.png in references/)
+const XLSX_FILES: { name: string; sheetCount: number }[] = [
+  { name: 'demo/sample-1', sheetCount: 5 },
+  { name: 'private/sample-1', sheetCount: 3 },
+  { name: 'private/sample-2', sheetCount: 4 },
+  { name: 'private/sample-3', sheetCount: 2 },
+  { name: 'private/sample-4', sheetCount: 1 },
+  { name: 'private/sample-5', sheetCount: 2 },
+  { name: 'private/sample-6', sheetCount: 1 },
+  { name: 'private/sample-7', sheetCount: 1 },
+  { name: 'private/sample-8', sheetCount: 1 },
+  { name: 'private/sample-9', sheetCount: 3 },
+  { name: 'private/sample-10', sheetCount: 1 },
+  { name: 'private/sample-11', sheetCount: 1 },
+  { name: 'private/sample-12', sheetCount: 8 },
+  { name: 'private/sample-13', sheetCount: 2 },
+  { name: 'private/sample-14', sheetCount: 2 },
+  { name: 'private/sample-15', sheetCount: 2 },
+  { name: 'private/sample-16', sheetCount: 2 },
+  { name: 'private/sample-17', sheetCount: 2 },
+  { name: 'private/sample-18', sheetCount: 2 },
+  { name: 'private/sample-19', sheetCount: 2 },
+  { name: 'private/sample-20', sheetCount: 2 },
+  { name: 'private/sample-21', sheetCount: 2 },
+  { name: 'private/sample-22', sheetCount: 2 },
+  { name: 'private/sample-23', sheetCount: 2 },
+  { name: 'private/sample-24', sheetCount: 2 },
+  { name: 'private/sample-25', sheetCount: 4 },
+  { name: 'private/sample-26', sheetCount: 2 },
+  { name: 'private/sample-27', sheetCount: 1 },
 ];
 
 const PIXEL_THRESHOLD = 0.20;
@@ -17,15 +44,13 @@ const FAIL_ABOVE_PCT: number | null = 20;
 // UPDATE_REFS=1 pnpm vrt → adopt the current canvas output as the new reference.
 const UPDATE_REFS = process.env.UPDATE_REFS === '1';
 
-test.describe('docx visual regression', () => {
-  for (const { name, pageCount, width } of DOCX_FILES) {
-    for (let i = 0; i < pageCount; i++) {
-      const pageNum = i + 1;
+test.describe('xlsx visual regression', () => {
+  for (const { name, sheetCount } of XLSX_FILES) {
+    for (let i = 0; i < sheetCount; i++) {
+      const sheetNum = i + 1;
 
-      test(`${name} › page ${pageNum}`, async ({ page }) => {
-        await page.goto(
-          `/tests/visual/fixture.html?file=${name}.docx&page=${i}&width=${width}`
-        );
+      test(`${name} › sheet ${sheetNum}`, async ({ page }) => {
+        await page.goto(`/tests/visual/fixture.html?file=${name}.xlsx&sheet=${i}`);
 
         await page.waitForFunction(
           () => document.body.dataset.status === 'ready' || document.body.dataset.status === 'error',
@@ -35,7 +60,7 @@ test.describe('docx visual regression', () => {
         const status = await page.evaluate(() => document.body.dataset.status);
         if (status === 'error') {
           const msg = await page.evaluate(() => document.body.dataset.errorMessage ?? '');
-          throw new Error(`Fixture error on ${name} page ${pageNum}: ${msg}`);
+          throw new Error(`Fixture error on ${name} sheet ${sheetNum}: ${msg}`);
         }
 
         await page.waitForTimeout(200);
@@ -44,38 +69,36 @@ test.describe('docx visual regression', () => {
           const canvas = document.querySelector('canvas') as HTMLCanvasElement;
           return canvas ? canvas.toDataURL('image/png') : null;
         });
-        if (!dataUrl) throw new Error(`No canvas on ${name} page ${pageNum}`);
+        if (!dataUrl) throw new Error(`No canvas on ${name} sheet ${sheetNum}`);
         const actualBuf = Buffer.from(dataUrl.split(',')[1], 'base64');
 
         mkdirSync(`tests/visual/screenshots/${name}`, { recursive: true });
-        writeFileSync(`tests/visual/screenshots/${name}/page-${pageNum}.png`, actualBuf);
+        writeFileSync(`tests/visual/screenshots/${name}/sheet-${sheetNum}.png`, actualBuf);
 
         if (UPDATE_REFS) {
           mkdirSync(`tests/visual/references/${name}`, { recursive: true });
-          writeFileSync(`tests/visual/references/${name}/page-${pageNum}.png`, actualBuf);
-          console.log(`  ${name} page ${pageNum}: reference updated`);
+          writeFileSync(`tests/visual/references/${name}/sheet-${sheetNum}.png`, actualBuf);
+          console.log(`  ${name} sheet ${sheetNum}: reference updated`);
           return;
         }
 
-        const refPath = `tests/visual/references/${name}/page-${pageNum}.png`;
+        const refPath = `tests/visual/references/${name}/sheet-${sheetNum}.png`;
         const refBuf = readFileSync(refPath);
-        const refPng    = PNG.sync.read(refBuf);
+        const refPng = PNG.sync.read(refBuf);
         const actualPng = PNG.sync.read(actualBuf);
 
         const { width: refW, height: refH } = refPng;
 
         if (actualPng.width !== refW || actualPng.height !== refH) {
           console.warn(
-            `  ${name} page ${pageNum}: size mismatch ` +
-            `actual=${actualPng.width}×${actualPng.height} ` +
-            `ref=${refW}×${refH}`
+            `  ${name} sheet ${sheetNum}: size mismatch ` +
+            `actual=${actualPng.width}×${actualPng.height} ref=${refW}×${refH}`
           );
         }
 
         const w = Math.min(actualPng.width, refW);
         const h = Math.min(actualPng.height, refH);
 
-        // Pad both images to same size so pixelmatch doesn't throw
         const pad = (png: ReturnType<typeof PNG.sync.read>, tw: number, th: number) => {
           if (png.width === tw && png.height === th) return png;
           const out = new PNG({ width: tw, height: th });
@@ -101,21 +124,21 @@ test.describe('docx visual regression', () => {
           { threshold: PIXEL_THRESHOLD, includeAA: true }
         );
         mkdirSync(`tests/visual/diffs/${name}`, { recursive: true });
-        writeFileSync(`tests/visual/diffs/${name}/page-${pageNum}.png`, PNG.sync.write(diff));
+        writeFileSync(`tests/visual/diffs/${name}/sheet-${sheetNum}.png`, PNG.sync.write(diff));
 
         const totalPx = w * h;
         const diffPct = (diffPixels / totalPx) * 100;
         const matchPct = 100 - diffPct;
 
         console.log(
-          `  ${name} page ${pageNum}: ` +
+          `  ${name} sheet ${sheetNum}: ` +
           `match=${matchPct.toFixed(1)}%  diff=${diffPct.toFixed(1)}%  ` +
           `(${diffPixels.toLocaleString()} / ${totalPx.toLocaleString()} px)`
         );
 
         if (FAIL_ABOVE_PCT !== null && diffPct > FAIL_ABOVE_PCT) {
           throw new Error(
-            `${name} page ${pageNum} pixel diff ${diffPct.toFixed(1)}% exceeds ${FAIL_ABOVE_PCT}%`
+            `${name} sheet ${sheetNum} pixel diff ${diffPct.toFixed(1)}% exceeds ${FAIL_ABOVE_PCT}%`
           );
         }
       });

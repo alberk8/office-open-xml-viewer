@@ -4,48 +4,57 @@ A [Model Context Protocol](https://modelcontextprotocol.io/) (MCP) server that l
 
 ---
 
-## Quick start
+## Easiest: VS Code extension (recommended for VS Code users)
 
-### Step 1 — Install Rust
+Install the [Office Viewer extension](https://marketplace.visualstudio.com/items?itemName=silurus.office-open-xml-viewer). Open a workspace that contains an `.xlsx`, `.docx`, or `.pptx` file and accept the prompt — the extension downloads a prebuilt binary (~5 MB, SHA256-verified) and registers the MCP server with VS Code automatically. Copilot Agent mode and any other MCP-aware agent in VS Code picks it up with no further configuration.
 
-Skip this if `rustc --version` already prints a version number.
+If you don't use VS Code, or want to wire this into Claude Code / Codex CLI / a different editor, follow the manual install below.
+
+---
+
+## Manual install: prebuilt binaries
+
+Each release ships prebuilt binaries on the [Releases page](https://github.com/yukiyokotani/office-open-xml-viewer/releases/latest):
+
+| Platform | Asset name |
+|----------|------------|
+| macOS (Apple Silicon) | `ooxml-mcp-server-aarch64-apple-darwin` |
+| macOS (Intel) | `ooxml-mcp-server-x86_64-apple-darwin` |
+| Linux x64 | `ooxml-mcp-server-x86_64-unknown-linux-gnu` |
+| Linux arm64 | `ooxml-mcp-server-aarch64-unknown-linux-gnu` |
+| Windows x64 | `ooxml-mcp-server-x86_64-pc-windows-msvc.exe` |
+
+Each asset has an accompanying `.sha256` file. Download, verify, mark executable, and place anywhere on your `PATH`:
 
 ```bash
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-# Follow the on-screen prompt, then open a new terminal tab.
+TAG=v0.27.0   # pick the latest release
+ASSET=ooxml-mcp-server-aarch64-apple-darwin   # pick your platform
+curl -L -o ooxml-mcp-server  "https://github.com/yukiyokotani/office-open-xml-viewer/releases/download/${TAG}/${ASSET}"
+curl -L -o sums.txt         "https://github.com/yukiyokotani/office-open-xml-viewer/releases/download/${TAG}/${ASSET}.sha256"
+shasum -a 256 -c sums.txt   # must print "OK"
+chmod +x ooxml-mcp-server
+mv ooxml-mcp-server /usr/local/bin/
 ```
 
-### Step 2 — Install the MCP server
+---
 
-No need to clone the repository. Run this single command:
+## Manual install: build from source
+
+Skip this section unless you want to build from source.
 
 ```bash
+# Install Rust if needed: https://rustup.rs
 cargo install --git https://github.com/yukiyokotani/office-open-xml-viewer.git \
   --package ooxml-mcp-server
 ```
 
-The first run downloads and compiles everything (~2 minutes). The binary is placed in `~/.cargo/bin/ooxml-mcp-server`.
-
-**Check it is on your PATH:**
-
-```bash
-which ooxml-mcp-server
-# expected: /Users/you/.cargo/bin/ooxml-mcp-server
-```
-
-If the command is not found, add this line to your shell profile (`~/.zshrc` or `~/.bashrc`) and open a new terminal:
-
-```bash
-export PATH="$HOME/.cargo/bin:$PATH"
-```
-
-### Step 3 — Configure your AI client
-
-Pick the client you use and follow the instructions in the section below.
+The binary is placed in `~/.cargo/bin/ooxml-mcp-server`. Make sure `~/.cargo/bin` is on your `PATH`.
 
 ---
 
-## Configuration
+## Configure your AI client
+
+Pick the client you use and follow the instructions below.
 
 ### Claude Code
 

@@ -1,0 +1,156 @@
+// Resolves the `ooxml-mcp-server` binary path for the MCP server provider.
+//
+// Resolution order:
+//   1. User override (`ooxmlViewer.mcpServer.binaryPath` setting)
+//   2. Cached binary previously downloaded into the extension's globalStorage
+//   3. Binary on PATH (e.g. installed via `cargo install` or Homebrew)
+//   4. Download from GitHub Releases (only when the caller consents)
+//
+// The binary is intentionally NOT bundled into the extension — keeping the VSIX
+// small. Users who want the MCP server pay the ~5 MB download once.
+
+import * as vscode from 'vscode';
+import * as fs from 'fs';
+import * as path from 'path';
+import * as crypto from 'crypto';
+import { execFile } from 'child_process';
+import { promisify } from 'util';
+
+const execFileAsync = promisify(execFile);
+
+const REPO_OWNER = 'yukiyokotani';
+const REPO_NAME = 'office-open-xml-viewer';
+
+export class McpServerNotInstalledError extends Error {
+  constructor() {
+    super('ooxml-mcp-server binary is not installed');
+    this.name = 'McpServerNotInstalledError';
+  }
+}
+
+export interface ResolveOptions {
+  /** User override path. Empty string = unset. */
+  override: string;
+  /** Whether to download the binary if not already available. */
+  consentToDownload: boolean;
+}
+
+export async function resolveBinaryPath(
+  context: vscode.ExtensionContext,
+  opts: ResolveOptions,
+): Promise<string> {
+  if (opts.override && opts.override.trim()) {
+    const p = opts.override.trim();
+    if (!fs.existsSync(p)) {
+      throw new Error(`Configured ooxml-mcp-server binary not found: ${p}`);
+    }
+    return p;
+  }
+
+  const cached = cachedBinaryPath(context);
+  if (fs.existsSync(cached)) return cached;
+
+  const onPath = await findOnPath(binaryFileName());
+  if (onPath) return onPath;
+
+  if (opts.consentToDownload) {
+    await downloadBinary(context);
+    return cached;
+  }
+
+  throw new McpServerNotInstalledError();
+}
+
+export function cachedBinaryPath(context: vscode.ExtensionContext): string {
+  return path.join(context.globalStorageUri.fsPath, 'bin', binaryFileName());
+}
+
+function binaryFileName(): string {
+  return process.platform === 'win32' ? 'ooxml-mcp-server.exe' : 'ooxml-mcp-server';
+}
+
+function targetTriple(): string {
+  const platform = process.platform;
+  const arch = process.arch;
+  if (platform === 'darwin' && arch === 'arm64') return 'aarch64-apple-darwin';
+  if (platform === 'darwin' && arch === 'x64') return 'x86_64-apple-darwin';
+  if (platform === 'linux' && arch === 'x64') return 'x86_64-unknown-linux-gnu';
+  if (platform === 'linux' && arch === 'arm64') return 'aarch64-unknown-linux-gnu';
+  if (platform === 'win32' && arch === 'x64') return 'x86_64-pc-windows-msvc';
+  throw new Error(`Unsupported platform/arch: ${platform}/${arch}`);
+}
+
+function assetName(): string {
+  const triple = targetTriple();
+  const ext = process.platform === 'win32' ? '.exe' : '';
+  return `ooxml-mcp-server-${triple}${ext}`;
+}
+
+async function findOnPath(name: string): Promise<string | undefined> {
+  const cmd = process.platform === 'win32' ? 'where' : 'which';
+  try {
+    const { stdout } = await execFileAsync(cmd, [name]);
+    const first = stdout
+      .split(/\r?\n/)
+      .map((l) => l.trim())
+      .find((l) => l.length > 0);
+    return first || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+export async function downloadBinary(context: vscode.ExtensionContext): Promise<void> {
+  const version = (context.extension.packageJSON as { version: string }).version;
+  const tag = `v${version}`;
+  const asset = assetName();
+  const baseUrl = `https://github.com/${REPO_OWNER}/${REPO_NAME}/releases/download/${tag}`;
+  const binUrl = `${baseUrl}/${asset}`;
+  const sumUrl = `${binUrl}.sha256`;
+
+  const dest = cachedBinaryPath(context);
+  await fs.promises.mkdir(path.dirname(dest), { recursive: true });
+
+  await vscode.window.withProgress(
+    {
+      location: vscode.ProgressLocation.Notification,
+      title: `Downloading ooxml-mcp-server ${tag}`,
+      cancellable: false,
+    },
+    async (progress) => {
+      progress.report({ message: 'Fetching checksum…' });
+      const sumText = await fetchText(sumUrl);
+      const expectedSha = sumText.trim().split(/\s+/)[0]?.toLowerCase();
+      if (!expectedSha || !/^[0-9a-f]{64}$/.test(expectedSha)) {
+        throw new Error(`Invalid SHA256 file at ${sumUrl}`);
+      }
+
+      progress.report({ message: 'Downloading binary…' });
+      const buf = await fetchBinary(binUrl);
+
+      const actualSha = crypto.createHash('sha256').update(buf).digest('hex');
+      if (actualSha !== expectedSha) {
+        throw new Error(
+          `SHA256 mismatch for ${asset}: expected ${expectedSha}, got ${actualSha}`,
+        );
+      }
+
+      await fs.promises.writeFile(dest, buf);
+      if (process.platform !== 'win32') {
+        await fs.promises.chmod(dest, 0o755);
+      }
+    },
+  );
+}
+
+async function fetchText(url: string): Promise<string> {
+  const res = await fetch(url, { redirect: 'follow' });
+  if (!res.ok) throw new Error(`HTTP ${res.status} for ${url}`);
+  return await res.text();
+}
+
+async function fetchBinary(url: string): Promise<Buffer> {
+  const res = await fetch(url, { redirect: 'follow' });
+  if (!res.ok) throw new Error(`HTTP ${res.status} for ${url}`);
+  return Buffer.from(await res.arrayBuffer());
+}

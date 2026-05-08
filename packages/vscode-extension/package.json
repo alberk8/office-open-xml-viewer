@@ -7,7 +7,7 @@
   "license": "MIT",
   "icon": "icon.png",
   "engines": {
-    "vscode": "^1.85.0"
+    "vscode": "^1.101.0"
   },
   "categories": [
     "Visualization",
@@ -62,8 +62,45 @@
         "command": "ooxmlViewer.copySelection",
         "title": "Copy Selection",
         "category": "OOXML Viewer"
+      },
+      {
+        "command": "ooxmlViewer.installMcpServer",
+        "title": "Install / Enable MCP Server",
+        "category": "OOXML Viewer"
+      },
+      {
+        "command": "ooxmlViewer.disableMcpServer",
+        "title": "Disable MCP Server",
+        "category": "OOXML Viewer"
       }
-    ]
+    ],
+    "mcpServerDefinitionProviders": [
+      {
+        "id": "ooxml-mcp",
+        "label": "OOXML (Word / Excel / PowerPoint)"
+      }
+    ],
+    "configuration": {
+      "title": "OOXML Viewer",
+      "properties": {
+        "ooxmlViewer.mcpServer.enabled": {
+          "type": "string",
+          "enum": ["auto", "always", "never"],
+          "enumDescriptions": [
+            "Offer to enable when the workspace contains .xlsx / .docx / .pptx files.",
+            "Always register the MCP server (downloading the binary on first use).",
+            "Never register the MCP server."
+          ],
+          "default": "auto",
+          "description": "Controls when the OOXML MCP server is registered with AI agents (Copilot, Claude, etc.). The server lets agents read .xlsx / .docx / .pptx files via dedicated tools instead of unzipping XML by hand."
+        },
+        "ooxmlViewer.mcpServer.binaryPath": {
+          "type": "string",
+          "default": "",
+          "description": "Optional absolute path to a pre-installed `ooxml-mcp-server` binary (e.g. one installed via `cargo install`). When empty, the extension downloads a prebuilt binary on demand."
+        }
+      }
+    }
   },
   "scripts": {
     "compile": "node esbuild.config.mjs",
@@ -72,7 +109,7 @@
     "package": "vsce package"
   },
   "devDependencies": {
-    "@types/vscode": "^1.85.0",
+    "@types/vscode": "^1.101.0",
     "@vscode/vsce": "^3.0.0",
     "esbuild": "^0.25.0",
     "typescript": "^5.7.0"

@@ -171,10 +171,68 @@ function patternCoverage(pt: string): number {
 const PATTERN_CACHE = new Map<string, CanvasPattern | null>();
 
 /**
- * Build a small repeating tile for ECMA-376 directional hatch patterns. Uses
- * an offscreen canvas painted with bgColor + fgColor lines and returns a
- * CanvasPattern for `ctx.fillStyle`. Non-hatch patterns return null so the
- * caller falls back to the fg/bg blend.
+ * Canonical 8x8 bitmaps for ECMA-376 ST_PatternType (§18.8.22). Each entry is
+ * 8 bytes; bit 7 (0x80) is the leftmost pixel of each row. A `1` bit places
+ * fg on the tile, `0` leaves bg.
+ *
+ * Values follow the long-standing Office pattern set used by LibreOffice /
+ * POI for the same names — which is the only practical reference, since the
+ * spec only describes them by name.  The dark/light split is encoded in the
+ * bitmap itself (no line-width fudging) so the tile renders pixel-perfect at
+ * any zoom level.
+ *
+ * Coverage targets:
+ *   gray125    12.5%   sparse dot  (1 dot per 8 pixels)
+ *   gray0625    6.25%   very sparse (1 dot per 16 pixels)
+ *   lightGray  25%      checker dot (1 in 4)
+ *   mediumGray 50%      full checker
+ *   darkGray   75%      inverse of lightGray
+ *
+ * The directional hatches use lines spaced every 2px (dark) or every 4px
+ * (light), so the cell reads as a continuous hatch instead of a single
+ * far-apart line. The grid / trellis variants are AND/OR combinations of
+ * the directional bitmaps so the corners line up cleanly across tile seams.
+ */
+const PATTERN_BITMAPS: Record<string, number[]> = {
+  // ── Gray-family dot patterns ──────────────────────────────────────────
+  gray125:    [0b10000000, 0b00000000, 0b00001000, 0b00000000, 0b10000000, 0b00000000, 0b00001000, 0b00000000],
+  gray0625:   [0b10000000, 0b00000000, 0b00000000, 0b00000000, 0b00001000, 0b00000000, 0b00000000, 0b00000000],
+  lightGray:  [0b10101010, 0b00000000, 0b01010101, 0b00000000, 0b10101010, 0b00000000, 0b01010101, 0b00000000],
+  mediumGray: [0b10101010, 0b01010101, 0b10101010, 0b01010101, 0b10101010, 0b01010101, 0b10101010, 0b01010101],
+  // 75% — distribute the empty pixels evenly so the cell reads as solid
+  // dark grey, not as alternating black/dot stripes.
+  darkGray:   [0b01110111, 0b11011101, 0b01110111, 0b11011101, 0b01110111, 0b11011101, 0b01110111, 0b11011101],
+
+  // ── Horizontal / vertical lines ───────────────────────────────────────
+  // Dark variants render as a thin line every 4 rows / cols (~25% coverage),
+  // light variants every 8 (~12.5%). The previous "every 2" spacing read as
+  // a near-solid block at typical zoom; Excel paints these as distinct
+  // separate lines. ECMA-376 §18.8.22 doesn't pin down the geometry, so
+  // these match the Office implementation's visual instead.
+  darkHorizontal:  [0b11111111, 0b00000000, 0b00000000, 0b00000000, 0b11111111, 0b00000000, 0b00000000, 0b00000000],
+  lightHorizontal: [0b11111111, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000],
+  darkVertical:    [0b10001000, 0b10001000, 0b10001000, 0b10001000, 0b10001000, 0b10001000, 0b10001000, 0b10001000],
+  lightVertical:   [0b10000000, 0b10000000, 0b10000000, 0b10000000, 0b10000000, 0b10000000, 0b10000000, 0b10000000],
+
+  // ── Diagonals ─────────────────────────────────────────────────────────
+  // darkDown: stripes every 4 px (\\); lightDown: every 8 px (one stripe per tile).
+  darkDown:   [0b10001000, 0b01000100, 0b00100010, 0b00010001, 0b10001000, 0b01000100, 0b00100010, 0b00010001],
+  lightDown:  [0b10000000, 0b01000000, 0b00100000, 0b00010000, 0b00001000, 0b00000100, 0b00000010, 0b00000001],
+  darkUp:     [0b00010001, 0b00100010, 0b01000100, 0b10001000, 0b00010001, 0b00100010, 0b01000100, 0b10001000],
+  lightUp:    [0b00000001, 0b00000010, 0b00000100, 0b00001000, 0b00010000, 0b00100000, 0b01000000, 0b10000000],
+
+  // ── Grid (horizontal + vertical) ──────────────────────────────────────
+  darkGrid:   [0b11111111, 0b10001000, 0b10001000, 0b10001000, 0b11111111, 0b10001000, 0b10001000, 0b10001000],
+  lightGrid:  [0b11111111, 0b10000000, 0b10000000, 0b10000000, 0b10000000, 0b10000000, 0b10000000, 0b10000000],
+
+  // ── Trellis (both diagonals at the dark/light density) ────────────────
+  darkTrellis:  [0b10011001, 0b01000010, 0b00100100, 0b00011000, 0b00011000, 0b00100100, 0b01000010, 0b10000001],
+  lightTrellis: [0b10000001, 0b01000010, 0b00100100, 0b00011000, 0b00011000, 0b00100100, 0b01000010, 0b10000001],
+};
+
+/**
+ * Build a repeating 8x8 tile for an ECMA-376 preset pattern. Returns null
+ * for unknown pattern names so the caller can fall back to a flat colour.
  */
 function hatchPattern(
   ctx: CanvasRenderingContext2D,
@@ -185,13 +243,13 @@ function hatchPattern(
   const key = `${pt}|${fgHex}|${bgHex}`;
   if (PATTERN_CACHE.has(key)) return PATTERN_CACHE.get(key)!;
 
-  const size = 8;
-  const isDark = pt.startsWith('dark');
-  const isLight = pt.startsWith('light');
-  if (!isDark && !isLight) {
+  const rows = PATTERN_BITMAPS[pt];
+  if (!rows) {
     PATTERN_CACHE.set(key, null);
     return null;
   }
+
+  const size = 8;
   const off = document.createElement('canvas');
   off.width = size;
   off.height = size;
@@ -200,49 +258,13 @@ function hatchPattern(
 
   octx.fillStyle = hexToRgba(bgHex);
   octx.fillRect(0, 0, size, size);
-  octx.strokeStyle = hexToRgba(fgHex);
-  octx.lineWidth = isDark ? 2 : 1;
-  octx.beginPath();
-  switch (pt) {
-    case 'darkHorizontal':
-    case 'lightHorizontal':
-      octx.moveTo(0, size / 2);
-      octx.lineTo(size, size / 2);
-      break;
-    case 'darkVertical':
-    case 'lightVertical':
-      octx.moveTo(size / 2, 0);
-      octx.lineTo(size / 2, size);
-      break;
-    case 'darkDown':
-    case 'lightDown':
-      // Diagonal from top-left to bottom-right; draw a second line shifted to
-      // avoid seams where the tile wraps.
-      octx.moveTo(0, 0); octx.lineTo(size, size);
-      octx.moveTo(-size, 0); octx.lineTo(0, size);
-      octx.moveTo(0, -size); octx.lineTo(size, 0);
-      break;
-    case 'darkUp':
-    case 'lightUp':
-      octx.moveTo(0, size); octx.lineTo(size, 0);
-      octx.moveTo(-size, size); octx.lineTo(0, 0);
-      octx.moveTo(0, 2 * size); octx.lineTo(size, size);
-      break;
-    case 'darkGrid':
-    case 'lightGrid':
-      octx.moveTo(0, size / 2); octx.lineTo(size, size / 2);
-      octx.moveTo(size / 2, 0); octx.lineTo(size / 2, size);
-      break;
-    case 'darkTrellis':
-    case 'lightTrellis':
-      octx.moveTo(0, 0); octx.lineTo(size, size);
-      octx.moveTo(0, size); octx.lineTo(size, 0);
-      break;
-    default:
-      PATTERN_CACHE.set(key, null);
-      return null;
+  octx.fillStyle = hexToRgba(fgHex);
+  for (let y = 0; y < size; y++) {
+    const row = rows[y];
+    for (let x = 0; x < size; x++) {
+      if (row & (1 << (7 - x))) octx.fillRect(x, y, 1, 1);
+    }
   }
-  octx.stroke();
 
   const pat = ctx.createPattern(off, 'repeat');
   PATTERN_CACHE.set(key, pat);

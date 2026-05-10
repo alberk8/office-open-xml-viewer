@@ -335,11 +335,20 @@ enum ParaPiece {
 /// Two break flavors are recognized:
 ///   - `BreakType::Page`         — hard `<w:br w:type="page"/>`, always honored.
 ///   - `BreakType::RenderedPage` — Word's `<w:lastRenderedPageBreak/>` hint
-///     (ECMA-376 §17.3.1.20). Only honored inside paragraphs that carry
-///     ruby annotations, where our own line-height calc tends to drift
-///     from Word's; outside that context the marker is ignored to avoid
-///     introducing breaks that conflict with our paginator's own
-///     measurement.
+///     (ECMA-376 §17.3.1.20).
+///
+/// HEURISTIC — ruby-only gate: `lastRenderedPageBreak` is currently honored
+/// only in paragraphs that carry ruby annotations, because our ruby
+/// line-height calculation tends to drift from Word's measurement and
+/// causes page-break positions to differ. Gating to ruby paragraphs limits
+/// the blast radius while the underlying issue exists.
+///
+/// This gate is a spec violation: §17.3.1.20 makes no distinction between
+/// ruby and non-ruby paragraphs. The correct fix is to implement §17.3.4.x
+/// (rubyPr/rubyAlign) line-height calculation accurately, after which this
+/// gate should be removed and `lastRenderedPageBreak` honored uniformly
+/// (or ignored uniformly if the self-paginator becomes authoritative).
+/// TODO: remove gate after fixing ruby line-height per §17.3.4.6 / §17.3.4.20.
 ///
 /// `<w:lastRenderedPageBreak/>` is often emitted by Word at the very
 /// start of a paragraph too (echoing the page break that produced the

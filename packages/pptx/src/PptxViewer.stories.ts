@@ -146,13 +146,19 @@ export const DebugJson: Story = {
 
     root.append(fileInput, pre);
 
-    let wasmReady = false;
-    init().then(() => { wasmReady = true; });
+    // Kick off wasm init eagerly so it overlaps with the user picking a file.
+    // The change handler also awaits the same promise — wasm-pack's init() is
+    // idempotent and cached, so the second await resolves instantly. This
+    // closes the race where picking a file before init resolved would silently
+    // return without ever updating the pre.
+    const wasmReady = init();
 
     fileInput.addEventListener('change', async () => {
       const file = fileInput.files?.[0];
-      if (!file || !wasmReady) return;
+      if (!file) return;
+      pre.textContent = `Parsing ${file.name}…`;
       try {
+        await wasmReady;
         const buf = await file.arrayBuffer();
         const json = parse_pptx(new Uint8Array(buf));
         const parsed = JSON.parse(json);

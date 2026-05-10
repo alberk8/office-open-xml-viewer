@@ -1,4 +1,5 @@
 use serde::Serialize;
+use std::collections::HashMap;
 
 #[derive(Serialize, Debug, Default, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -18,6 +19,14 @@ pub struct Document {
     /// document has no theme part or no Latin minor typeface is declared.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub minor_font: Option<String>,
+    /// ECMA-376 §17.8.3.10 — font family classification from `word/fontTable.xml`.
+    /// Maps font name to `<w:family @w:val>` (one of: "roman", "swiss", "modern",
+    /// "script", "decorative", "auto"). Used by the renderer to select the
+    /// correct CSS generic family (roman→serif, swiss→sans-serif, modern→monospace)
+    /// without relying on name-pattern heuristics. Empty when fontTable.xml
+    /// is absent or malformed.
+    #[serde(skip_serializing_if = "HashMap::is_empty")]
+    pub font_family_classes: HashMap<String, String>,
 }
 
 #[derive(Serialize, Debug, Default, Clone)]

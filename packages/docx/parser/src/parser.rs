@@ -80,7 +80,17 @@ pub fn parse(data: &[u8]) -> Result<Document, String> {
     let major_font = theme.theme_font("major", "latin");
     let minor_font = theme.theme_font("minor", "latin");
 
-    Ok(Document { section, body, headers, footers, major_font, minor_font })
+    // ECMA-376 §17.8.3.10: font family classification from fontTable.xml.
+    // Resolve via relationship (Type ending in "/fontTable"); fall back to
+    // "word/fontTable.xml" for documents that omit the relationship.
+    let font_table_path = find_rel_target(&rels_xml, "fontTable")
+        .map(|t| if t.starts_with('/') { t.trim_start_matches('/').to_string() } else { format!("word/{}", t) })
+        .unwrap_or_else(|| "word/fontTable.xml".to_string());
+    let font_family_classes = read_zip_entry(&mut zip, &font_table_path)
+        .map(|s| parse_font_table(&s))
+        .unwrap_or_default();
+
+    Ok(Document { section, body, headers, footers, major_font, minor_font, font_family_classes })
 }
 
 /// Resolve scheme color names (accent1..6, dk1, dk2, lt1, lt2, hlink, folHlink)
@@ -203,6 +213,33 @@ fn find_rel_target(rels_xml: &str, type_suffix: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// Parse `word/fontTable.xml` and build a map from font name to family class.
+///
+/// ECMA-376 §17.8.3.10 defines `<w:font w:name="…"><w:family w:val="…"/></w:font>`
+/// where val is one of: `roman` (serif), `swiss` (sans-serif), `modern`
+/// (monospace), `script`, `decorative`, `auto` (no info). The renderer uses
+/// this map as the primary source of serif/sans-serif classification, falling
+/// back to name-pattern matching only when the font is absent or classified
+/// as `auto`.
+fn parse_font_table(xml: &str) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    let Ok(doc) = XmlDoc::parse(xml) else { return map };
+    let w_ns = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+    for font in doc.root_element()
+        .descendants()
+        .filter(|n| n.is_element() && n.tag_name().name() == "font" && n.tag_name().namespace() == Some(w_ns))
+    {
+        let Some(name) = font.attribute((w_ns, "name")) else { continue };
+        let family = font.children()
+            .find(|n| n.is_element() && n.tag_name().name() == "family" && n.tag_name().namespace() == Some(w_ns))
+            .and_then(|n| n.attribute((w_ns, "val")));
+        if let Some(f) = family {
+            map.insert(name.to_string(), f.to_string());
+        }
+    }
+    map
 }
 
 fn parse_body_elements(

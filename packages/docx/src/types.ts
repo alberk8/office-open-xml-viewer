@@ -9,6 +9,15 @@ export interface Document {
   majorFont?: string;
   /** Theme `<a:fontScheme><a:minorFont><a:latin@typeface>` (body face). */
   minorFont?: string;
+  /**
+   * ECMA-376 §17.8.3.10 — font family classification from `word/fontTable.xml`.
+   * Maps font name to `<w:family @w:val>`: "roman" | "swiss" | "modern" |
+   * "script" | "decorative" | "auto". The renderer uses this as the primary
+   * source for serif/sans-serif decisions (roman→serif, swiss→sans-serif,
+   * modern→monospace), falling back to name-pattern matching only when the
+   * entry is absent or classified as "auto".
+   */
+  fontFamilyClasses?: Record<string, string>;
 }
 
 export interface HeadersFooters {

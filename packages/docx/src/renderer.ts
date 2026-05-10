@@ -67,6 +67,9 @@ interface RenderState {
   floats: FloatRect[];
   /** ECMA-376 §17.6.5 docGrid (type + pitch), applied to auto line spacing. */
   docGrid: DocGridCtx;
+  /** ECMA-376 §17.8.3.10 — font→family map from word/fontTable.xml. Used by
+   *  resolveFontFamily as the authoritative source of serif/sans-serif classification. */
+  fontFamilyClasses: Record<string, string>;
   /** Callback for building a transparent text selection overlay. */
   onTextRun?: (run: DocxTextRunInfo) => void;
 }
@@ -222,7 +225,7 @@ export async function renderDocumentToCanvas(
   ctx.fillStyle = '#ffffff';
   ctx.fillRect(0, 0, cssWidth, cssHeight);
 
-  const pages = opts.prebuiltPages ?? computePages(doc.body, sec, ctx);
+  const pages = opts.prebuiltPages ?? computePages(doc.body, sec, ctx, doc.fontFamilyClasses ?? {});
   const totalPages = Math.max(opts.totalPages ?? pages.length, pages.length);
   const elements = pages[pageIndex] ?? pages[0] ?? [];
 
@@ -247,6 +250,7 @@ export async function renderDocumentToCanvas(
     pageWidth: sec.pageWidth,
     floats: [],
     docGrid: { type: sec.docGridType ?? null, linePitchPt: sec.docGridLinePitch ?? null },
+    fontFamilyClasses: doc.fontFamilyClasses ?? {},
     onTextRun: opts.onTextRun,
   };
 
@@ -277,10 +281,11 @@ export function computePages(
   body: BodyElement[],
   section: SectionProps,
   ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
+  fontFamilyClasses: Record<string, string> = {},
 ): PaginatedBodyElement[][] {
   const contentH = section.pageHeight - section.marginTop - section.marginBottom;
   const contentW = section.pageWidth - section.marginLeft - section.marginRight;
-  const measureState = buildMeasureState(ctx, section);
+  const measureState = buildMeasureState(ctx, section, fontFamilyClasses);
 
   const pages: PaginatedBodyElement[][] = [[]];
   let y = 0;
@@ -423,6 +428,7 @@ export function computePages(
 function buildMeasureState(
   ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
   section: SectionProps,
+  fontFamilyClasses: Record<string, string> = {},
 ): RenderState {
   return {
     ctx,
@@ -443,6 +449,7 @@ function buildMeasureState(
     pageWidth: section.pageWidth,
     floats: [],
     docGrid: { type: section.docGridType ?? null, linePitchPt: section.docGridLinePitch ?? null },
+    fontFamilyClasses,
   };
 }
 
@@ -477,7 +484,7 @@ function estimateParagraphHeight(
       lineBoxH: (a, d, _h) => lineBoxHeight(para.lineSpacing, a, d, 1, state.docGrid, paraHasRuby),
       pageH: state.pageH,
     } : undefined;
-    const lines = layoutLines(state.ctx, segs, paraW, para.indentFirst, 1, para.tabStops, wrapCtx);
+    const lines = layoutLines(state.ctx, segs, paraW, para.indentFirst, 1, para.tabStops, wrapCtx, state.fontFamilyClasses);
     if (paraHasRuby) {
       // Word uses the same line height for every line in a ruby paragraph,
       // snapped to an integer docGrid pitch.
@@ -555,7 +562,7 @@ function splitParagraphAcrossPages(
     lineBoxH: (a, d) => lineBoxHeight(para.lineSpacing, a, d, 1, measureState.docGrid, paragraphHasRuby(para)),
     pageH: measureState.pageH,
   } : undefined;
-  const lines = layoutLines(measureState.ctx, segs, paraW, para.indentFirst, 1, para.tabStops, wrapCtx);
+  const lines = layoutLines(measureState.ctx, segs, paraW, para.indentFirst, 1, para.tabStops, wrapCtx, measureState.fontFamilyClasses);
   const paraHasRuby = paragraphHasRuby(para);
 
   const perLineH = (l: typeof lines[number]) => lineBoxHeight(para.lineSpacing, l.ascent, l.descent, 1, measureState.docGrid, paraHasRuby);
@@ -735,7 +742,7 @@ function renderParagraph(
    *  used by the paginator to split paragraphs that don't fit on one page. */
   lineSlice?: { start: number; end: number },
 ): void {
-  const { ctx, scale, contentX, contentW, defaultColor, dryRun } = state;
+  const { ctx, scale, contentX, contentW, defaultColor, dryRun, fontFamilyClasses } = state;
   // Capture Y before spaceBefore — used for paragraph-relative anchor image positioning
   const paragraphStartY = state.y;
 
@@ -801,7 +808,7 @@ function renderParagraph(
     pageH: state.pageH,
   } : undefined;
 
-  const lines = layoutLines(ctx, segments, paraW, firstLineX - paraX, scale, para.tabStops, wrapCtx);
+  const lines = layoutLines(ctx, segments, paraW, firstLineX - paraX, scale, para.tabStops, wrapCtx, state.fontFamilyClasses);
 
   // For paragraphs that carry any ruby annotation, Word renders every line
   // at the SAME height. Per the user's note: when the section's docGrid is
@@ -940,7 +947,7 @@ function renderParagraph(
           : s.vertAlign === 'sub'
             ? s.fontSize * scale * 0.15
             : 0;
-        ctx.font = buildFont(s.bold, s.italic, effSizePx, s.fontFamily);
+        ctx.font = buildFont(s.bold, s.italic, effSizePx, s.fontFamily, fontFamilyClasses);
 
         if (s.highlight) {
           ctx.fillStyle = HIGHLIGHT_COLORS[s.highlight] ?? '#FFFF00';
@@ -953,7 +960,7 @@ function renderParagraph(
         // Ruby annotation: small text centered above the base glyphs.
         if (s.ruby) {
           const rubySizePx = s.ruby.fontSizePt * scale;
-          const rubyFont = buildFont(s.bold, s.italic, rubySizePx, s.fontFamily);
+          const rubyFont = buildFont(s.bold, s.italic, rubySizePx, s.fontFamily, fontFamilyClasses);
           ctx.save();
           ctx.font = rubyFont;
           const rubyW = ctx.measureText(s.ruby.text).width;
@@ -1277,6 +1284,7 @@ function layoutLines(
   scale: number,
   tabStops: TabStop[] = [],
   wrapCtx?: WrapLayoutCtx,
+  fontFamilyClasses: Record<string, string> = {},
 ): LayoutLine[] {
   const lines: LayoutLine[] = [];
   let currentLine: (LayoutTextSeg | LayoutImageSeg | LayoutTabSeg)[] = [];
@@ -1415,7 +1423,7 @@ function layoutLines(
   const effectiveFontPx = (s: LayoutTextSeg): number => calcEffectiveFontPx(s, scale);
 
   const measureText = (s: LayoutTextSeg): TextMetrics => {
-    ctx.font = buildFont(s.bold, s.italic, effectiveFontPx(s), s.fontFamily);
+    ctx.font = buildFont(s.bold, s.italic, effectiveFontPx(s), s.fontFamily, fontFamilyClasses);
     return ctx.measureText(s.text);
   };
 
@@ -1522,7 +1530,7 @@ function layoutLines(
     } else if (hasCJKBreakOpportunity(s.text)) {
       // CJK overflow: split at the maximum prefix that fits, re-queue the tail
       const available = availW() - currentWidth;
-      ctx.font = buildFont(s.bold, s.italic, effectiveFontPx(s), s.fontFamily);
+      ctx.font = buildFont(s.bold, s.italic, effectiveFontPx(s), s.fontFamily, fontFamilyClasses);
       const prefix = available > 0 ? fitCJKPrefix(ctx, s.text, available) : '';
       if (prefix.length > 0) {
         const pm = ctx.measureText(prefix);
@@ -1854,7 +1862,7 @@ function renderAnchorShape(shape: ShapeRun, state: RenderState, paragraphTopPx: 
   // sits on top of the panel. Rotation is intentionally not applied to body
   // text — the cover-template usage we care about uses anchor-only text.
   if (shape.textBlocks && shape.textBlocks.length > 0) {
-    renderShapeText(shape, x, y, w, h, ctx as CanvasRenderingContext2D, scale);
+    renderShapeText(shape, x, y, w, h, ctx as CanvasRenderingContext2D, scale, state.fontFamilyClasses);
   }
 }
 
@@ -1866,6 +1874,7 @@ function renderShapeText(
   x: number, y: number, w: number, h: number,
   ctx: CanvasRenderingContext2D,
   scale: number,
+  fontFamilyClasses: Record<string, string> = {},
 ): void {
   const blocks = shape.textBlocks ?? [];
   const lIns = (shape.textInsetL ?? 0) * scale;
@@ -1894,7 +1903,7 @@ function renderShapeText(
   for (let i = 0; i < blocks.length; i++) {
     const block = blocks[i];
     const fontPx = block.fontSizePt * scale;
-    ctx.font = buildFont(block.bold ?? false, block.italic ?? false, fontPx, block.fontFamily ?? null);
+    ctx.font = buildFont(block.bold ?? false, block.italic ?? false, fontPx, block.fontFamily ?? null, fontFamilyClasses);
     ctx.fillStyle = block.color ? `#${block.color}` : '#000000';
     const m = ctx.measureText(block.text);
     let tx = innerX;
@@ -2072,7 +2081,7 @@ function measureParaHeight(
     const { asc, desc } = emptyLineNaturalPx(fs, scale);
     return lineBoxHeight(para.lineSpacing, asc, desc, scale, state.docGrid, paraHasRuby);
   }
-  const lines = layoutLines(state.ctx, segs, maxWidth, 0, scale, para.tabStops);
+  const lines = layoutLines(state.ctx, segs, maxWidth, 0, scale, para.tabStops, undefined, state.fontFamilyClasses);
   return lines.reduce((s, l) => s + lineBoxHeight(para.lineSpacing, l.ascent, l.descent, scale, state.docGrid, paraHasRuby), 0);
 }
 
@@ -2264,31 +2273,60 @@ function calcEffectiveFontPx(s: LayoutTextSeg, scale: number): number {
   return size;
 }
 
-function buildFont(bold: boolean, italic: boolean, sizePx: number, family: string | null): string {
+function buildFont(
+  bold: boolean,
+  italic: boolean,
+  sizePx: number,
+  family: string | null,
+  fontFamilyClasses: Record<string, string> = {},
+): string {
   const w = bold ? 'bold' : 'normal';
   const s = italic ? 'italic' : 'normal';
-  const f = normalizeFontFamily(family);
+  const f = normalizeFontFamily(family, fontFamilyClasses);
   return `${s} ${w} ${sizePx}px ${f}`;
 }
 
-function normalizeFontFamily(family: string | null): string {
+/** Resolve a requested font-family name to a CSS font-family string with
+ *  appropriate fallback chain.
+ *
+ *  Classification priority:
+ *  1. `fontFamilyClasses` map (from `word/fontTable.xml` §17.8.3.10):
+ *     - "roman"      → serif
+ *     - "swiss"      → sans-serif
+ *     - "modern"     → monospace
+ *     - "script"/"decorative" → sans-serif fallback
+ *     - "auto" / absent       → fall through to step 2
+ *  2. Name-pattern matching (fallback for fonts absent from fontTable, or
+ *     where fontTable says "auto"). Retained as a safety net for theme fonts
+ *     and system fonts that OOXML docs do not list in fontTable.xml.
+ */
+function normalizeFontFamily(
+  family: string | null,
+  fontFamilyClasses: Record<string, string> = {},
+): string {
   if (!family) return '"Noto Sans JP", "Hiragino Sans", "Meiryo", sans-serif';
 
-  // 1) Always lead with the requested family verbatim. If the user has it
-  //    installed (or a webfont is registered for it) the canvas resolver
-  //    picks it up; downstream entries are fallbacks for missing fonts.
-  // 2) Detect serif (Mincho) vs sans-serif (Gothic / Sans) from the family
-  //    name. ECMA-376 doesn't carry a generic-family hint, so we inspect
-  //    the typeface name for the well-known Japanese / Latin serif
-  //    markers ("明朝", "Mincho", "Times", "Caladea", …) and the
-  //    sans-serif ones ("ゴシック", "Gothic", "Sans", "Calibri", "Meiryo", …).
-  //    Without this, every Japanese font fell through the heuristic and
-  //    rendered as Gothic — sample-5 dream text in 游明朝 came out in
-  //    Yu Gothic instead of the requested Mincho serif.
   const escape = (s: string) => s.replace(/"/g, '\\"');
   const head = `"${escape(family)}"`;
   const lower = family.toLowerCase();
 
+  // 1) Authoritative classification from word/fontTable.xml §17.8.3.10.
+  const tableClass = fontFamilyClasses[family];
+  if (tableClass && tableClass !== 'auto') {
+    switch (tableClass) {
+      case 'roman':
+        return `${head}, "Yu Mincho", "YuMincho", "Hiragino Mincho ProN", "MS Mincho", "Noto Serif JP", "Noto Serif", serif`;
+      case 'swiss':
+        return `${head}, "Noto Sans JP", "Hiragino Sans", "Meiryo", sans-serif`;
+      case 'modern':
+        return `${head}, "Courier New", monospace`;
+      default:
+        // script / decorative — fall through to name-pattern matching
+        break;
+    }
+  }
+
+  // 2) Name-pattern fallback for fonts absent from fontTable or classified "auto".
   const isSerif =
     family.includes('明朝') ||
     family.includes('明朝体') ||
@@ -2311,12 +2349,9 @@ function normalizeFontFamily(family: string | null): string {
     family.includes('Noto Serif');
 
   if (isSerif) {
-    // Japanese serif fallback chain — prefers Yu Mincho (Japan) → Hiragino
-    // Mincho ProN (macOS) → MS Mincho (Windows) → Noto Serif JP (web).
     return `${head}, "Yu Mincho", "YuMincho", "Hiragino Mincho ProN", "MS Mincho", "Noto Serif JP", "Noto Serif", serif`;
   }
 
-  // Sans-serif specific known fonts.
   if (lower.includes('meiryo') || family.includes('メイリオ')) {
     return `${head}, "Meiryo UI", "Meiryo", "Noto Sans JP", "Hiragino Sans", sans-serif`;
   }
@@ -2329,7 +2364,6 @@ function normalizeFontFamily(family: string | null): string {
   if (lower.includes('segoe')) {
     return `${head}, "Segoe UI", sans-serif`;
   }
-  // Generic Japanese / Latin sans-serif fallback chain.
   return `${head}, "Noto Sans JP", "Hiragino Sans", "Meiryo", sans-serif`;
 }
 

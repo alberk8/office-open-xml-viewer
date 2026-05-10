@@ -1625,6 +1625,14 @@ fn parse_wsp_shape(
 
 /// Extract text blocks and bodyPr from a wsp shape.
 /// Returns (blocks, anchor, inset_l, inset_t, inset_r, inset_b).
+///
+/// Per ECMA-376 §21.1.2.1.1, lIns/tIns/rIns/bIns are the distance from
+/// the rendered (page-space) bounding-box edge to the text, measured in
+/// page-space EMU. They are independent of any enclosing group's coordinate
+/// transform — the rendered shape edge and the rendered text position both
+/// live in page space, so the inset is invariant to the group's sx/sy scale.
+/// Defaults follow §21.1.2.1.1: lIns=rIns=91440 EMU (0.1in = 7.2pt),
+/// tIns=bIns=45720 EMU (0.05in = 3.6pt).
 fn parse_shape_text_body(
     wsp: roxmltree::Node,
     theme: &ThemeColors,
@@ -1636,10 +1644,11 @@ fn parse_shape_text_body(
         .and_then(|b| b.attribute("anchor"))
         .map(|s| s.to_string());
     let emu_to_pt = |v: &str| v.parse::<f64>().ok().map(|e| e / 12700.0).unwrap_or(0.0);
-    let l = body_pr.and_then(|b| b.attribute("lIns")).map(emu_to_pt).unwrap_or(0.0);
-    let t = body_pr.and_then(|b| b.attribute("tIns")).map(emu_to_pt).unwrap_or(0.0);
-    let r = body_pr.and_then(|b| b.attribute("rIns")).map(emu_to_pt).unwrap_or(0.0);
-    let b = body_pr.and_then(|b| b.attribute("bIns")).map(emu_to_pt).unwrap_or(0.0);
+    // ECMA-376 §21.1.2.1.1 defaults: lIns=rIns=91440 EMU, tIns=bIns=45720 EMU
+    let l = body_pr.and_then(|b| b.attribute("lIns")).map(emu_to_pt).unwrap_or(91440.0 / 12700.0);
+    let t = body_pr.and_then(|b| b.attribute("tIns")).map(emu_to_pt).unwrap_or(45720.0 / 12700.0);
+    let r = body_pr.and_then(|b| b.attribute("rIns")).map(emu_to_pt).unwrap_or(91440.0 / 12700.0);
+    let b = body_pr.and_then(|b| b.attribute("bIns")).map(emu_to_pt).unwrap_or(45720.0 / 12700.0);
 
     let blocks: Vec<ShapeText> = txbx
         .and_then(|t| t.children().find(|n| n.is_element() && n.tag_name().name() == "txbxContent"))

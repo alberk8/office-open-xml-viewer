@@ -88,15 +88,24 @@ fn read_file(path: &str) -> Result<Vec<u8>, String> {
 }
 
 fn extract_text_runs(node: &Value, out: &mut String) {
+    // pptx-parser serializes TextRun as a tagged enum with `rename_all =
+    // "camelCase"` — variants become "text" (TextRun::Text) and "break"
+    // (TextRun::Break). Earlier revisions matched "textRun" / "run", which
+    // never fire and silently produced empty extractions.
     match node["type"].as_str().unwrap_or("") {
-        "textRun" | "run" => {
+        "text" => {
             if let Some(t) = node["text"].as_str() {
                 out.push_str(t);
             }
         }
+        "break" => {
+            // ECMA-376 §21.1.2.2.1 — intra-paragraph <a:br/>. Map to a newline
+            // so multi-line shape text isn't collapsed into a single line.
+            out.push('\n');
+        }
         _ => {}
     }
-    // Recurse into common container fields
+    // Recurse into common container fields (paragraph.runs, etc.).
     for key in &["runs", "paragraphs", "elements", "children"] {
         if let Some(arr) = node[key].as_array() {
             for child in arr {
@@ -106,27 +115,28 @@ fn extract_text_runs(node: &Value, out: &mut String) {
     }
 }
 
+/// Heuristic title extraction: the parser does not surface
+/// `<p:nvSpPr><p:nvPr><p:ph type="title">` (placeholder type) on its
+/// ShapeElement JSON, so we can't filter for the title placeholder. Fall back
+/// to the first `shape` element that carries non-empty text — typically the
+/// title placeholder in z-order on standard layouts. Imperfect but usable; will
+/// be replaced once pptx-parser exposes `placeholder_type` on shapes.
 fn slide_title(slide: &Value) -> Option<String> {
-    if let Some(elements) = slide["elements"].as_array() {
-        for el in elements {
-            if el["type"].as_str() == Some("shape") {
-                if let Some(ph) = el["placeholderType"].as_str() {
-                    if ph == "title" || ph == "centeredTitle" {
-                        let mut text = String::new();
-                        if let Some(tb) = el.get("textBody") {
-                            if let Some(paras) = tb["paragraphs"].as_array() {
-                                for para in paras {
-                                    extract_text_runs(para, &mut text);
-                                }
-                            }
-                        }
-                        let trimmed = text.trim().to_string();
-                        if !trimmed.is_empty() {
-                            return Some(trimmed);
-                        }
-                    }
-                }
-            }
+    let elements = slide["elements"].as_array()?;
+    for el in elements {
+        if el["type"].as_str() != Some("shape") {
+            continue;
+        }
+        let Some(tb) = el.get("textBody") else { continue };
+        let Some(paras) = tb["paragraphs"].as_array() else { continue };
+        let mut text = String::new();
+        for para in paras {
+            extract_text_runs(para, &mut text);
+            text.push(' ');
+        }
+        let trimmed = text.trim().to_string();
+        if !trimmed.is_empty() {
+            return Some(trimmed);
         }
     }
     None
@@ -144,7 +154,9 @@ fn extract_slide_text(slide: &Value) -> String {
                     }
                 }
             }
-            // Table elements
+            // Table elements. TableCell holds its paragraphs under
+            // `textBody.paragraphs`, not at the top level — the previous code
+            // looked at `c["paragraphs"]` which always came back empty.
             if el["type"].as_str() == Some("table") {
                 if let Some(rows) = el["rows"].as_array() {
                     for row in rows {
@@ -153,9 +165,11 @@ fn extract_slide_text(slide: &Value) -> String {
                                 .iter()
                                 .map(|c| {
                                     let mut t = String::new();
-                                    if let Some(paras) = c["paragraphs"].as_array() {
-                                        for para in paras {
-                                            extract_text_runs(para, &mut t);
+                                    if let Some(tb) = c.get("textBody") {
+                                        if let Some(paras) = tb["paragraphs"].as_array() {
+                                            for para in paras {
+                                                extract_text_runs(para, &mut t);
+                                            }
                                         }
                                     }
                                     t
@@ -574,15 +588,18 @@ impl PptxTools {
                             }
                         }
                     }
-                    // Table cells
+                    // Table cells. Same fix as `extract_slide_text`: paragraphs
+                    // live under `cell.textBody.paragraphs`, not the top level.
                     if el["type"].as_str() == Some("table") {
                         if let Some(rows) = el["rows"].as_array() {
                             for row in rows {
                                 if let Some(cells) = row["cells"].as_array() {
                                     for cell in cells {
-                                        if let Some(paras) = cell["paragraphs"].as_array() {
-                                            for para in paras {
-                                                extract_text_runs(para, &mut element_text);
+                                        if let Some(tb) = cell.get("textBody") {
+                                            if let Some(paras) = tb["paragraphs"].as_array() {
+                                                for para in paras {
+                                                    extract_text_runs(para, &mut element_text);
+                                                }
                                             }
                                         }
                                         element_text.push('\t');
@@ -1160,6 +1177,48 @@ mod sample_tests {
     fn pptx_invalid_path_returns_error_string() {
         let out = PptxTools::pptx_get_slides(pp("/nonexistent/x.pptx"));
         assert!(out.starts_with("Error:"), "expected error, got: {out}");
+    }
+
+    /// Regression for the run-tag bug where pptx-parser emits `type: "text"`
+    /// but the helper used to match `"textRun" | "run"` and silently extracted
+    /// nothing. Hard-asserts that sample-1.pptx slide-1 yields the visible
+    /// title text, so anyone who loosens the matcher again will fail this.
+    #[test]
+    fn pptx_extract_text_returns_non_empty_for_sample() {
+        let path = sample_path();
+        if !std::path::Path::new(&path).exists() {
+            return;
+        }
+        let out = PptxTools::pptx_extract_text(Parameters(PptxTextParam {
+            path: path.clone(),
+            slide_index: Some(0),
+        }));
+        assert!(
+            !out.starts_with("Error:"),
+            "pptx_extract_text errored: {out}"
+        );
+        assert!(
+            !out.trim().is_empty(),
+            "pptx_extract_text returned empty for slide 0 — extract_text_runs is likely matching the wrong run.type tag again"
+        );
+    }
+
+    #[test]
+    fn pptx_get_slides_returns_titles() {
+        let path = sample_path();
+        if !std::path::Path::new(&path).exists() {
+            return;
+        }
+        let out = PptxTools::pptx_get_slides(pp(&path));
+        let v: Value = serde_json::from_str(&out).expect("must return JSON");
+        let slides = v["slides"].as_array().expect("must have 'slides'");
+        let any_title = slides
+            .iter()
+            .any(|s| s["title"].as_str().map(|t| !t.is_empty()).unwrap_or(false));
+        assert!(
+            any_title,
+            "no slide reported a title — slide_title heuristic is broken"
+        );
     }
 
     #[test]

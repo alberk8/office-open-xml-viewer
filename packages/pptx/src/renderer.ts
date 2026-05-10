@@ -873,7 +873,16 @@ function renderTextBody(
   const rPad = emuToPx(body.rIns, scale);
   const tPad = emuToPx(body.tIns, scale);
   const bPad = emuToPx(body.bIns, scale);
-  const doWrap = body.wrap !== 'none';
+  // ECMA-376 §20.1.10.5 spAutoFit: "the shape's height and width should resize
+  // to accommodate the text". The bbox is no longer a wrap boundary in that
+  // mode — the shape grows to fit. Treating spAutoFit as wrap=none on the
+  // horizontal axis keeps mixed-size sequences (e.g. "20代", "YoY+11.9%")
+  // on one line, matching PowerPoint. Vertical growth is handled below by
+  // the spAutoFit branch in the height calculation.
+  const doWrap = body.wrap !== 'none' && body.autoFit !== 'sp';
+  // ECMA-376 §20.1.10.34 numCol — distribute paragraphs across N text columns.
+  const numCol = Math.max(1, body.numCol ?? 1);
+  const spcColPx = emuToPx(body.spcCol ?? 0, scale);
 
   const bodyDefaultBold   = body.defaultBold   ?? false;
   const bodyDefaultItalic = body.defaultItalic ?? false;
@@ -968,12 +977,20 @@ function renderTextBody(
       autoNumCounters.clear();
     }
 
-    // Text start X and wrap width
-    // For bullet paragraphs: text always at marL, bullet at marL+indent (hanging)
-    // For non-bullet with positive indent: first line at marL+indent, others at marL
+    // Text start X and wrap width.
+    //
+    // ECMA-376 §20.1.10.34 numCol — the bbox is split into N equal columns
+    // separated by `spcCol` gutters, and paragraphs flow column-by-column.
+    // For Pass 1 we lay out at the column width so wrapping & line counts are
+    // correct; Pass 2 reuses the same lines and just shifts the X origin per
+    // column. textX/bulletX below are relative to column 0; the column shift
+    // is added later when we walk `allLines`.
+    const colWidth = numCol > 1
+      ? (bw - lPad - rPad - (numCol - 1) * spcColPx) / numCol
+      : bw - lPad - rPad;
     const textX    = bx + lPad + marLPx;
     const bulletX  = bx + lPad + marLPx + indentPx;
-    const textMaxW = bw - lPad - rPad - marLPx - marRPx;
+    const textMaxW = colWidth - marLPx - marRPx;
 
     const maxW = doWrap ? textMaxW : Infinity;
     const lines = layoutParagraph(ctx, para, maxW, paraDefaultFontSizePx, paraDefaultColor, scale, marLPx, bodyDefaultBold, bodyDefaultItalic, fontScale, slideNumber, rc);
@@ -1094,9 +1111,38 @@ function renderTextBody(
   // `body.wrap === "none"` means horizontal non-wrap; it doesn't affect
   // clipping per spec either, so we just don't clip.
 
+  // Multi-column flow state. When numCol > 1 we walk the lines top-to-bottom
+  // and advance to the next column whenever the current column's content
+  // height would be exceeded. Column 0 starts at the initial cursorY; each
+  // subsequent column resets the cursor and shifts X by colWidth + spcCol.
+  // When numCol === 1 these stay at 0 / `cursorY` / and never advance.
+  let colIdx = 0;
+  const colTopY = cursorY;
+  const colWidthShift = numCol > 1
+    ? (bw - lPad - rPad - (numCol - 1) * spcColPx) / numCol + spcColPx
+    : 0;
+  const colHeight = Math.max(0, effectiveBh - tPad - bPad);
+
   for (const entry of allLines) {
-    const { line, linePx, lineHeight, topGapPx, textXOffset, bulletLabel, bulletFont, bulletColor, bulletX, textX, textMaxW, alignment } = entry;
+    const { line, linePx, lineHeight, topGapPx, textXOffset, bulletLabel, bulletFont, bulletColor, alignment } = entry;
     cursorY += topGapPx;
+    // Advance to the next column when the current line would not fit. We only
+    // advance once per line (PowerPoint never breaks a single line across
+    // columns) and never past the last column — anything that overflows the
+    // last column simply runs past the bbox, matching PPT's spill behavior.
+    if (
+      numCol > 1 &&
+      colIdx < numCol - 1 &&
+      cursorY - colTopY + linePx > colHeight + 0.5 &&
+      cursorY > colTopY
+    ) {
+      colIdx++;
+      cursorY = colTopY + topGapPx;
+    }
+    const xShift = colIdx * colWidthShift;
+    const textX = entry.textX + xShift;
+    const bulletX = entry.bulletX + xShift;
+    const textMaxW = entry.textMaxW;
 
     // Measure line for alignment AND baseline ascent in one pass.
     // actualBoundingBoxAscent gives the real font ascent for the rendered glyphs,

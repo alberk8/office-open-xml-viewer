@@ -1881,8 +1881,12 @@ function renderWaterfallChart(ctx: CanvasRenderingContext2D, chart: ChartModel, 
   const rawMin = Math.min(...allStarts, 0);
   const dataRange = rawMax - rawMin;
   if (dataRange <= 0) return;
-  const padded = dataRange * 1.1;
-  const dataMin = rawMin - dataRange * 0.05;
+  // PowerPoint anchors waterfall bars to value=0 when all data is non-negative
+  // (the x-axis sits flush against the bar bases). Adding a 5% pad below 0
+  // would lift the bars off the axis. Only pad when there are actual negatives
+  // to display below zero.
+  const dataMin = rawMin < 0 ? rawMin - dataRange * 0.05 : 0;
+  const padded = (rawMax - dataMin) * 1.1;
   const dataMax = dataMin + padded;
 
   const step = niceStep(padded);

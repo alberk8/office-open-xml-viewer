@@ -138,6 +138,14 @@ export interface TextBody {
   vert: string;
   /** Auto-fit: "sp" = shape grows to fit text, "norm" = font shrinks, "none" = no fit */
   autoFit: string;
+  /**
+   * `<a:bodyPr numCol>` (ECMA-376 §20.1.10.34) — number of text columns inside
+   * the shape. Defaults to 1; values > 1 cause the renderer to flow paragraphs
+   * across N columns left-to-right, top-to-bottom.
+   */
+  numCol?: number;
+  /** `<a:bodyPr spcCol>` — gap between columns in EMU. Default 0. */
+  spcCol?: number;
 }
 
 export type SpaceLine =

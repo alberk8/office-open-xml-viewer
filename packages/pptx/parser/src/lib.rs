@@ -543,7 +543,22 @@ struct TextBody {
     vert: String,
     /// Auto-fit mode from bodyPr: "sp" = spAutoFit (shape grows), "norm" = normAutoFit (font shrinks), "none" = noAutofit
     auto_fit: String,
+    /// `<a:bodyPr numCol>` (ECMA-376 §20.1.10.34 / §21.1.2.1.1) — number of
+    /// text columns inside the shape. Default 1. PowerPoint distributes
+    /// paragraphs across columns left-to-right, top-to-bottom.
+    #[serde(skip_serializing_if = "is_one")]
+    #[serde(default = "one_u32")]
+    num_col: u32,
+    /// `<a:bodyPr spcCol>` — gap between columns in EMU. Default 0.
+    /// Only meaningful when `num_col > 1`.
+    #[serde(skip_serializing_if = "is_zero_i64")]
+    #[serde(default)]
+    spc_col: i64,
 }
+
+fn one_u32() -> u32 { 1 }
+fn is_one(n: &u32) -> bool { *n == 1 }
+fn is_zero_i64(n: &i64) -> bool { *n == 0 }
 
 /// Line spacing specification
 #[derive(Serialize, Deserialize, Debug)]
@@ -2142,6 +2157,17 @@ fn parse_text_body(
         else if child(n, "normAutofit").is_some() { "norm".to_owned() }
         else { "none".to_owned() }
     }).unwrap_or_else(|| "none".to_owned());
+    // ECMA-376 §20.1.10.34: numCol on <a:bodyPr> tells the renderer to
+    // distribute paragraphs across N columns within the shape. Default 1.
+    // spcCol is the inter-column gutter in EMU (default 0).
+    let num_col = body_pr
+        .and_then(|n| attr(&n, "numCol"))
+        .and_then(|v| v.parse::<u32>().ok())
+        .filter(|&n| n >= 1)
+        .unwrap_or(1);
+    let spc_col = body_pr
+        .and_then(|n| attr_i64(&n, "spcCol"))
+        .unwrap_or(0);
 
     // Own lstStyle > lvl1pPr, then fall back to layout/master inherited values
     let own_lvl1_ppr = child(tx_body, "lstStyle")
@@ -2186,7 +2212,7 @@ fn parse_text_body(
         .map(|p| parse_paragraph(p, theme, rels, body_default_alignment.as_deref(), body_default_space_before, body_default_space_after, body_default_line_spacing))
         .collect();
 
-    TextBody { vertical_anchor, paragraphs, default_font_size, default_bold, default_italic, l_ins, r_ins, t_ins, b_ins, wrap, vert, auto_fit }
+    TextBody { vertical_anchor, paragraphs, default_font_size, default_bold, default_italic, l_ins, r_ins, t_ins, b_ins, wrap, vert, auto_fit, num_col, spc_col }
 }
 
 fn parse_paragraph(

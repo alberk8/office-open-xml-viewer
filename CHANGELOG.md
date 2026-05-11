@@ -4,6 +4,22 @@ All notable changes to @silurus/ooxml are documented here. The project follows
 semantic versioning; minor releases add spec-compliant features or behavior
 changes that remain compatible with existing API surfaces.
 
+## 0.33.0 — 2026-05-11
+
+MCP-server-focused release introducing a **text-focused projection** tier alongside the rich structured tools. Renderer is unchanged from 0.32.1 (demo VRT 20/20 at 100% match).
+
+### Features
+
+- **mcp-server**: `pptx_to_markdown`, `docx_to_markdown`, `xlsx_to_markdown` — convert OOXML files to GitHub-flavoured markdown, designed for AI agents that need to *read* content efficiently rather than reason about layout. Each parser exposes a native `to_markdown_native(data)` projection that walks the already-parsed model and emits semantic markdown:
+  - **PPTX**: slide titles via `placeholderType ∈ {title, ctrTitle}`, body shapes as nested bullets at the paragraph `lvl` depth, tables, chart summaries, speaker notes, comments. Auto-generated metadata placeholders (`sldNum`/`dt`/`ftr`/`hdr`) and decorative pictures/connectors are dropped.
+  - **DOCX**: headings via `<w:outlineLvl>` → `#`-`######`, numbered/bullet paragraphs honour the resolved abstractNum format, tables with vMerge continuation, footnotes/endnotes collated as `[^N]: …`, comments as `> **author**: text`. Per-run `**bold**` / `*italic*` / `~~strikethrough~~` / `[link](url)` preserved with whitespace pulled outside the wrappers.
+  - **XLSX**: `## SheetName` per sheet followed by a pipe table of the populated bbox, merged-cell continuation cells rendered empty, fully-empty middle rows trimmed, IEEE-754 ULP noise masked so `702.6` no longer renders as `702.5999999999999`.
+- For demo/sample-1.pptx the markdown is ~21× smaller than the raw XML, ~3× smaller than the structured tools, and only ~8% bigger than the flat-text extractor.
+
+### Fixes
+
+- **mcp-server/xlsx**: `xlsx_get_cell_range`, `xlsx_get_formulas`, and `xlsx_search_cells` were matching the wrong CellValue serde tag (PascalCase `"Text"`/`"Number"` vs. the camelCase `"text"`/`"number"` actually emitted), silently returning empty strings for every cell value since these tools were introduced in 0.32.0. Same class of bug as the v0.32.0 `pptx_extract_text` fix. Caught while testing the new `xlsx_to_markdown` against demo/sample-1.xlsx; the regression window is exactly one release.
+
 ## 0.32.1 — 2026-05-11
 
 Two bug fixes that surfaced shortly after 0.32.0. Renderer is unchanged from 0.32.0.

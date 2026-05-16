@@ -522,10 +522,11 @@ export const PptxViewerComponent = component$<{ src: string }>(({ src }) => {
 
 ---
 
-## Exporting to PNG / PDF
+## Exporting to PNG
 
 PPTX and DOCX viewers can export the rendered output to PNG (per page or all
-pages) and PDF (multi-page, PNG-embedded):
+pages). Zero runtime dependencies — pages are rendered to an off-screen
+canvas and encoded via `canvas.toBlob('image/png')`.
 
 ```typescript
 const viewer = new PptxViewer(canvas);
@@ -536,14 +537,12 @@ const png = await viewer.exportCurrentSlideToPng({ width: 1920, dpr: 2 });
 
 // Every slide as PNG (in slide order)
 const pngs = await viewer.exportAllSlidesToPng();
-
-// Whole deck as a single PDF
-const pdf = await viewer.exportToPdf();
 ```
 
-PDF assembly uses `pdf-lib` (lazy-imported — bundles that never call
-`exportToPdf` pay no cost). Page sizes in the PDF are derived from the
-source: EMU for PPTX, points from `<w:sectPr>` for DOCX.
+PDF stitching is intentionally left to the caller — the library stays
+zero-dependency, but every PNG returned here carries `pixelWidth` /
+`pixelHeight` / `pointWidth` / `pointHeight` (in PDF points), so you can
+feed them straight into `pdf-lib` or jsPDF in your own code.
 
 ---
 

@@ -32,12 +32,8 @@ export const PngAndPdf: Story = {
     exportPngBtn.disabled = true;
 
     const exportAllPngBtn = document.createElement('button');
-    exportAllPngBtn.textContent = 'Export all → ZIP-less PNGs (download each)';
+    exportAllPngBtn.textContent = 'Export all → PNGs (download each)';
     exportAllPngBtn.disabled = true;
-
-    const exportPdfBtn = document.createElement('button');
-    exportPdfBtn.textContent = 'Export deck → PDF';
-    exportPdfBtn.disabled = true;
 
     const status = document.createElement('span');
     status.style.cssText = 'font-size:13px;color:#444;';
@@ -45,7 +41,7 @@ export const PngAndPdf: Story = {
     const useDemoBtn = document.createElement('button');
     useDemoBtn.textContent = 'Load demo sample-1.pptx';
 
-    toolbar.append(useDemoBtn, fileInput, exportPngBtn, exportAllPngBtn, exportPdfBtn, status);
+    toolbar.append(useDemoBtn, fileInput, exportPngBtn, exportAllPngBtn, status);
     root.append(toolbar);
 
     const container = document.createElement('div');
@@ -60,7 +56,6 @@ export const PngAndPdf: Story = {
         status.textContent = `Slide ${i + 1} / ${total}`;
         exportPngBtn.disabled = false;
         exportAllPngBtn.disabled = false;
-        exportPdfBtn.disabled = false;
       },
       onError: (err) => { status.textContent = `Error: ${err.message}`; },
     });
@@ -94,13 +89,6 @@ export const PngAndPdf: Story = {
       const blobs = await viewer.exportAllSlidesToPng();
       blobs.forEach((b, i) => triggerDownload(b, `slide-${i + 1}.png`));
       status.textContent = `${blobs.length} PNGs queued for download`;
-    });
-
-    exportPdfBtn.addEventListener('click', async () => {
-      status.textContent = 'Building PDF…';
-      const pdf = await viewer.exportToPdf();
-      triggerDownload(pdf, `deck.pdf`);
-      status.textContent = `PDF ready (${(pdf.size / 1024).toFixed(0)} KB)`;
     });
 
     return root;

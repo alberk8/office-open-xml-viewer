@@ -202,12 +202,6 @@ export class PptxViewer {
     return this.engine.exportAllSlidesToPng(opts);
   }
 
-  /** Export the deck as a multi-page PDF (PNG-embedded). */
-  exportToPdf(opts?: { width?: number; dpr?: number }): Promise<Blob> {
-    if (!this.engine) throw new Error('Presentation not loaded');
-    return this.engine.exportToPdf(opts);
-  }
-
   /** Clean up the viewer and terminate the background worker. */
   destroy(): void {
     this.handle?.dispose();

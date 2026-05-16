@@ -129,13 +129,6 @@ export class DocxDocument {
     return bitmaps.map((b) => b.blob);
   }
 
-  /** Export every page into a single multi-page PDF blob (PNG-embedded). */
-  async exportToPdf(opts: { width?: number; dpr?: number } = {}): Promise<Blob> {
-    const { renderAllPagesToPng, pagesToPdfBlob } = await import('@silurus/ooxml-core');
-    const bitmaps = await renderAllPagesToPng(this._exportContext(), opts);
-    return pagesToPdfBlob(bitmaps);
-  }
-
   /** @internal Build the shared `RenderPageToCanvasContext`. */
   private _exportContext() {
     const doc = this._document;

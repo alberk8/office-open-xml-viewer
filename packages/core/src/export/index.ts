@@ -1,11 +1,8 @@
 /**
  * Shared multi-page export primitives. Each format package re-exports a
  * format-specific wrapper that fills in the renderer; the heavy lifting
- * (offscreen canvas, PNG encoding, multi-page PDF assembly via pdf-lib)
- * lives here so the three viewers stay in sync.
- *
- * pdf-lib is a lazy import — bundles that don't call `pagesToPdfBlob`
- * never pull it in.
+ * (offscreen canvas + PNG encoding) lives here so the three viewers stay
+ * in sync.
  */
 
 export interface PageBitmap {
@@ -16,7 +13,8 @@ export interface PageBitmap {
   /** Pixel dimensions of the PNG (multiplied by dpr already). */
   pixelWidth: number;
   pixelHeight: number;
-  /** Page size in points (PDF units = 1/72 inch). Used when assembling PDFs. */
+  /** Page size in points (1/72 inch). Surfaced so callers writing their own
+   *  PDF / SVG assembler have a single source of truth for page geometry. */
   pointWidth: number;
   pointHeight: number;
 }
@@ -27,8 +25,7 @@ export interface RenderPageToCanvasContext {
   /** Draw a page onto a caller-supplied canvas. Implementations should
    *  size the canvas appropriately for the requested width / dpr. */
   renderPage: (canvas: HTMLCanvasElement, pageIndex: number, opts: { width: number; dpr: number }) => Promise<void>;
-  /** Convert a logical width (px in the rendered output) to PDF points
-   *  for the page size of the given page. */
+  /** Logical page size in points (1/72 inch). */
   pageSizeInPoints: (pageIndex: number) => { widthPt: number; heightPt: number };
 }
 
@@ -71,25 +68,6 @@ export async function renderAllPagesToPng(
     out.push(await renderPageToPng(ctx, i, opts));
   }
   return out;
-}
-
-/** Stitch a list of rendered pages into a single PDF Blob via `pdf-lib`. */
-export async function pagesToPdfBlob(pages: PageBitmap[]): Promise<Blob> {
-  const { PDFDocument } = await import('pdf-lib');
-  const pdf = await PDFDocument.create();
-  for (const page of pages) {
-    const bytes = new Uint8Array(await page.blob.arrayBuffer());
-    const image = await pdf.embedPng(bytes);
-    const pdfPage = pdf.addPage([page.pointWidth, page.pointHeight]);
-    pdfPage.drawImage(image, {
-      x: 0,
-      y: 0,
-      width: page.pointWidth,
-      height: page.pointHeight,
-    });
-  }
-  const pdfBytes = await pdf.save();
-  return new Blob([pdfBytes as BlobPart], { type: 'application/pdf' });
 }
 
 function createOffscreen(): HTMLCanvasElement {

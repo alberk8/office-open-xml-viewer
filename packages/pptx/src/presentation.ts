@@ -282,13 +282,6 @@ export class PptxPresentation {
     return bitmaps.map((b) => b.blob);
   }
 
-  /** Export every slide into a single multi-page PDF blob (PNG-embedded). */
-  async exportToPdf(opts: { width?: number; dpr?: number } = {}): Promise<Blob> {
-    const { renderAllPagesToPng, pagesToPdfBlob } = await import('@silurus/ooxml-core');
-    const bitmaps = await renderAllPagesToPng(this._exportContext(), opts);
-    return pagesToPdfBlob(bitmaps);
-  }
-
   /** @internal Build the {@link RenderPageToCanvasContext} adapter used by
    *  the export helpers in `@silurus/ooxml-core`. */
   private _exportContext() {

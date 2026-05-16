@@ -16,7 +16,6 @@ export {
 export {
   renderPageToPng,
   renderAllPagesToPng,
-  pagesToPdfBlob,
   type PageBitmap,
   type RenderPageToCanvasContext,
   type ExportPngOptions,

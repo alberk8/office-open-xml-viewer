@@ -2010,14 +2010,12 @@ fn parse_worksheet(
     let mut freeze_rows: u32 = 0;
     let mut freeze_cols: u32 = 0;
     let mut default_col_width = 8.43;
-    // Intrinsic default row height in *display pixels* — Excel's baseline
-    // for the Calibri 11 normal style. ECMA-376 §18.3.1.81 nominally
-    // measures `defaultRowHeight` in points, but Excel actually writes the
-    // pixel-equivalent value (sample-27 stores `defaultRowHeight="20"` and
-    // Excel displays 20 px on screen — see the renderer-side `rowHeightToPx`
-    // comment). Storing 20 here and skipping the pt→px multiplication keeps
-    // both code paths consistent.
-    let mut default_row_height = 20.0;
+    // Intrinsic default row height in *points* — ECMA-376 §18.3.1.81.
+    // 15 pt = 20 CSS px at 96 DPI, Excel's baseline for the Calibri 11
+    // Normal style. The renderer multiplies by 4/3 at display time, so
+    // both this default and per-row `<row ht="…">` values share the
+    // same units across the parser/renderer boundary.
+    let mut default_row_height = 15.0;
     let mut conditional_formats: Vec<ConditionalFormat> = Vec::new();
     let mut show_zeros = true;
     let mut show_gridlines = true;
@@ -2207,10 +2205,22 @@ fn parse_worksheet(
             "row" if node.tag_name().namespace() == Some(ns) => {
                 let row_idx: u32 = node.attribute("r").and_then(|s| s.parse().ok()).unwrap_or(0);
                 let hidden = node.attribute("hidden").map(|v| v == "1").unwrap_or(false);
+                // ECMA-376 §18.3.1.73 `<row>@ht` is only authoritative when
+                // `@customHeight="1"`. When customHeight is absent / 0 the
+                // ht attribute is informational and Excel falls back to the
+                // workbook default (sample-27 stores ht="21" on rows 4-10
+                // without customHeight; Excel still displays them at the
+                // 20-px default rather than 21 pt × 4/3).
+                let custom_height = node
+                    .attribute("customHeight")
+                    .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                    .unwrap_or(false);
                 let height: Option<f64> = if hidden {
                     Some(0.0)
-                } else {
+                } else if custom_height {
                     node.attribute("ht").and_then(|s| s.parse().ok())
+                } else {
+                    None
                 };
                 if let Some(h) = height {
                     row_heights.insert(row_idx, h);

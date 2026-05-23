@@ -671,6 +671,11 @@ pub struct ChartData {
     /// (axes + labels included).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub plot_area_manual_layout: Option<ManualLayout>,
+    /// `<c:radarChart><c:radarStyle val>` — "standard" (line only),
+    /// "marker" (line + markers), "filled" (closed polygon with area fill).
+    /// Default per ECMA-376 §21.2.3.10 is "standard" — no area fill.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub radar_style: Option<String>,
 }
 
 /// Generic `<c:manualLayout>` block (used for title, plotArea, legend).
@@ -4093,6 +4098,7 @@ fn parse_chart_xml(xml: &str, c_ns: &str, a_ns: &str, theme_colors: &[String]) -
     let mut val_axis_crosses_at: Option<f64> = None;
     let mut bar_gap_width: Option<i32> = None;
     let mut bar_overlap: Option<i32> = None;
+    let mut radar_style: Option<String> = None;
     let mut data_label_position: Option<String> = None;
     let mut data_label_format_code: Option<String> = None;
     // Data-label text color is theme-aware, so we hoist the extraction to a
@@ -4277,6 +4283,15 @@ fn parse_chart_xml(xml: &str, c_ns: &str, a_ns: &str, theme_colors: &[String]) -
                         bar_overlap = attr_node.attribute("val").and_then(|v| v.parse().ok());
                     }
                 }
+                "radarStyle" => {
+                    // ECMA-376 §21.2.3.10 — "standard" (line only, default),
+                    // "marker" (line + markers), "filled" (closed polygon
+                    // with area fill). Only the "filled" variant should
+                    // produce a translucent area in the renderer.
+                    if radar_style.is_none() {
+                        radar_style = attr_node.attribute("val").map(|s| s.to_string());
+                    }
+                }
                 "dLbls"    => {
                     for d in attr_node.children().filter(|n| n.is_element()) {
                         match d.tag_name().name() {
@@ -4425,6 +4440,7 @@ fn parse_chart_xml(xml: &str, c_ns: &str, a_ns: &str, theme_colors: &[String]) -
         val_axis_max,
         title_manual_layout,
         plot_area_manual_layout,
+        radar_style,
     })
 }
 

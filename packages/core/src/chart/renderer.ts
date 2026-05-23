@@ -1395,21 +1395,40 @@ function renderRadarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: C
     ctx.fillText((cats[i] ?? '').toString().slice(0, 12), lx, ly);
   }
 
+  // ECMA-376 §21.2.3.10 c:radarStyle — "filled" closes the polygon with a
+  // translucent area fill; "standard" / "marker" (and default) draw the
+  // line only. Sample-1 "Biodiversity Index" uses "marker" and Excel
+  // renders no area fill, so the previous unconditional 25 %-alpha fill
+  // washed every series across the radar.
+  const filled = chart.radarStyle === 'filled';
+  const showMarkers = chart.radarStyle === 'marker' || chart.radarStyle === 'standard'
+    || chart.series.some(s => s.showMarker !== false && s.markerSymbol && s.markerSymbol !== 'none');
+  const markerRadius = Math.max(2, rd * 0.025);
   for (let si = 0; si < chart.series.length; si++) {
     const s = chart.series[si];
     const color = chartColor(si, s);
     ctx.beginPath();
+    const pts: Array<[number, number]> = [];
     for (let i = 0; i < n; i++) {
       const v = s.values[i] ?? 0;
       const frac = v / axMax;
       const a = spoke(i);
       const px = cx2 + Math.cos(a) * rd * frac;
       const py = cy2 + Math.sin(a) * rd * frac;
+      pts.push([px, py]);
       if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
     }
     ctx.closePath();
-    ctx.fillStyle = hexToRgba(color, 0.25); ctx.fill();
+    if (filled) {
+      ctx.fillStyle = hexToRgba(color, 0.25); ctx.fill();
+    }
     ctx.strokeStyle = color; ctx.lineWidth = 2; ctx.stroke();
+    if (showMarkers && !filled) {
+      ctx.fillStyle = color;
+      for (const [px, py] of pts) {
+        ctx.beginPath(); ctx.arc(px, py, markerRadius, 0, Math.PI * 2); ctx.fill();
+      }
+    }
   }
 
   drawLegendForLayout(

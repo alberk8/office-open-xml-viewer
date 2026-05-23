@@ -1972,6 +1972,7 @@ export async function renderSlide(
           valAxisFormatCode: el.valAxisFormatCode ?? null,
           plotAreaManualLayout: el.plotAreaManualLayout ?? null,
           scatterStyle: el.scatterStyle ?? null,
+          radarStyle: el.radarStyle ?? null,
         },
         {
           x: emuToPx(el.x, scale),

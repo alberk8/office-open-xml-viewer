@@ -313,6 +313,13 @@ export interface ChartModel {
    * for `chartType === "scatter"`; bubble ignores it.
    */
   scatterStyle?: string | null;
+  /**
+   * `<c:radarChart><c:radarStyle val>` (ECMA-376 §21.2.3.10). Controls
+   * whether radar series render as line + markers ("standard" / "marker")
+   * or as a closed polygon with area fill ("filled"). null = default
+   * ("standard" — line, no fill). Only consulted for `chartType === "radar"`.
+   */
+  radarStyle?: string | null;
 }
 
 /**

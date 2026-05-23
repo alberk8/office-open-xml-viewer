@@ -4496,6 +4496,7 @@ function adaptChartData(chart: ChartData): ChartModel {
     dataLabelFormatCode: chart.dataLabelFormatCode ?? null,
     titleManualLayout: chart.titleManualLayout ?? null,
     plotAreaManualLayout: chart.plotAreaManualLayout ?? null,
+    radarStyle: chart.radarStyle ?? null,
   };
 }
 

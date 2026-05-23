@@ -318,6 +318,11 @@ export interface ChartData {
   catAxisLineHidden?: boolean;
   /** `<c:valAx><c:spPr><a:ln><a:noFill>` — line-only hide (labels stay). */
   valAxisLineHidden?: boolean;
+  /** `<c:radarChart><c:radarStyle val>` — "standard" (line only, default),
+   *  "marker" (line + markers), "filled" (closed polygon with area fill).
+   *  Sample-1 "Biodiversity Index" uses "marker" — Excel renders no area
+   *  fill, but our renderer was filling at 25 % opacity regardless. */
+  radarStyle?: string | null;
   /** `<c:valAx><c:numFmt@formatCode>` — number format for value-axis tick
    *  labels (ECMA-376 §21.2.2.21). */
   valAxisFormatCode?: string | null;

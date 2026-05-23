@@ -221,6 +221,8 @@ export interface ChartElement {
   /** `<c:scatterChart><c:scatterStyle val>` (ECMA-376 §21.2.2.42) — drives
    * whether scatter charts connect points with straight or smooth lines. */
   scatterStyle?: string | null;
+  /** `<c:radarChart><c:radarStyle val>` (ECMA-376 §21.2.3.10). */
+  radarStyle?: string | null;
 }
 
 export interface PictureElement {

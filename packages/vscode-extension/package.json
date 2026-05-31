@@ -104,6 +104,7 @@
   },
   "scripts": {
     "compile": "node esbuild.config.mjs",
+    "typecheck": "tsc --noEmit",
     "watch": "node esbuild.config.mjs --watch",
     "vscode:prepublish": "node esbuild.config.mjs --production",
     "package": "vsce package"

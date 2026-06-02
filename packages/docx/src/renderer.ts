@@ -4,6 +4,7 @@ import type {
   TabStop, ParagraphBorders, ParaBorderEdge, SectionProps,
 } from './types';
 import { buildCustomPath, buildShapePath, hexToRgba, resolveFill } from '@silurus/ooxml-core';
+import { intendedSingleLinePx } from './font-metrics.js';
 
 const HIGHLIGHT_COLORS: Record<string, string> = {
   yellow: '#FFFF00', cyan: '#00FFFF', green: '#00FF00', magenta: '#FF00FF',
@@ -506,7 +507,7 @@ function estimateParagraphHeight(
   if (segs.length === 0) {
     const fs = getDefaultFontSize(para);
     const { asc, desc } = emptyLineNaturalPx(fs, 1);
-    textH = lineBoxHeight(para.lineSpacing, asc, desc, 1, state.docGrid, paraHasRuby);
+    textH = lineBoxHeight(para.lineSpacing, asc, desc, 1, state.docGrid, paraHasRuby, emptyIntendedSinglePx(para, 1));
   } else {
     // When anchor-image floats are active on the current page the paragraph
     // wraps around them, adding lines compared to a full-width layout. Use
@@ -515,7 +516,7 @@ function estimateParagraphHeight(
       startPageY: state.y,
       paraX: paraXPt,
       floats: state.floats,
-      lineBoxH: (a, d, _h) => lineBoxHeight(para.lineSpacing, a, d, 1, state.docGrid, paraHasRuby),
+      lineBoxH: (a, d, _h, is) => lineBoxHeight(para.lineSpacing, a, d, 1, state.docGrid, paraHasRuby, is ?? 0),
       pageH: state.pageH,
     } : undefined;
     const lines = layoutLines(state.ctx, segs, paraW, para.indentFirst, 1, para.tabStops, wrapCtx, state.fontFamilyClasses);
@@ -523,13 +524,13 @@ function estimateParagraphHeight(
       // Word uses the same line height for every line in a ruby paragraph,
       // snapped to an integer docGrid pitch.
       const uniform = snapParaLineToGrid(
-        Math.max(0, ...lines.map(l => lineBoxHeight(para.lineSpacing, l.ascent, l.descent, 1, state.docGrid, true))),
+        Math.max(0, ...lines.map(l => lineBoxHeight(para.lineSpacing, l.ascent, l.descent, 1, state.docGrid, true, l.intendedSingle))),
         state.docGrid,
         1,
       );
       textH = uniform * lines.length;
     } else {
-      textH = lines.reduce((s, l) => s + lineBoxHeight(para.lineSpacing, l.ascent, l.descent, 1, state.docGrid, false), 0);
+      textH = lines.reduce((s, l) => s + lineBoxHeight(para.lineSpacing, l.ascent, l.descent, 1, state.docGrid, false, l.intendedSingle), 0);
     }
   }
   return textH + (suppressSpaceBefore ? 0 : para.spaceBefore) + para.spaceAfter;
@@ -593,13 +594,13 @@ function splitParagraphAcrossPages(
     startPageY: measureState.y,
     paraX: marginLeftPt,
     floats: measureState.floats,
-    lineBoxH: (a, d) => lineBoxHeight(para.lineSpacing, a, d, 1, measureState.docGrid, paragraphHasRuby(para)),
+    lineBoxH: (a, d, _h, is) => lineBoxHeight(para.lineSpacing, a, d, 1, measureState.docGrid, paragraphHasRuby(para), is ?? 0),
     pageH: measureState.pageH,
   } : undefined;
   const lines = layoutLines(measureState.ctx, segs, paraW, para.indentFirst, 1, para.tabStops, wrapCtx, measureState.fontFamilyClasses);
   const paraHasRuby = paragraphHasRuby(para);
 
-  const perLineH = (l: typeof lines[number]) => lineBoxHeight(para.lineSpacing, l.ascent, l.descent, 1, measureState.docGrid, paraHasRuby);
+  const perLineH = (l: typeof lines[number]) => lineBoxHeight(para.lineSpacing, l.ascent, l.descent, 1, measureState.docGrid, paraHasRuby, l.intendedSingle);
   const uniformH = paraHasRuby
     ? snapParaLineToGrid(Math.max(0, ...lines.map(perLineH)), measureState.docGrid, 1)
     : 0;
@@ -864,7 +865,7 @@ function renderParagraph(
   if (segments.length === 0) {
     const fontSizePt = getDefaultFontSize(para);
     const { asc, desc } = emptyLineNaturalPx(fontSizePt, scale);
-    const emptyH = lineBoxHeight(para.lineSpacing, asc, desc, scale, state.docGrid, paraHasRuby);
+    const emptyH = lineBoxHeight(para.lineSpacing, asc, desc, scale, state.docGrid, paraHasRuby, emptyIntendedSinglePx(para, scale));
     if (para.shading && !dryRun) {
       ctx.fillStyle = `#${para.shading}`;
       ctx.fillRect(contentX + indLeft, textAreaTopY, paraW, emptyH);
@@ -882,7 +883,7 @@ function renderParagraph(
     startPageY: state.y,
     paraX,
     floats: state.floats,
-    lineBoxH: (a, d, _h) => lineBoxHeight(para.lineSpacing, a, d, scale, state.docGrid, paraHasRuby),
+    lineBoxH: (a, d, _h, is) => lineBoxHeight(para.lineSpacing, a, d, scale, state.docGrid, paraHasRuby, is ?? 0),
     pageH: state.pageH,
   } : undefined;
 
@@ -898,7 +899,7 @@ function renderParagraph(
   // else just the max natural.
   const uniformLineH = paraHasRuby
     ? snapParaLineToGrid(
-        Math.max(0, ...lines.map(l => lineBoxHeight(para.lineSpacing, l.ascent, l.descent, scale, state.docGrid, true))),
+        Math.max(0, ...lines.map(l => lineBoxHeight(para.lineSpacing, l.ascent, l.descent, scale, state.docGrid, true, l.intendedSingle))),
         state.docGrid,
         scale,
       )
@@ -906,7 +907,7 @@ function renderParagraph(
   const lineHForLine = (l: typeof lines[number]): number =>
     paraHasRuby
       ? uniformLineH
-      : lineBoxHeight(para.lineSpacing, l.ascent, l.descent, scale, state.docGrid, false);
+      : lineBoxHeight(para.lineSpacing, l.ascent, l.descent, scale, state.docGrid, false, l.intendedSingle);
 
   if (para.shading && !dryRun) {
     const totalTextH = lines.reduce((s, l) => s + lineHForLine(l), 0);
@@ -1195,6 +1196,10 @@ interface LayoutLine {
   height: number;  // pt — max fontSize on line (for empty-line sizing fallback)
   ascent: number;  // px — fontBoundingBoxAscent (font-metric, stable per font+size)
   descent: number; // px — fontBoundingBoxDescent
+  /** px — intended single-line height (max over segments of the requested
+   *  font's win line-height ratio × em), for fonts whose substituted Canvas
+   *  metrics understate Word's line spacing. 0 when no segment needs it. */
+  intendedSingle: number;
   /** Additional horizontal offset (px) from paraX, caused by wrap-around floats. */
   xOffset: number;
   /** Effective available width (px) for this line after float exclusion. */
@@ -1212,7 +1217,7 @@ interface WrapLayoutCtx {
   paraX: number;        // absolute canvas X of the paragraph's content left edge
   floats: FloatRect[];  // floats active on the current page
   /** Per-line box-height resolver (line natural ascent+descent → total px box height). */
-  lineBoxH: (ascentPx: number, descentPx: number, hasRuby?: boolean) => number;
+  lineBoxH: (ascentPx: number, descentPx: number, hasRuby?: boolean, intendedSinglePx?: number) => number;
   /** Hard cap on Y to keep layout from running past the page. */
   pageH: number;
 }
@@ -1398,6 +1403,7 @@ function layoutLines(
   let lineHeight = 0;   // pt
   let lineAscent = 0;   // px
   let lineDescent = 0;  // px
+  let lineIntendedSingle = 0; // px — max intended single-line height on the line
   let isFirst = true;
   // Effective width/offset for the current line after float exclusion.
   let lineMaxWidth = maxWidth;
@@ -1476,13 +1482,14 @@ function layoutLines(
       height: h,
       ascent: asc,
       descent: desc,
+      intendedSingle: lineIntendedSingle,
       xOffset: lineXOffset,
       availWidth: lineMaxWidth,
       topY: wrapCtx ? currentLineTopY : undefined,
       hasRuby: lineHasRuby,
     });
     if (wrapCtx) {
-      currentLineTopY += wrapCtx.lineBoxH(asc, desc, lineHasRuby);
+      currentLineTopY += wrapCtx.lineBoxH(asc, desc, lineHasRuby, lineIntendedSingle);
     }
     currentLine = [];
     currentWidth = 0;
@@ -1490,6 +1497,7 @@ function layoutLines(
     lineHeight = 0;
     lineAscent = 0;
     lineDescent = 0;
+    lineIntendedSingle = 0;
     lineHasRuby = false;
     isFirst = false;
     startLine();
@@ -1509,7 +1517,14 @@ function layoutLines(
     if (h > lineHeight) lineHeight = h;
     if (asc > lineAscent) lineAscent = asc;
     if (desc > lineDescent) lineDescent = desc;
-    if (!('isTab' in s) && !('dataUrl' in s) && (s as LayoutTextSeg).ruby) lineHasRuby = true;
+    if (!('isTab' in s) && !('dataUrl' in s)) {
+      const ts = s as LayoutTextSeg;
+      if (ts.ruby) lineHasRuby = true;
+      // Intended single-line height for fonts whose substituted Canvas metrics
+      // understate Word's line spacing (font-metrics.ts). 0 for untabled fonts.
+      const intended = intendedSingleLinePx(ts.fontFamily, effectiveFontPx(ts));
+      if (intended > lineIntendedSingle) lineIntendedSingle = intended;
+    }
   };
 
   const effectiveFontPx = (s: LayoutTextSeg): number => calcEffectiveFontPx(s, scale);
@@ -2238,10 +2253,10 @@ function measureParaHeight(
   if (segs.length === 0) {
     const fs = getDefaultFontSize(para);
     const { asc, desc } = emptyLineNaturalPx(fs, scale);
-    return lineBoxHeight(para.lineSpacing, asc, desc, scale, state.docGrid, paraHasRuby);
+    return lineBoxHeight(para.lineSpacing, asc, desc, scale, state.docGrid, paraHasRuby, emptyIntendedSinglePx(para, scale));
   }
   const lines = layoutLines(state.ctx, segs, maxWidth, 0, scale, para.tabStops, undefined, state.fontFamilyClasses);
-  return lines.reduce((s, l) => s + lineBoxHeight(para.lineSpacing, l.ascent, l.descent, scale, state.docGrid, paraHasRuby), 0);
+  return lines.reduce((s, l) => s + lineBoxHeight(para.lineSpacing, l.ascent, l.descent, scale, state.docGrid, paraHasRuby, l.intendedSingle), 0);
 }
 
 function measureCellContent(
@@ -2539,6 +2554,22 @@ function getDefaultFontSize(para: DocParagraph): number {
   return 10; // pt fallback
 }
 
+/** First text/field run's font family — used to size empty paragraphs whose
+ *  intended font (e.g. Meiryo) has a larger win line height than the fallback. */
+function getDefaultFontFamily(para: DocParagraph): string | null {
+  for (const run of para.runs) {
+    if (run.type === 'text') return (run as unknown as TextRun).fontFamily;
+    if (run.type === 'field') return (run as unknown as FieldRun).fontFamily;
+  }
+  return null;
+}
+
+/** Intended single-line height (px) for an empty paragraph, from its default
+ *  font's win line-height ratio. 0 when the font is not in the metrics table. */
+function emptyIntendedSinglePx(para: DocParagraph, scale: number): number {
+  return intendedSingleLinePx(getDefaultFontFamily(para), getDefaultFontSize(para) * scale);
+}
+
 /** Document-grid context passed to line-box computation.  When the section's
  *  `w:docGrid` is "lines"/"linesAndChars" with a positive pitch (ECMA-376
  *  §17.6.5), auto line spacing multiplies against the grid pitch instead of
@@ -2577,8 +2608,17 @@ function lineBoxHeight(
   scale: number,
   grid?: DocGridCtx,
   hasRuby?: boolean,
+  intendedSinglePx = 0,
 ): number {
-  const natural = ascentPx + descentPx;
+  const glyphNatural = ascentPx + descentPx;
+  // For `auto`/single spacing the multiplier applies to the intended font's
+  // design line height (ECMA-376 §17.3.1.33). When the document's font is
+  // substituted, the Canvas glyph extent (`glyphNatural`) understates that —
+  // see font-metrics.ts. `base` restores the intended single-line height so
+  // line spacing matches Word, while never dropping below the substituted
+  // glyph extent (so glyphs are not clipped). Grid-snapped lines are governed
+  // by the grid pitch instead, so the metric correction stays out of them.
+  const natural = Math.max(glyphNatural, intendedSinglePx);
   const hasGrid = isGridLineRule(grid);
   const pitchPx = hasGrid ? grid!.linePitchPt! * scale : 0;
   // Per ECMA-376 §17.6.5, a paragraph whose `line` attribute is NOT
@@ -2600,12 +2640,15 @@ function lineBoxHeight(
   // reservation, and lineBoxHeight stays format-agnostic.
   const inheritedOnly = ls !== null && ls.explicit !== true;
   if (!ls) {
-    return hasGrid ? Math.max(natural, pitchPx) : natural;
+    // No explicit spacing → single line. Use the intended single-line height
+    // (`natural`) off-grid; on-grid, snap to the pitch with the glyph extent
+    // as the overflow floor (the grid, not the font metric, governs height).
+    return hasGrid ? Math.max(glyphNatural, pitchPx) : natural;
   }
   if (ls.rule === 'auto') {
     if (hasGrid) {
-      if (inheritedOnly) return Math.max(natural, pitchPx);
-      return Math.max(natural, pitchPx * ls.value);
+      if (inheritedOnly) return Math.max(glyphNatural, pitchPx);
+      return Math.max(glyphNatural, pitchPx * ls.value);
     }
     return natural * ls.value;
   }

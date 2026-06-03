@@ -1,0 +1,22 @@
+---
+interface Props {
+  active?: 'pptx' | 'docx' | 'xlsx';
+}
+const { active } = Astro.props;
+---
+<nav class="nav">
+  <div class="wrap nav-inner">
+    <a class="nav-brand" href="/">
+      <span class="nav-mark"><i></i><i></i><i></i></span>
+      <span>@silurus/ooxml</span>
+    </a>
+    <div class="nav-links">
+      <a href="/docx" class:list={[{ 'nav-on': active === 'docx' }]}>DOCX</a>
+      <a href="/xlsx" class:list={[{ 'nav-on': active === 'xlsx' }]}>XLSX</a>
+      <a href="/pptx" class:list={[{ 'nav-on': active === 'pptx' }]}>PPTX</a>
+      <a href="/try">Try yours</a>
+      <a class="nav-ext" href="https://ooxml.silurus.dev">Storybook ↗</a>
+      <a class="nav-gh" href="https://github.com/yukiyokotani/office-open-xml-viewer">GitHub ↗</a>
+    </div>
+  </div>
+</nav>

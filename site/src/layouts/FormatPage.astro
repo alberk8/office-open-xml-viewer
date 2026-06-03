@@ -1,5 +1,6 @@
 ---
 import Base from './Base.astro';
+import Nav from '../components/Nav.astro';
 interface Props {
   format: 'pptx' | 'docx' | 'xlsx';
   name: string;   // "PowerPoint"
@@ -11,25 +12,12 @@ const { format, name, ext, tagline, color } = Astro.props;
 const title = `${name} (${ext}) — @silurus/ooxml`;
 ---
 <Base title={title}>
-  <nav class="nav">
-    <div class="wrap nav-inner">
-      <a class="nav-brand" href="/">
-        <span class="nav-mark"><i></i><i></i><i></i></span>
-        <span>@silurus/ooxml</span>
-      </a>
-      <div class="nav-links">
-        <a href="/pptx" class:list={[{ 'fp-on': format === 'pptx' }]}>PowerPoint</a>
-        <a href="/docx" class:list={[{ 'fp-on': format === 'docx' }]}>Word</a>
-        <a href="/xlsx" class:list={[{ 'fp-on': format === 'xlsx' }]}>Excel</a>
-        <a class="nav-gh" href="https://github.com/yukiyokotani/office-open-xml-viewer">GitHub ↗</a>
-      </div>
-    </div>
-  </nav>
+  <Nav active={format} />
 
   <header class="fp-hero" style={`--c:${color}`}>
     <div class="wrap">
       <a class="fp-back" href="/">← All formats</a>
-      <p class="eyebrow"><span class="fp-dot"></span> {name} <span class="fp-ext">{ext}</span></p>
+      <p class="eyebrow"><span class="fp-dot"></span> {name}</p>
       <h1 class="fp-title">{tagline}</h1>
       <p class="fp-lead">
         Every demo below is the real library rendering <code>{`sample-1${ext}`}</code> live in your
@@ -94,5 +82,4 @@ const title = `${name} (${ext}) — @silurus/ooxml`;
   .fp-lead { margin: 16px 0 0; max-width: 70ch; font-size: 17px; color: var(--text-dim); }
   .fp-lead code { font-family: var(--mono); font-size: 0.9em; color: var(--text); }
   .fp-main { padding-bottom: 32px; }
-  .nav-links .fp-on { color: var(--text); }
 </style>

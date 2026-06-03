@@ -1,5 +1,6 @@
 ---
 import Base from '../layouts/Base.astro';
+import Nav from '../components/Nav.astro';
 import LiveShowcase from '../components/LiveShowcase.astro';
 import CodeTabs from '../components/CodeTabs.astro';
 import Pitch from '../components/Pitch.astro';
@@ -35,21 +36,7 @@ const base = import.meta.env.BASE_URL;
 ---
 <Base>
   <!-- ── Nav ───────────────────────────────────────────────────── -->
-  <nav class="nav">
-    <div class="wrap nav-inner">
-      <a class="nav-brand" href="#top">
-        <span class="nav-mark"><i></i><i></i><i></i></span>
-        <span>@silurus/ooxml</span>
-      </a>
-      <div class="nav-links">
-        <a href="#showcase">Showcase</a>
-        <a href="#code">Code</a>
-        <a href="#capabilities">Capabilities</a>
-        <a class="nav-ext" href="https://ooxml.silurus.dev">Storybook ↗</a>
-        <a class="nav-gh" href="https://github.com/yukiyokotani/office-open-xml-viewer" aria-label="GitHub">GitHub ↗</a>
-      </div>
-    </div>
-  </nav>
+  <Nav />
 
   <!-- ── Hero ──────────────────────────────────────────────────── -->
   <header class="hero" id="top">
@@ -63,7 +50,7 @@ const base = import.meta.env.BASE_URL;
         <p class="hero-lead">
           <code>@silurus/ooxml</code> parses <strong>.docx</strong>, <strong>.xlsx</strong> and
           <strong>.pptx</strong> with a Rust/WASM engine and paints them to a Canvas — no server,
-          no MS Office, no iframe. The closest thing to PowerPoint/Word/Excel rendering on the web.
+          no native apps, no iframe. The most faithful Office Open XML rendering on the web.
         </p>
         <div class="hero-cta">
           <a class="btn btn-primary" href="https://www.npmjs.com/package/@silurus/ooxml">npm install @silurus/ooxml</a>
@@ -96,7 +83,7 @@ const base = import.meta.env.BASE_URL;
       <LiveShowcase />
       <p class="showcase-more">
         Go deeper — live demos and the code behind them, per format:
-        <a href="/pptx">PowerPoint</a> · <a href="/docx">Word</a> · <a href="/xlsx">Excel</a>
+        <a href="/docx">DOCX</a> · <a href="/xlsx">XLSX</a> · <a href="/pptx">PPTX</a>
       </p>
     </div>
   </section>

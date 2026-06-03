@@ -187,6 +187,7 @@ h1, h2, h3 { line-height: 1.15; letter-spacing: -0.02em; margin: 0; }
 .nav-mark i:nth-child(3) { background: var(--pptx); }
 .nav-links { display: flex; align-items: center; gap: 22px; font-size: 14px; color: var(--text-dim); }
 .nav-links a:hover { color: var(--text); }
+.nav-links .nav-on { color: var(--text); }
 .nav-gh { color: var(--text) !important; font-weight: 600; }
 @media (max-width: 720px) {
   .nav-links a:not(.nav-gh) { display: none; }

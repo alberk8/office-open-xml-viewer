@@ -1,9 +1,9 @@
 ---
 // Live Showcase — three real viewers behind format tabs.
 const formats = [
-  { id: 'pptx', label: 'PowerPoint', ext: '.pptx', color: 'var(--pptx)' },
-  { id: 'docx', label: 'Word', ext: '.docx', color: 'var(--docx)' },
-  { id: 'xlsx', label: 'Excel', ext: '.xlsx', color: 'var(--xlsx)' },
+  { id: 'docx', label: 'DOCX', ext: '.docx', color: 'var(--docx)' },
+  { id: 'xlsx', label: 'XLSX', ext: '.xlsx', color: 'var(--xlsx)' },
+  { id: 'pptx', label: 'PPTX', ext: '.pptx', color: 'var(--pptx)' },
 ];
 ---
 <div class="showcase" data-showcase>
@@ -18,13 +18,12 @@ const formats = [
       >
         <span class="tab-dot"></span>
         <span class="tab-label">{f.label}</span>
-        <span class="tab-ext">{f.ext}</span>
       </button>
     ))}
   </div>
   <div class="panel">
     <div class="panel-head">
-      <span class="panel-file" data-file>sample-1.pptx</span>
+      <span class="panel-file" data-file>sample-1.docx</span>
       <span class="panel-badge">live · WASM</span>
     </div>
     <div class="panel-body" data-mount></div>
@@ -62,13 +61,14 @@ const formats = [
 
     // Lazy-mount the first tab when the showcase is near the viewport. Mount
     // immediately if it's already close; otherwise wait for it to scroll in.
+    const first = tabs[0]?.dataset.tab ?? 'docx';
     const nearViewport = () => root.getBoundingClientRect().top < window.innerHeight + 600;
     if (nearViewport()) {
-      show('pptx');
+      show(first);
     } else {
       const io = new IntersectionObserver((entries) => {
         for (const e of entries) {
-          if (e.isIntersecting) { show('pptx'); io.disconnect(); }
+          if (e.isIntersecting) { show(first); io.disconnect(); }
         }
       }, { rootMargin: '600px' });
       io.observe(root);

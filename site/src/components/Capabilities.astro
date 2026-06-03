@@ -1,0 +1,77 @@
+---
+const cols = [
+  {
+    name: 'Word', ext: '.docx', color: 'var(--docx)',
+    items: [
+      'Headers / footers, section breaks',
+      'Tables — borders, fills, merges',
+      'Images, inline & anchored with text wrap',
+      'Ruby / furigana, sub/superscript',
+      'Line grid (docGrid), spacing rules',
+      'Lists, paragraph & table styles',
+      'Track changes, footnote markers',
+      'Native text selection & copy',
+    ],
+  },
+  {
+    name: 'Excel', ext: '.xlsx', color: 'var(--xlsx)',
+    items: [
+      'Multiple sheets, tab colours',
+      'Formulas (cached), dates, number formats',
+      'Charts — bar, line, area, radar, scatter',
+      'Sparklines, conditional formatting',
+      'Merged cells, frozen panes',
+      'Borders incl. diagonal, pattern fills',
+      'Selection, TSV copy, zoom slider',
+      'Images, drawing shapes, slicers',
+    ],
+  },
+  {
+    name: 'PowerPoint', ext: '.pptx', color: 'var(--pptx)',
+    items: [
+      'Layout / master inheritance',
+      'Backgrounds — solid, gradient, image',
+      'Preset & custom geometry shapes',
+      'Charts with axis & label styling',
+      'SmartArt text, grouped transforms',
+      'Gradient / image fills, theme colours',
+      'Per-level list font inheritance',
+      'Native text selection',
+    ],
+  },
+];
+---
+<div class="caps-grid">
+  {cols.map((col) => (
+    <div class="caps-col" style={`--c:${col.color}`}>
+      <div class="caps-head"><span class="caps-dot"></span> {col.name} <span class="caps-ext">{col.ext}</span></div>
+      <ul>
+        {col.items.map((it) => <li set:html={it} />)}
+      </ul>
+    </div>
+  ))}
+</div>
+
+<style>
+  .caps-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px; margin-top: 32px; }
+  .caps-col {
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    background: var(--panel);
+    padding: 22px 22px 8px;
+  }
+  .caps-head { display: flex; align-items: center; gap: 8px; font-weight: 700; font-size: 17px; margin-bottom: 14px; }
+  .caps-ext { font-family: var(--mono); font-size: 12px; color: var(--text-faint); font-weight: 500; }
+  .caps-dot { width: 10px; height: 10px; border-radius: 50%; background: var(--c); box-shadow: 0 0 10px -1px var(--c); }
+  .caps-col ul { list-style: none; margin: 0; padding: 0; }
+  .caps-col li {
+    position: relative;
+    padding: 7px 0 7px 24px;
+    font-size: 14px;
+    color: var(--text-dim);
+    border-top: 1px solid var(--border);
+  }
+  .caps-col li:first-child { border-top: none; }
+  .caps-col li::before { content: '✓'; position: absolute; left: 0; top: 7px; color: var(--c); font-weight: 700; }
+  @media (max-width: 860px) { .caps-grid { grid-template-columns: 1fr; } }
+</style>

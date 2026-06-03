@@ -1,7 +1,12 @@
 import type { MediaElement, Presentation, WorkerRequest, WorkerResponse } from './types';
 import { renderSlide, type TextRunCallback } from './renderer';
 import { createPresentationHandle, type PresentationHandle } from './presentation-handle';
-import { preloadGoogleFonts, type FontPreloadEntry, type LoadOptions as CoreLoadOptions } from '@silurus/ooxml-core';
+import {
+  preloadGoogleFonts,
+  WorkerBridge,
+  type FontPreloadEntry,
+  type LoadOptions as CoreLoadOptions,
+} from '@silurus/ooxml-core';
 import InlineWorker from './worker.ts?worker&inline';
 import wasmAssetUrl from './wasm/pptx_parser_bg.wasm?url';
 
@@ -66,68 +71,28 @@ export interface RenderSlideOptions {
  */
 export class PptxPresentation {
   private readonly _worker: Worker;
+  private readonly _bridge: WorkerBridge<WorkerResponse>;
   private _presentation: Presentation | null = null;
-  private _pendingParseCallbacks = new Map<
-    number,
-    { resolve: (p: Presentation) => void; reject: (e: Error) => void }
-  >();
-  private _pendingMediaCallbacks = new Map<
-    number,
-    { resolve: (b: ArrayBuffer) => void; reject: (e: Error) => void }
-  >();
   private _mediaCache = new Map<string, Promise<Blob>>();
-  private _nextId = 1;
   private _workerReady = false;
   private _workerReadyCallbacks: Array<() => void> = [];
 
   private constructor() {
     this._worker = new InlineWorker();
+    this._bridge = new WorkerBridge<WorkerResponse>(this._worker, {
+      // The init `ready` handshake carries no id; everything else does.
+      correlate: (msg) => ('id' in msg ? msg.id : undefined),
+      toError: (msg) => (msg.kind === 'error' ? msg.message : undefined),
+      onUnsolicited: (msg) => {
+        if (msg.kind === 'ready') {
+          this._workerReady = true;
+          for (const cb of this._workerReadyCallbacks) cb();
+          this._workerReadyCallbacks = [];
+        }
+      },
+    });
     const wasmUrl = new URL(wasmAssetUrl, location.href).href;
-    this._worker.postMessage({ kind: 'init', wasmUrl } satisfies WorkerRequest);
-
-    this._worker.onmessage = (e: MessageEvent<WorkerResponse>) => {
-      const msg = e.data;
-
-      if (msg.kind === 'ready') {
-        this._workerReady = true;
-        for (const cb of this._workerReadyCallbacks) cb();
-        this._workerReadyCallbacks = [];
-        return;
-      }
-
-      if (msg.kind === 'parsed') {
-        const cb = this._pendingParseCallbacks.get(msg.id);
-        if (cb) {
-          this._pendingParseCallbacks.delete(msg.id);
-          cb.resolve(msg.presentation);
-        }
-        return;
-      }
-
-      if (msg.kind === 'mediaExtracted') {
-        const cb = this._pendingMediaCallbacks.get(msg.id);
-        if (cb) {
-          this._pendingMediaCallbacks.delete(msg.id);
-          cb.resolve(msg.bytes);
-        }
-        return;
-      }
-
-      if (msg.kind === 'error') {
-        const err = new Error(msg.message);
-        const parseCb = this._pendingParseCallbacks.get(msg.id);
-        if (parseCb) {
-          this._pendingParseCallbacks.delete(msg.id);
-          parseCb.reject(err);
-          return;
-        }
-        const mediaCb = this._pendingMediaCallbacks.get(msg.id);
-        if (mediaCb) {
-          this._pendingMediaCallbacks.delete(msg.id);
-          mediaCb.reject(err);
-        }
-      }
-    };
+    this._bridge.post({ kind: 'init', wasmUrl } satisfies WorkerRequest);
   }
 
   /** Parse a PPTX from URL or ArrayBuffer. */
@@ -161,12 +126,11 @@ export class PptxPresentation {
 
   private async _parse(buffer: ArrayBuffer, maxZipEntryBytes?: number): Promise<void> {
     await this._waitForWorker();
-    const id = this._nextId++;
-    const presentation = await new Promise<Presentation>((resolve, reject) => {
-      this._pendingParseCallbacks.set(id, { resolve, reject });
-      this._worker.postMessage({ kind: 'parse', id, buffer, maxZipEntryBytes } satisfies WorkerRequest, [buffer]);
-    });
-    this._presentation = presentation;
+    const res = await this._bridge.request(
+      (id) => ({ kind: 'parse', id, buffer, maxZipEntryBytes }) satisfies WorkerRequest,
+      [buffer],
+    );
+    this._presentation = (res as Extract<WorkerResponse, { kind: 'parsed' }>).presentation;
   }
 
   /** Total number of slides in the loaded presentation. */
@@ -218,11 +182,10 @@ export class PptxPresentation {
     const mimeType = this._findMimeTypeForPath(mediaPath);
     const p = (async () => {
       await this._waitForWorker();
-      const id = this._nextId++;
-      const bytes = await new Promise<ArrayBuffer>((resolve, reject) => {
-        this._pendingMediaCallbacks.set(id, { resolve, reject });
-        this._worker.postMessage({ kind: 'extractMedia', id, path: mediaPath } satisfies WorkerRequest);
-      });
+      const res = await this._bridge.request(
+        (id) => ({ kind: 'extractMedia', id, path: mediaPath }) satisfies WorkerRequest,
+      );
+      const bytes = (res as Extract<WorkerResponse, { kind: 'mediaExtracted' }>).bytes;
       return new Blob([bytes], { type: mimeType });
     })();
     this._mediaCache.set(mediaPath, p);
@@ -274,7 +237,7 @@ export class PptxPresentation {
 
   /** Terminate the worker and release all resources. */
   destroy(): void {
-    this._worker.terminate();
+    this._bridge.terminate();
     this._presentation = null;
     this._mediaCache.clear();
   }

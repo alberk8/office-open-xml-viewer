@@ -15,3 +15,9 @@ export {
 } from './sparkline/renderer';
 export * from './math';
 export type { MathNode, MathFormula, MathStyle } from './types/math';
+export {
+  WorkerBridge,
+  type WorkerLike,
+  type WorkerBridgeOptions,
+  decodeDataUrl,
+} from './worker';

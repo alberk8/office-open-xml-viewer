@@ -1,6 +1,11 @@
 import InlineWorker from './worker.ts?worker&inline';
 import wasmAssetUrl from './wasm/docx_parser_bg.wasm?url';
-import { preloadGoogleFonts, type FontPreloadEntry, type LoadOptions as CoreLoadOptions } from '@silurus/ooxml-core';
+import {
+  preloadGoogleFonts,
+  WorkerBridge,
+  type FontPreloadEntry,
+  type LoadOptions as CoreLoadOptions,
+} from '@silurus/ooxml-core';
 import type { PaginatedBodyElement, Document, RenderPageOptions, WorkerResponse } from './types';
 import { computePages, renderDocumentToCanvas, documentHasMath, prepareMathRuns } from './renderer';
 
@@ -38,11 +43,16 @@ export class DocxDocument {
   private _document: Document | null = null;
   private _pages: PaginatedBodyElement[][] | null = null;
   private _worker: Worker;
+  private _bridge: WorkerBridge<WorkerResponse>;
 
   private constructor() {
     this._worker = new InlineWorker();
+    this._bridge = new WorkerBridge<WorkerResponse>(this._worker, {
+      correlate: (res) => res.id,
+      toError: (res) => (res.type === 'error' ? res.message : undefined),
+    });
     const wasmUrl = new URL(wasmAssetUrl, location.href).href;
-    this._worker.postMessage({ type: 'init', wasmUrl });
+    this._bridge.post({ type: 'init', wasmUrl });
   }
 
   static async load(source: string | ArrayBuffer, opts: LoadOptions = {}): Promise<DocxDocument> {
@@ -70,24 +80,16 @@ export class DocxDocument {
     return doc;
   }
 
-  private _parse(buffer: ArrayBuffer, maxZipEntryBytes?: number): Promise<void> {
-    return new Promise((resolve, reject) => {
-      const handler = (e: MessageEvent<WorkerResponse>) => {
-        this._worker.removeEventListener('message', handler);
-        if (e.data.type === 'error') {
-          reject(new Error(e.data.message));
-        } else if (e.data.type === 'parsed') {
-          this._document = e.data.document;
-          resolve();
-        }
-      };
-      this._worker.addEventListener('message', handler);
-      this._worker.postMessage({ type: 'parse', data: buffer, maxZipEntryBytes }, [buffer]);
-    });
+  private async _parse(buffer: ArrayBuffer, maxZipEntryBytes?: number): Promise<void> {
+    const res = await this._bridge.request(
+      (id) => ({ type: 'parse', id, data: buffer, maxZipEntryBytes }),
+      [buffer],
+    );
+    this._document = (res as Extract<WorkerResponse, { type: 'parsed' }>).document;
   }
 
   destroy(): void {
-    this._worker.terminate();
+    this._bridge.terminate();
   }
 
   get pageCount(): number {

@@ -127,7 +127,7 @@ function getSheetAxes(ws: Worksheet, mdw: number): SheetAxes {
 }
 
 export class XlsxViewer {
-  private wb: XlsxWorkbook;
+  private wb: XlsxWorkbook | null = null;
   private canvas: HTMLCanvasElement;
   private canvasArea: HTMLDivElement;
   private scrollHost: HTMLDivElement;
@@ -160,7 +160,6 @@ export class XlsxViewer {
 
   constructor(container: HTMLElement, opts: XlsxViewerOptions = {}) {
     this.opts = opts;
-    this.wb = new XlsxWorkbook();
 
     const wrapper = document.createElement('div');
     wrapper.style.cssText =
@@ -267,7 +266,7 @@ export class XlsxViewer {
 
   async load(source: string | ArrayBuffer): Promise<void> {
     try {
-      await this.wb.load(source, {
+      this.wb = await XlsxWorkbook.load(source, {
         useGoogleFonts: this.opts.useGoogleFonts,
         maxZipEntryBytes: this.opts.maxZipEntryBytes,
       });
@@ -279,6 +278,12 @@ export class XlsxViewer {
     }
   }
 
+  /** The loaded workbook, or throws if {@link load} has not completed. */
+  private get workbook(): XlsxWorkbook {
+    if (!this.wb) throw new Error('Workbook not loaded');
+    return this.wb;
+  }
+
   async showSheet(index: number): Promise<void> {
     this.currentSheet = index;
     this.scrollHost.scrollLeft = 0;
@@ -288,10 +293,10 @@ export class XlsxViewer {
     this.selectionMode = 'cells';
     this.updateSelectionOverlay();
     this.updateTabActive(index);
-    this.currentWorksheet = await this.wb.getWorksheet(index);
+    this.currentWorksheet = await this.workbook.getWorksheet(index);
     this.updateSpacerSize(this.currentWorksheet);
     await this.renderCurrentSheet();
-    this.opts.onSheetChange?.(index, this.wb.sheetNames[index] ?? '');
+    this.opts.onSheetChange?.(index, this.workbook.sheetNames[index] ?? '');
   }
 
   /** Returns the cell at canvas-client coordinates, or null if outside the cell grid. */
@@ -809,8 +814,8 @@ export class XlsxViewer {
   private buildTabs(): void {
     this.tabStrip.innerHTML = '';
     this.tabs = [];
-    this.tabColors = this.wb.tabColors;
-    this.wb.sheetNames.forEach((name, i) => {
+    this.tabColors = this.workbook.tabColors;
+    this.workbook.sheetNames.forEach((name, i) => {
       const btn = document.createElement('button');
       btn.textContent = name;
       btn.title = name;
@@ -1119,7 +1124,7 @@ export class XlsxViewer {
 
     const { selectedRowRange, selectedColRange } = this.computeHeaderHighlight();
 
-    await this.wb.renderViewport(this.canvas, this.currentSheet, viewport, {
+    await this.workbook.renderViewport(this.canvas, this.currentSheet, viewport, {
       width: w,
       height: h,
       dpr,
@@ -1170,7 +1175,7 @@ export class XlsxViewer {
   }
 
   get sheetNames(): string[] {
-    return this.wb.sheetNames;
+    return this.wb?.sheetNames ?? [];
   }
 
   destroy(): void {
@@ -1178,6 +1183,6 @@ export class XlsxViewer {
     if (this.keydownHandler) {
       document.removeEventListener('keydown', this.keydownHandler);
     }
-    this.wb.destroy();
+    this.wb?.destroy();
   }
 }

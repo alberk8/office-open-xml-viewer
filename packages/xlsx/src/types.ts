@@ -775,10 +775,17 @@ export interface RenderViewportOptions {
 
 export type WorkerRequest =
   | { type: 'init'; wasmUrl: string }
-  | { type: 'parse'; data: ArrayBuffer; maxZipEntryBytes?: number }
-  | { type: 'parseSheet'; data: ArrayBuffer; sheetIndex: number; sheetName: string; maxZipEntryBytes?: number };
+  | { type: 'parse'; id: number; data: ArrayBuffer; maxZipEntryBytes?: number }
+  | {
+      type: 'parseSheet';
+      id: number;
+      data: ArrayBuffer;
+      sheetIndex: number;
+      sheetName: string;
+      maxZipEntryBytes?: number;
+    };
 
 export type WorkerResponse =
-  | { type: 'parsed'; workbook: ParsedWorkbook }
-  | { type: 'parsedSheet'; worksheet: Worksheet }
-  | { type: 'error'; message: string };
+  | { type: 'parsed'; id: number; workbook: ParsedWorkbook }
+  | { type: 'parsedSheet'; id: number; worksheet: Worksheet }
+  | { type: 'error'; id: number; message: string };

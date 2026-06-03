@@ -1,0 +1,186 @@
+---
+import Base from '../layouts/Base.astro';
+import Nav from '../components/Nav.astro';
+import LiveShowcase from '../components/LiveShowcase.astro';
+import Pitch from '../components/Pitch.astro';
+import Capabilities from '../components/Capabilities.astro';
+const base = import.meta.env.BASE_URL;
+---
+<Base>
+  <!-- ── Nav ───────────────────────────────────────────────────── -->
+  <Nav />
+
+  <!-- ── Hero ──────────────────────────────────────────────────── -->
+  <header class="hero" id="top">
+    <div class="wrap hero-grid">
+      <div class="hero-copy">
+        <p class="eyebrow">Rust · WebAssembly · Canvas 2D</p>
+        <h1 class="hero-title">
+          Pixel-faithful <span class="grad">Office</span> documents,<br />
+          rendered in the browser.
+        </h1>
+        <p class="hero-lead">
+          <code>@silurus/ooxml</code> parses <strong>.docx</strong>, <strong>.xlsx</strong> and
+          <strong>.pptx</strong> with a Rust/WASM engine and paints them to a Canvas — no server,
+          no native apps, no iframe. The most faithful Office Open XML rendering on the web.
+        </p>
+        <div class="hero-cta">
+          <a class="btn btn-primary" href="https://www.npmjs.com/package/@silurus/ooxml">npm install @silurus/ooxml</a>
+          <a class="btn btn-ghost" href="https://github.com/yukiyokotani/office-open-xml-viewer">GitHub ↗</a>
+        </div>
+      </div>
+      <div class="hero-art">
+        <div class="hero-art-glow"></div>
+        <img class="hero-icon" src={`${base}icon.png`.replace(/([^:])\/\/+/g, '$1/')} alt="@silurus/ooxml" width="2048" height="2048" />
+      </div>
+    </div>
+  </header>
+
+  <!-- ── Pitch ─────────────────────────────────────────────────── -->
+  <section class="section pitch-section">
+    <div class="wrap" data-reveal>
+      <Pitch />
+    </div>
+  </section>
+
+  <!-- ── Live showcase (validation: real PPTX viewer) ──────────── -->
+  <section class="section" id="showcase">
+    <div class="wrap" data-reveal>
+      <p class="eyebrow">Live in this page</p>
+      <h2 class="section-title">Not a screenshot — the real renderer.</h2>
+      <p class="section-lead">
+        Each tab below is the actual library running a real document in your browser right now —
+        Rust/WASM parse, Canvas paint. Switch formats, step through pages, scroll the sheet.
+      </p>
+      <LiveShowcase />
+      <p class="showcase-more">
+        Go deeper — live demos and the code behind them, per format:
+        <a href="/docx">DOCX</a> · <a href="/xlsx">XLSX</a> · <a href="/pptx">PPTX</a>
+      </p>
+    </div>
+  </section>
+
+  <!-- ── Capabilities ──────────────────────────────────────────── -->
+  <section class="section" id="capabilities">
+    <div class="wrap" data-reveal>
+      <p class="eyebrow">What it renders</p>
+      <h2 class="section-title">Deep format coverage.</h2>
+      <p class="section-lead">
+        A curated slice of what each format supports. The full, exhaustive matrix lives in the
+        <a class="inline-link" href="https://github.com/yukiyokotani/office-open-xml-viewer#feature-support">README</a>.
+      </p>
+      <Capabilities />
+    </div>
+  </section>
+
+  <!-- ── Footer ────────────────────────────────────────────────── -->
+  <footer class="footer">
+    <div class="wrap footer-inner">
+      <div class="footer-brand">
+        <span class="nav-mark"><i></i><i></i><i></i></span>
+        <div>
+          <strong>@silurus/ooxml</strong>
+          <span>Browser-based OOXML viewer · Rust/WASM + Canvas</span>
+        </div>
+      </div>
+      <div class="footer-links">
+        <a href="https://www.npmjs.com/package/@silurus/ooxml">npm</a>
+        <a href="https://github.com/yukiyokotani/office-open-xml-viewer">GitHub</a>
+        <a href="https://marketplace.visualstudio.com/items?itemName=silurus.office-open-xml-viewer">VS Code</a>
+        <a href="/storybook/">Storybook</a>
+      </div>
+    </div>
+    <div class="wrap footer-fine">MIT licensed · Built entirely by Claude through iterative prompting.</div>
+  </footer>
+</Base>
+
+<style>
+  .hero {
+    position: relative;
+    padding: 96px 0 84px;
+    border-bottom: 1px solid var(--border);
+  }
+  .hero-grid {
+    position: relative;
+    z-index: 1;
+    display: grid;
+    grid-template-columns: 1.05fr 0.95fr;
+    gap: 32px;
+    align-items: center;
+  }
+  .hero-art {
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 0;
+  }
+  .hero-icon {
+    position: relative;
+    z-index: 1;
+    width: 78%;
+    max-width: 360px;
+    height: auto;
+    display: block;
+    filter: drop-shadow(0 24px 60px rgba(0, 0, 0, 0.55));
+  }
+  .hero-art-glow {
+    position: absolute;
+    inset: 12%;
+    background: radial-gradient(closest-side, rgba(94, 234, 212, 0.18), rgba(129, 140, 248, 0.12) 55%, transparent 75%);
+    filter: blur(20px);
+  }
+  @media (max-width: 860px) {
+    .hero-grid { grid-template-columns: 1fr; }
+    .hero-art { margin: 8px auto 0; }
+    .hero-icon { width: 56%; max-width: 280px; }
+  }
+  .hero-title {
+    font-size: clamp(34px, 6vw, 68px);
+    font-weight: 800;
+    margin: 18px 0 0;
+    letter-spacing: -0.03em;
+  }
+  .grad {
+    background: linear-gradient(120deg, var(--accent), var(--accent-2) 60%, var(--accent-3));
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
+  .hero-lead {
+    margin: 22px 0 0;
+    max-width: 62ch;
+    font-size: 18px;
+    color: var(--text-dim);
+  }
+  .hero-lead code, .hero-lead strong { color: var(--text); }
+  .hero-lead code { font-family: var(--mono); font-size: 0.92em; }
+  .hero-cta { display: flex; gap: 14px; margin-top: 32px; flex-wrap: wrap; }
+
+  .section-alt { background: linear-gradient(180deg, transparent, rgba(12, 15, 23, 0.6)); }
+  .section-lead code {
+    font-family: var(--mono);
+    font-size: 0.9em;
+    color: var(--text);
+    background: var(--bg-elev-2);
+    padding: 1px 6px;
+    border-radius: 5px;
+  }
+  .code-wrap { margin-top: 28px; }
+
+  .fw-block { margin-top: 56px; }
+  .fw-title { font-size: 24px; font-weight: 700; }
+  .fw-lead {
+    margin-top: 12px;
+    max-width: 70ch;
+    color: var(--text-dim);
+    font-size: 16px;
+  }
+  .fw-lead code { color: var(--text); font-family: var(--mono); font-size: 0.9em; }
+
+  .pitch-section { padding: 64px 0; }
+  .inline-link { color: var(--accent); text-decoration: underline; text-underline-offset: 2px; }
+  .showcase-more { margin-top: 20px; font-size: 15px; color: var(--text-dim); }
+  .showcase-more a { color: var(--accent); font-weight: 600; }
+  .showcase-more a:hover { text-decoration: underline; }
+</style>

@@ -290,6 +290,11 @@ pub enum DocRun {
     Break { break_type: BreakType },
     Field(FieldRun),
     Shape(ShapeRun),
+    /// An OMML equation (`m:oMath`). `display` = block (`m:oMathPara`).
+    Math {
+        nodes: Vec<crate::math::MathNode>,
+        display: bool,
+    },
 }
 
 /// A drawn shape (wps:wsp inside wp:anchor). Positioned like an anchor image

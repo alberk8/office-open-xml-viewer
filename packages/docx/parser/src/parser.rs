@@ -856,6 +856,24 @@ fn parse_para_content(
                 let fallback = extract_text_from_runs(child);
                 runs.push(make_field_run(&instr, &fmt, &fallback, theme));
             }
+            "oMath" => {
+                let nodes = crate::math::parse_omath_nodes(child);
+                if !nodes.is_empty() {
+                    runs.push(DocRun::Math { nodes, display: false });
+                }
+            }
+            "oMathPara" => {
+                // A block math paragraph wraps one or more m:oMath children.
+                for om in child
+                    .children()
+                    .filter(|n| n.is_element() && n.tag_name().name() == "oMath")
+                {
+                    let nodes = crate::math::parse_omath_nodes(om);
+                    if !nodes.is_empty() {
+                        runs.push(DocRun::Math { nodes, display: true });
+                    }
+                }
+            }
             _ => {}
         }
     }

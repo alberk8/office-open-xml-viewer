@@ -1,4 +1,5 @@
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+use ooxml_common::math::{nodes_to_text, parse_omath_nodes, MathNode};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::{Cursor, Read};
@@ -235,6 +236,8 @@ fn render_runs_md(runs: &[TextRun]) -> String {
             // Intra-paragraph soft break (<a:br/>) → markdown hard line break
             // (two trailing spaces + newline).
             TextRun::Break => out.push_str("  \n"),
+            // Equations have no faithful markdown form; emit their flattened text.
+            TextRun::Math { nodes, .. } => out.push_str(&nodes_to_text(nodes)),
             TextRun::Text(t) => {
                 let raw = &t.text;
                 // Empty / whitespace-only runs (separators between formatted
@@ -1139,6 +1142,17 @@ struct Paragraph {
 enum TextRun {
     Text(TextRunData),
     Break,
+    /// An OMML equation embedded in the paragraph (ECMA-376 §22.1). PowerPoint
+    /// stores these as `a14:m` inside `mc:AlternateContent`. `display` is true
+    /// for `m:oMathPara` (block) math, false for inline `m:oMath`.
+    #[serde(rename_all = "camelCase")]
+    Math {
+        nodes: Vec<MathNode>,
+        display: bool,
+        /// Paragraph default run size (pt) if declared; None → renderer inherits.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        font_size: Option<f64>,
+    },
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -3031,6 +3045,50 @@ fn parse_text_body(
     TextBody { vertical_anchor, paragraphs, default_font_size, default_bold, default_italic, l_ins, r_ins, t_ins, b_ins, wrap, vert, auto_fit, font_scale, ln_spc_reduction, num_col, spc_col }
 }
 
+/// Walk `node` for OMML math and push a `TextRun::Math` for each equation,
+/// descending PowerPoint's `mc:AlternateContent` / `mc:Choice` / `a14:m`
+/// wrappers (ECMA-376 §22.1; the a14 markup is from the 2010 drawing ext).
+fn push_math_runs(node: roxmltree::Node<'_, '_>, font_size: Option<f64>, runs: &mut Vec<TextRun>) {
+    match node.tag_name().name() {
+        "oMath" => {
+            let nodes = parse_omath_nodes(node);
+            if !nodes.is_empty() {
+                runs.push(TextRun::Math { nodes, display: false, font_size });
+            }
+        }
+        "oMathPara" => {
+            for om in node
+                .children()
+                .filter(|n| n.is_element() && n.tag_name().name() == "oMath")
+            {
+                let nodes = parse_omath_nodes(om);
+                if !nodes.is_empty() {
+                    runs.push(TextRun::Math { nodes, display: true, font_size });
+                }
+            }
+        }
+        // mc:AlternateContent → take the a14 `Choice` (the live equation) and
+        // ignore mc:Fallback (a rasterized picture PowerPoint emits for old apps).
+        "AlternateContent" => {
+            if let Some(choice) = node
+                .children()
+                .find(|n| n.is_element() && n.tag_name().name() == "Choice")
+            {
+                for c in choice.children().filter(|n| n.is_element()) {
+                    push_math_runs(c, font_size, runs);
+                }
+            }
+        }
+        // a14:m wrapper (local name "m") holds an m:oMathPara.
+        "m" => {
+            for c in node.children().filter(|n| n.is_element()) {
+                push_math_runs(c, font_size, runs);
+            }
+        }
+        _ => {}
+    }
+}
+
 fn parse_paragraph(
     p_node: roxmltree::Node<'_, '_>,
     theme: &HashMap<String, String>,
@@ -3133,6 +3191,12 @@ fn parse_paragraph(
                 }
             }
             "br" => runs.push(TextRun::Break),
+            // OMML equations (ECMA-376 §22.1). `def_font_size` here is the
+            // paragraph's defRPr size (pre-level-fallback); the renderer applies
+            // its own inheritance when this is None.
+            "oMath" | "oMathPara" | "AlternateContent" => {
+                push_math_runs(node, def_font_size, &mut runs);
+            }
             // Field elements (e.g. slide number, date): parse like a run but tag the field type
             "fld" => {
                 let fld_type = attr(&node, "type").unwrap_or_default().to_string();
@@ -6173,5 +6237,46 @@ mod tests {
         assert_eq!(merged[0], Some(32.0)); // only fallback
         assert_eq!(merged[1], Some(28.0)); // primary wins
         assert_eq!(merged[2], Some(20.0)); // only fallback
+    }
+
+    /// PowerPoint stores equations as `a14:m` inside `mc:AlternateContent`
+    /// (ECMA-376 §22.1 OMML + 2010 drawing ext). The Choice branch holds the
+    /// live `m:oMathPara`; the Fallback (a rasterized picture/text) must be
+    /// ignored so the equation isn't double-rendered.
+    #[test]
+    fn extracts_math_from_alternatecontent_a14m() {
+        let xml = r#"<p
+            xmlns="http://schemas.openxmlformats.org/drawingml/2006/main"
+            xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+            xmlns:a14="http://schemas.microsoft.com/office/drawing/2010/main"
+            xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math">
+          <mc:AlternateContent>
+            <mc:Choice Requires="a14">
+              <a14:m>
+                <m:oMathPara><m:oMath>
+                  <m:r><m:t>x</m:t></m:r>
+                </m:oMath></m:oMathPara>
+              </a14:m>
+            </mc:Choice>
+            <mc:Fallback><r><t>fallback</t></r></mc:Fallback>
+          </mc:AlternateContent>
+        </p>"#;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let ac = doc
+            .root_element()
+            .children()
+            .find(|n| n.is_element() && n.tag_name().name() == "AlternateContent")
+            .unwrap();
+        let mut runs = Vec::new();
+        push_math_runs(ac, Some(18.0), &mut runs);
+        assert_eq!(runs.len(), 1, "exactly one math run, fallback ignored");
+        match &runs[0] {
+            TextRun::Math { display, nodes, font_size } => {
+                assert!(*display, "oMathPara → display math");
+                assert_eq!(*font_size, Some(18.0));
+                assert_eq!(nodes_to_text(nodes), "x");
+            }
+            other => panic!("expected math run, got {other:?}"),
+        }
     }
 }

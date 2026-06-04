@@ -160,7 +160,7 @@ function mountMasterDetail(el: HTMLElement, format: Format, url: string): void {
   el.appendChild(layout);
   const st = status(el, 'Loading…');
 
-  const viewer = makeViewer(format, detailCanvas, 820);
+  const viewer = makeViewer(format, detailCanvas, 960);
   Promise.all([loadDoc(format, url), viewer.load(url)])
     .then(async ([doc]) => {
       st.remove();

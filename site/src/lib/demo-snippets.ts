@@ -65,7 +65,7 @@ for (let i = 0; i < doc.${c.count}; i++) {
     masterdetail: `import { ${c.Doc}, ${c.Viewer} } from '@silurus/ooxml/${c.sub}';
 
 // A large preview viewer on the right…
-const viewer = new ${c.Viewer}(detailCanvas, { width: 820, enableTextSelection: true });
+const viewer = new ${c.Viewer}(detailCanvas, { width: 960, enableTextSelection: true });
 
 // …and a thumbnail rail on the left, sharing the same file.
 const [doc] = await Promise.all([

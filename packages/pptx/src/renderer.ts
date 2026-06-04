@@ -396,6 +396,21 @@ function genericFallback(family: string): string {
   return 'sans-serif';
 }
 
+/**
+ * Office fonts → metric-compatible, freely-distributable substitutes
+ * (`presentation.ts` preloads these webfonts). Putting the substitute in the
+ * canvas font stack means a viewer that lacks Calibri/Cambria (macOS, Linux)
+ * renders at the SAME advance widths as PowerPoint instead of a wider system
+ * serif/sans — without which `wrap="none"` lines overflow the slide. Keys are
+ * lower-cased; both the Office face and its substitute share glyph metrics.
+ */
+const OFFICE_FONT_SUBSTITUTE: Record<string, string> = {
+  'calibri': 'Carlito',
+  'calibri light': 'Carlito',
+  'cambria': 'Caladea',
+  'cambria math': 'Caladea',
+};
+
 function buildFont(bold: boolean, italic: boolean, sizePx: number, family: string, rc: RenderContext): string {
   const style  = italic ? 'italic ' : '';
   const weight = bold   ? 'bold '   : '';
@@ -403,9 +418,12 @@ function buildFont(bold: boolean, italic: boolean, sizePx: number, family: strin
   if (CSS_GENERIC_FAMILIES.has(normalized)) {
     return `${style}${weight}${sizePx}px ${normalized}`;
   }
-  // Named font + inferred generic fallback so browsers degrade consistently
-  // when the exact typeface is not installed.
-  return `${style}${weight}${sizePx}px "${normalized}", ${genericFallback(normalized)}`;
+  // Named font + (metric-compatible substitute, if an Office face) + inferred
+  // generic fallback, so browsers degrade consistently when the exact typeface
+  // is not installed.
+  const sub = OFFICE_FONT_SUBSTITUTE[normalized.toLowerCase()];
+  const subPart = sub ? `"${sub}", ` : '';
+  return `${style}${weight}${sizePx}px "${normalized}", ${subPart}${genericFallback(normalized)}`;
 }
 
 /**

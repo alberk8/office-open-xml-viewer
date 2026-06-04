@@ -2,6 +2,10 @@ import type { Meta, StoryObj } from '@storybook/html';
 import { DocxDocument } from './document';
 import { DocxViewer } from './viewer';
 import init, { parse_docx } from './wasm/docx_parser.js';
+// Opt-in math engine. In published usage: `import { math } from '@silurus/ooxml/math'`.
+// In the monorepo the stories build the same MathRenderer from the core engine.
+import { loadMathJax, mathMLToSvg } from '../../core/src/math/engine';
+const math = { loadMathJax, mathMLToSvg };
 
 type Args = {
   width: number;
@@ -64,6 +68,7 @@ export function buildViewerUI(
     dpr: window.devicePixelRatio,
     enableTextSelection: true,
     useGoogleFonts: true,
+    math,
   });
 
   const updateNav = () => {
@@ -211,6 +216,7 @@ export const FileUpload: Story = {
         dpr: window.devicePixelRatio,
         enableTextSelection: true,
         useGoogleFonts: true,
+        math,
       });
       try {
         await viewer.load(buffer);

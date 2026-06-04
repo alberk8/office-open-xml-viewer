@@ -23,6 +23,7 @@ export interface ApiClass {
 const ZIP = { name: 'maxZipEntryBytes', type: 'number', def: '512 MiB', desc: 'Per-entry ZIP decompression cap (zip-bomb guard). Lower it for untrusted input.' };
 const GFONTS = { name: 'useGoogleFonts', type: 'boolean', def: 'false', desc: 'Load metric-compatible webfonts from Google Fonts so layout matches Office without the fonts installed. Off by default for privacy.' };
 const DPR = { name: 'dpr', type: 'number', def: 'devicePixelRatio', desc: 'Device pixel ratio for the backing store (crispness on HiDPI).' };
+const MATH = { name: 'math', type: 'MathRenderer', def: 'undefined', desc: 'Opt-in OMML equation engine (MathJax + STIX Two Math, ~3 MB). Import it from the separate @silurus/ooxml/math entry — `import { math } from "@silurus/ooxml/math"` — and pass it to render equations. Omit it and equations are skipped — the engine tree-shakes away entirely.' };
 
 export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
   pptx: [
@@ -37,6 +38,7 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
         { name: 'enableTextSelection', type: 'boolean', def: 'false', desc: 'Overlay a transparent text layer so users can select & copy slide text.' },
         { name: 'enableMediaPlayback', type: 'boolean', def: 'false', desc: 'Make embedded audio/video interactive (the viewer draws its own play chrome).' },
         ZIP,
+        MATH,
         { name: 'onSlideChange', type: '(index: number, total: number) => void', desc: 'Called after a slide finishes rendering.' },
         { name: 'onError', type: '(err: Error) => void', desc: 'Called on parse or render errors.' },
       ],
@@ -59,7 +61,7 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
       methods: [
         { sig: 'static load(source, options?): Promise<PptxPresentation>', desc: 'Parse a deck from a URL or ArrayBuffer.' },
         { sig: 'get slideCount(): number', desc: 'Total slides.' },
-        { sig: 'renderSlide(canvas, index, opts?: { width?, dpr? }): Promise<void>', desc: 'Render one slide into the given canvas at the given width.' },
+        { sig: 'renderSlide(canvas, index, opts?: { width?, dpr?, math? }): Promise<void>', desc: 'Render one slide into the given canvas at the given width. Pass `math` (from `@silurus/ooxml/math`) to render OMML equations; omit it and equations are skipped.' },
         { sig: 'destroy(): void', desc: 'Release the worker.' },
       ],
     },
@@ -77,6 +79,7 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
         { name: 'enableTextSelection', type: 'boolean', def: 'false', desc: 'Overlay a transparent text layer for native selection & copy.' },
         { name: 'showTrackChanges', type: 'boolean', desc: 'Render tracked insertions/deletions with author colours.' },
         ZIP,
+        MATH,
         { name: 'onPageChange', type: '(index: number, total: number) => void', desc: 'Called after a page finishes rendering.' },
         { name: 'onError', type: '(err: Error) => void', desc: 'Called on parse or render errors.' },
       ],
@@ -95,7 +98,7 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
       name: 'DocxDocument',
       ctor: 'await DocxDocument.load(source, options?)',
       note: 'Headless engine — render any page into any canvas you supply.',
-      options: [GFONTS, ZIP],
+      options: [GFONTS, ZIP, MATH],
       methods: [
         { sig: 'static load(source, options?): Promise<DocxDocument>', desc: 'Parse a document from a URL or ArrayBuffer.' },
         { sig: 'get pageCount(): number', desc: 'Total pages.' },

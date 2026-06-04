@@ -9,12 +9,10 @@ import {
   hexToRgba,
   resolveFill,
   mathToMathML,
-  loadMathJax,
-  mathMLToSvg,
   recolorSvg,
   PT_TO_PX,
 } from '@silurus/ooxml-core';
-import type { MathNode } from '@silurus/ooxml-core';
+import type { MathNode, MathRenderer } from '@silurus/ooxml-core';
 import { intendedSingleLinePx } from './font-metrics.js';
 
 const HIGHLIGHT_COLORS: Record<string, string> = {
@@ -80,14 +78,14 @@ function svgToImage(svg: string): Promise<HTMLImageElement> {
  * Convert + rasterize every equation in the document. Must complete before
  * pagination/render (which read extents synchronously). Idempotent per equation.
  */
-export async function prepareMathRuns(body: BodyElement[]): Promise<void> {
+export async function prepareMathRuns(body: BodyElement[], math: MathRenderer): Promise<void> {
   const runs = collectMathRuns(body);
   if (runs.length === 0) return;
-  await loadMathJax();
+  await math.loadMathJax();
   for (const r of runs) {
     if (mathRenders.has(r.nodes)) continue;
     try {
-      const out = await mathMLToSvg(mathToMathML(r.nodes, r.display));
+      const out = await math.mathMLToSvg(mathToMathML(r.nodes, r.display));
       const img = await svgToImage(recolorSvg(out.svg, '#000000'));
       mathRenders.set(r.nodes, {
         img,

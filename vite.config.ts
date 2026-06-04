@@ -30,6 +30,9 @@ export default defineConfig({
         pptx:  resolve(__dirname, 'src/pptx.ts'),
         xlsx:  resolve(__dirname, 'src/xlsx.ts'),
         docx:  resolve(__dirname, 'src/docx.ts'),
+        // Opt-in math engine (MathJax + STIX Two Math). Separate entry so the
+        // ~3 MB asset stays out of the docx/pptx bundles unless imported.
+        math:  resolve(__dirname, 'src/math.ts'),
       },
       // ESM-only: the published bundle inlines a large math engine; emitting a
       // duplicate CJS copy of every chunk roughly doubled the package size.

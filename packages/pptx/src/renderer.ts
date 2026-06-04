@@ -27,12 +27,10 @@ import {
   drawPolygon,
   ooxmlArcTo,
   EMU_PER_PT as PT_TO_EMU,
-  loadMathJax,
   mathToMathML,
-  mathMLToSvg,
   recolorSvg,
 } from '@silurus/ooxml-core';
-import type { MathNode } from '@silurus/ooxml-core';
+import type { MathNode, MathRenderer } from '@silurus/ooxml-core';
 import { drawPlayBadge } from './media-chrome';
 import { renderPresetShape, hasPreset, getConnectorAnchors } from './preset-shape';
 
@@ -294,14 +292,14 @@ function collectSlideMathRuns(slide: Slide): { nodes: MathNode[]; display: boole
  * synchronous layout/draw passes can place them by reading cached extents.
  * A conversion failure leaves the equation unrendered rather than throwing.
  */
-export async function prepareSlideMath(slide: Slide): Promise<void> {
+export async function prepareSlideMath(slide: Slide, math: MathRenderer): Promise<void> {
   const runs = collectSlideMathRuns(slide);
   if (runs.length === 0) return;
-  await loadMathJax();
+  await math.loadMathJax();
   for (const r of runs) {
     if (mathRenders.has(r.nodes)) continue;
     try {
-      const out = await mathMLToSvg(mathToMathML(r.nodes, r.display));
+      const out = await math.mathMLToSvg(mathToMathML(r.nodes, r.display));
       const sized = sizeSvgForRaster(recolorSvg(out.svg, '#000000'), out.widthEm, out.ascentEm + out.descentEm);
       const img = await svgToImage(sized);
       mathRenders.set(r.nodes, {
@@ -2221,7 +2219,9 @@ export async function renderSlide(
   renderBackground(ctx, slide.background, canvasW, canvasH);
 
   // Pre-rasterize any equations so the synchronous text layout can place them.
-  await prepareSlideMath(slide);
+  // Requires the opt-in `math` engine (RenderOptions.math); without it,
+  // equations are skipped and the engine asset never enters the bundle.
+  if (opts.math) await prepareSlideMath(slide, opts.math);
 
   const themeDefaultColor = opts.defaultTextColor
     ? `#${opts.defaultTextColor}`

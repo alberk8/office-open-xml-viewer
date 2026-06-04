@@ -1,6 +1,10 @@
 import type { Meta, StoryObj } from '@storybook/html';
 import { PptxViewer } from './viewer';
 import init, { parse_pptx } from './wasm/pptx_parser.js';
+// Opt-in math engine. In published usage: `import { math } from '@silurus/ooxml/math'`.
+// In the monorepo the stories build the same MathRenderer from the core engine.
+import { loadMathJax, mathMLToSvg } from '../../core/src/math/engine';
+const math = { loadMathJax, mathMLToSvg };
 
 type Args = {
   width: number;
@@ -65,6 +69,7 @@ export function buildViewerUI(
     width: args.width,
     useGoogleFonts: true,
     enableTextSelection: true,
+    math,
     onSlideChange: (idx, total) => {
       slideInfo.textContent = `Slide ${idx + 1} / ${total}`;
       prevBtn.disabled = idx === 0;
@@ -240,6 +245,7 @@ export const FileUpload: Story = {
       viewer = new PptxViewer(canvas, {
         width: args.width,
         enableMediaPlayback: true,
+        math,
         onSlideChange: (idx, total) => {
           slideInfo.textContent = `Slide ${idx + 1} / ${total}`;
           prevBtn.disabled = idx === 0;

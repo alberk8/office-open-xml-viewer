@@ -147,9 +147,10 @@ export class PptxViewer {
         this.handle = await this.engine.presentSlide(this.canvas, this.currentSlide, {
           width: targetWidth,
           dpr,
+          math: this.opts.math,
         });
       } else {
-        await this.engine.renderSlide(this.canvas, this.currentSlide, { width: targetWidth, dpr, onTextRun });
+        await this.engine.renderSlide(this.canvas, this.currentSlide, { width: targetWidth, dpr, onTextRun, math: this.opts.math });
       }
       this.opts.onSlideChange?.(this.currentSlide, this.slideCount);
     } catch (err) {

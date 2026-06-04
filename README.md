@@ -30,7 +30,7 @@ pnpm add @silurus/ooxml
 
 > **Bundler note**: this package embeds `.wasm` files. With Vite add [`vite-plugin-wasm`](https://github.com/Menci/vite-plugin-wasm); with webpack use [`experiments.asyncWebAssembly`](https://webpack.js.org/configuration/experiments/).
 
-> **Bundle size note**: npm's *Unpacked Size* figure sums ES (`.mjs`) and CJS (`.cjs`) outputs for all three formats. The size that actually lands in your app is much smaller — import only the format you need (e.g. `@silurus/ooxml/pptx`) and your bundler picks a single module format, so tree-shaking drops the other two formats entirely.
+> **Bundle size note**: the package is ESM-only (`.mjs`). npm's *Unpacked Size* sums all four entry bundles, including the **opt-in** math engine (MathJax + STIX Two Math, ~3 MB). What actually lands in your app is much smaller — import only the format you need (e.g. `@silurus/ooxml/pptx`). The math engine is a **separate entry** (`@silurus/ooxml/math`): it is bundled **only if you import it and pass it to a viewer** (see [Rendering equations](#rendering-equations)). Viewers that never receive a `math` engine — and all xlsx usage — tree-shake the ~3 MB away entirely.
 
 ---
 
@@ -58,6 +58,29 @@ const pptx = new PptxViewer(canvas);
 await pptx.load('/deck.pptx');
 pptx.nextSlide();
 ```
+
+### Rendering equations
+
+OMML equations (`m:oMath` / `m:oMathPara`) in `.docx` / `.pptx` are rendered with
+[MathJax](https://www.mathjax.org/) + [STIX Two Math](https://github.com/stipub/stixfonts).
+That engine is ~3 MB, so it is **opt-in**: import the `math` engine from the separate
+`@silurus/ooxml/math` entry and pass it to the viewer. Pass it and equations render;
+omit it and the engine is referenced nowhere, so a bundler **tree-shakes the ~3 MB
+away entirely** (equations are simply skipped). It is fully self-contained: no
+network, no cross-origin requests.
+
+```typescript
+import { DocxViewer } from '@silurus/ooxml/docx';
+import { math } from '@silurus/ooxml/math';
+
+const canvas = document.getElementById('docx-canvas') as HTMLCanvasElement;
+const docx = new DocxViewer(canvas, { math }); // ← equations now render
+await docx.load('/paper-with-equations.docx');
+```
+
+The same `math` engine works for `PptxViewer` and the headless `DocxDocument` /
+`PptxPresentation` APIs (which take `math` in their options). xlsx has no equation
+support and never references the engine.
 
 ---
 
@@ -385,7 +408,7 @@ export const PptxViewerComponent = component$<{ src: string }>(({ src }) => {
 | | Table of contents (TOC field) — dot leaders, right-aligned page numbers | ✅ |
 | | keepNext / keepLines / widowControl | ✅ |
 | **Elements** | Tables (with borders, fills, merges, banding, alignment) | ✅ |
-| | Math equations (OMML `m:oMath` / `m:oMathPara`, rendered via MathJax) | ✅ |
+| | Math equations (OMML `m:oMath` / `m:oMathPara`, rendered via MathJax — opt-in `@silurus/ooxml/math`) | ✅ |
 | | Images (inline and anchored, with text wrap) | ✅ |
 | | Text boxes / drawing shapes | ✅ |
 | | WMF / EMF metafile images (legacy vector) | ❌ Not planned |
@@ -496,7 +519,7 @@ export const PptxViewerComponent = component$<{ src: string }>(({ src }) => {
 | | Hyperlinks (`hlinkClick` — theme `hlink` colour + auto underline) | ✅ |
 | | Text shadow (`rPr > effectLst > outerShdw`) | ✅ |
 | | Text outline (`rPr > a:ln`) | ✅ |
-| | Math equations (OMML `m:oMath` / `m:oMathPara`, incl. `a14:m` / `mc:AlternateContent`; STIX Two Math via MathJax) | ✅ |
+| | Math equations (OMML `m:oMath` / `m:oMathPara`, incl. `a14:m` / `mc:AlternateContent`; STIX Two Math via MathJax — opt-in `@silurus/ooxml/math`) | ✅ |
 | **Text — paragraphs** | Horizontal alignment (left / center / right / justify) | ✅ |
 | | Vertical anchor (top / center / bottom) | ✅ |
 | | Line spacing (`spcPct`, `spcPts`) | ✅ |

@@ -66,6 +66,7 @@ export class DocxViewer {
       this._doc = await DocxDocument.load(source, {
         useGoogleFonts: this._opts.useGoogleFonts,
         maxZipEntryBytes: this._opts.maxZipEntryBytes,
+        math: this._opts.math,
       });
       this._currentPage = 0;
       await this._render();

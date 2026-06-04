@@ -3,15 +3,14 @@
 // esbuild bundles this (and only this) into `assets/mathjax-stix2.js`, an
 // opaque, tree-shaken, minified IIFE (~1.7 MB). The renderer loads that asset
 // lazily, so it never bloats non-math viewers and is never re-bundled by the
-// consuming app's bundler. The STIX2 font is baked in statically (all glyph
-// ranges imported up-front, then `dynamicFiles` emptied) → DOM-free, zero
-// network, zero cross-origin.
+// consuming app's bundler. The STIX2 font is baked in statically: every glyph
+// range is imported up-front so `dynamicSetup` marks it loaded → DOM-free,
+// zero network, zero cross-origin (no on-demand range fetches).
 import { mathjax } from '@mathjax/src/mjs/mathjax.js';
 import { MathML } from '@mathjax/src/mjs/input/mathml.js';
 import { SVG } from '@mathjax/src/mjs/output/svg.js';
 import { liteAdaptor } from '@mathjax/src/mjs/adaptors/liteAdaptor.js';
 import { RegisterHTMLHandler } from '@mathjax/src/mjs/handlers/html.js';
-import { SvgFontData } from '@mathjax/src/mjs/output/svg/FontData.js';
 import { MathJaxStix2Font } from '@mathjax/mathjax-stix2-font/mjs/svg.js';
 import '@mathjax/mathjax-stix2-font/mjs/svg/dynamic/accents-other.js';
 import '@mathjax/mathjax-stix2-font/mjs/svg/dynamic/accents.js';
@@ -39,14 +38,38 @@ import '@mathjax/mathjax-stix2-font/mjs/svg/dynamic/symbols.js';
 import '@mathjax/mathjax-stix2-font/mjs/svg/dynamic/upright.js';
 import '@mathjax/mathjax-stix2-font/mjs/svg/dynamic/variants.js';
 
-// Every range is now resident in the font class; disable on-demand loading so
-// the renderer never attempts a (cross-origin) fetch for a glyph range.
-MathJaxStix2Font.dynamicFiles = SvgFontData.defineDynamicFiles([]);
-
 const adaptor = liteAdaptor();
 RegisterHTMLHandler(adaptor);
-const svgJax = new SVG({ fontData: MathJaxStix2Font, fontCache: 'none' });
+// `linebreaks.inline:false` + `displayOverflow:'overflow'`: never auto-break an
+// equation into multiple sibling <svg>s (MathJax v4 separates them with
+// <mjx-break>, which our single-<svg> extraction / <img> rasterization can't
+// consume — a long equation would otherwise silently fail to load).
+const svgJax = new SVG({
+  fontData: MathJaxStix2Font,
+  fontCache: 'none',
+  displayOverflow: 'overflow',
+  linebreaks: { inline: false },
+});
 const doc = mathjax.document('', { InputJax: new MathML(), OutputJax: svgJax });
+
+// Force-load every dynamic glyph range into the font instance up-front.
+//
+// `dynamicSetup` (run by the range imports above) only stores a `setup(font)`
+// closure on each `dynamicFiles` entry; the glyphs aren't defined until that
+// closure runs (normally triggered by an on-demand, async, cross-origin fetch).
+// Since the ranges are already bundled, we run the closures synchronously here
+// against the output's font instance. This makes EVERY styled glyph (script,
+// fraktur, double-struck, calligraphic, sans-serif, stretchy bars, …) render
+// as a `<path>` immediately — no `<text>` fallback (wrong font/metrics), no
+// "retry" exception, and no network request.
+const dynamicFiles = svgJax.font.constructor.dynamicFiles;
+for (const name of Object.keys(dynamicFiles)) {
+  try {
+    dynamicFiles[name].setup(svgJax.font);
+  } catch {
+    /* a range with no real setup (shouldn't happen — all are imported) */
+  }
+}
 
 // Exposed on globalThis so the lazily-injected script hands the API back to the
 // renderer. Returns a standalone `<svg>…</svg>` string (currentColor fill, a

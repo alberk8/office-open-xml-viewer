@@ -50,11 +50,10 @@ export {
 } from './sparkline/renderer';
 export {
   mathToMathML,
-  loadMathJax,
-  mathMLToSvg,
   svgExtents,
   recolorSvg,
   type MathSvg,
+  type MathRenderer,
 } from './math';
 export type { MathNode, MathFormula, MathStyle } from './types/math';
 export { EMU_PER_INCH, EMU_PER_PT, EMU_PER_PX, PT_TO_PX } from './units';

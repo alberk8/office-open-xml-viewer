@@ -6,6 +6,7 @@ import {
   WorkerBridge,
   type FontPreloadEntry,
   type LoadOptions as CoreLoadOptions,
+  type MathRenderer,
 } from '@silurus/ooxml-core';
 import InlineWorker from './worker.ts?worker&inline';
 import wasmAssetUrl from './wasm/pptx_parser_bg.wasm?url';
@@ -51,6 +52,12 @@ export interface RenderSlideOptions {
    * its own play/pause chrome without duplication.
    */
   skipMediaControls?: boolean;
+  /**
+   * Opt-in OMML equation engine. Import it from the separate `@silurus/ooxml/math`
+   * entry and pass it in: `import { math } from '@silurus/ooxml/math'`. When
+   * omitted, equations are skipped and the ~3 MB engine never enters the bundle.
+   */
+  math?: MathRenderer;
 }
 
 /**
@@ -164,6 +171,7 @@ export class PptxPresentation {
         hlinkColor: this._presentation.hlinkColor ?? null,
         fetchMedia: (path) => this.getMedia(path),
         skipMediaControls: opts.skipMediaControls,
+        math: opts.math,
       },
       opts.onTextRun,
     );
@@ -228,6 +236,7 @@ export class PptxPresentation {
         dpr,
         skipMediaControls: true,
         onTextRun: opts.onTextRun,
+        math: opts.math,
       }),
     });
   }

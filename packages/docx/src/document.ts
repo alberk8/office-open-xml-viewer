@@ -5,6 +5,7 @@ import {
   WorkerBridge,
   type FontPreloadEntry,
   type LoadOptions as CoreLoadOptions,
+  type MathRenderer,
 } from '@silurus/ooxml-core';
 import type { PaginatedBodyElement, DocxDocumentModel, RenderPageOptions, WorkerResponse } from './types';
 import { computePages, renderDocumentToCanvas, documentHasMath, prepareMathRuns } from './renderer';
@@ -28,9 +29,17 @@ const DOCX_GOOGLE_FONTS: Record<string, FontPreloadEntry> = {
   'playfair display':  { url: 'https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400;0,700;1,400;1,700&display=swap' },
 };
 
-/** Options for {@link DocxDocument.load}. The shared load-options type from
- *  `@silurus/ooxml-core` (`useGoogleFonts`, `maxZipEntryBytes`). */
-export type LoadOptions = CoreLoadOptions;
+/** Options for {@link DocxDocument.load}. Extends the shared load-options type
+ *  from `@silurus/ooxml-core` (`useGoogleFonts`, `maxZipEntryBytes`) with the
+ *  opt-in math engine. */
+export interface LoadOptions extends CoreLoadOptions {
+  /**
+   * Opt-in OMML equation engine. Import it from the separate `@silurus/ooxml/math`
+   * entry and pass it in: `import { math } from '@silurus/ooxml/math'`. When
+   * omitted, equations are skipped and the ~3 MB engine never enters the bundle.
+   */
+  math?: MathRenderer;
+}
 
 export class DocxDocument {
   private _document: DocxDocumentModel | null = null;
@@ -66,9 +75,10 @@ export class DocxDocument {
       );
     }
     // Equations are converted + rasterized before pagination (which reads their
-    // extents synchronously).
-    if (doc._document && documentHasMath(doc._document.body)) {
-      await prepareMathRuns(doc._document.body);
+    // extents synchronously). Requires the opt-in `math` engine; without it,
+    // equations are skipped (and the engine asset is never bundled).
+    if (opts.math && doc._document && documentHasMath(doc._document.body)) {
+      await prepareMathRuns(doc._document.body, opts.math);
     }
     return doc;
   }

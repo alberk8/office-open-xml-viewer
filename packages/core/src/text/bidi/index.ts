@@ -7,6 +7,7 @@ export type {
   BidiLevels,
   StyledRun,
   VisualSegment,
+  SegmentPart,
 } from './types.js';
 
 export type { BidiEngine } from './engine.js';

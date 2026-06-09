@@ -43,18 +43,33 @@ export interface StyledRun {
   meta?: unknown;
 }
 
+/** A sub-slice of a visual segment originating from one styled run. */
+export interface SegmentPart {
+  text: string;
+  run: StyledRun;
+}
+
 /**
  * One visual draw segment: a maximal slice that is direction-uniform AND
- * shape-style-uniform. Segments are returned in VISUAL (left-to-right) order;
- * the renderer assigns x left-to-right by measured width.
+ * shape-style-uniform (same fontFamily/bold/italic/fontSizePx). Segments are
+ * returned in VISUAL (left-to-right) order; the renderer assigns x left-to-right
+ * by measured width.
  *
- * `text` is the slice in LOGICAL order — pass it to a single `fillText` with
- * `ctx.direction = isRTL ? 'rtl' : 'ltr'` so Canvas applies the correct
+ * `text` is the whole slice in LOGICAL order — pass it to a single `fillText`
+ * with `ctx.direction = isRTL ? 'rtl' : 'ltr'` so Canvas applies the correct
  * intra-segment reversal, shaping and bracket mirroring.
+ *
+ * A segment may span several adjacent runs that share shape-style but differ in
+ * non-shape-affecting style (color, decoration). Those are kept in ONE segment
+ * (so Arabic joining is preserved) and exposed as `parts` in logical order; the
+ * renderer draws `text` once for shaping and applies per-part color/decoration.
+ * `logicalStart` is the segment's start offset (code units) in the concatenated
+ * line text, for stable ordering/debugging.
  */
 export interface VisualSegment {
   text: string;
   isRTL: boolean;
   level: number;
-  run: StyledRun;
+  parts: SegmentPart[];
+  logicalStart: number;
 }

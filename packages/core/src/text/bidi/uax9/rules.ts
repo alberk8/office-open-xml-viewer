@@ -107,7 +107,8 @@ function determineExplicitLevels(
       case 'LRI':
       case 'FSI': {
         levels[i] = top().level;
-        if (top().override !== 'neutral') types[i] = top().override;
+        const ov = top().override;
+        if (ov !== 'neutral') types[i] = ov;
         let dir: Dir;
         if (t === 'RLI') dir = 'R';
         else if (t === 'LRI') dir = 'L';
@@ -130,8 +131,11 @@ function determineExplicitLevels(
           stack.pop();
           validIsolate--;
         }
-        levels[i] = top().level;
-        if (top().override !== 'neutral') types[i] = top().override;
+        {
+          levels[i] = top().level;
+          const ov = top().override;
+          if (ov !== 'neutral') types[i] = ov;
+        }
         break;
       }
       case 'PDF': {
@@ -161,7 +165,8 @@ function determineExplicitLevels(
       default: {
         // X6: all other types.
         levels[i] = top().level;
-        if (top().override !== 'neutral') types[i] = top().override;
+        const ov = top().override;
+        if (ov !== 'neutral') types[i] = ov;
         break;
       }
     }

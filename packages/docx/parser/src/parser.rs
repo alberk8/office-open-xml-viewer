@@ -739,6 +739,12 @@ fn parse_paragraph(
     } else {
         (base_para.indent_left.unwrap_or(0.0), base_para.indent_first.unwrap_or(0.0))
     };
+    // Same for the end-side indent (w:ind@right ≡ end): an RTL list level
+    // defines its indent there (e.g. w:right="720" w:hanging="360").
+    let indent_right = numbering.as_ref()
+        .and_then(|num| num_map.get_level(num.num_id, num.level))
+        .and_then(|l| l.indent_right)
+        .unwrap_or(indent_right);
 
     // Parse runs
     let mut runs = vec![];
@@ -1106,12 +1112,12 @@ fn parse_run_inner(
     let rtl = fmt.rtl;
     let font_family_cs = theme.resolve_font_ref(fmt.font_family_cs.clone());
     let font_size_cs = fmt.font_size_cs;
-    // Complex-script bold/italic (ECMA-376 §17.3.2.4 / §17.3.2.6). Surfaced as
-    // Option so the renderer can apply them on the CS axis for rtl/cs runs:
-    // `None` ⇒ not set anywhere in the style chain ⇒ not bold/italic for CS
-    // glyphs, regardless of the non-CS `b`/`i`.
+    // Complex-script bold / italic (ECMA-376 §17.3.2.3 / §17.3.2.17) and the
+    // complex-script language tag (§17.3.2.20). Recorded so the renderer can
+    // route cs-classified content to cs formatting and decide AN digit ordering.
     let bold_cs = fmt.bold_cs;
     let italic_cs = fmt.italic_cs;
+    let lang_bidi = fmt.lang_bidi.clone();
 
     for child in node.children().filter(|n| n.is_element()) {
         match child.tag_name().name() {
@@ -1145,6 +1151,7 @@ fn parse_run_inner(
                         font_size_cs,
                         bold_cs,
                         italic_cs,
+                        lang_bidi: lang_bidi.clone(),
                     }));
                 }
             }
@@ -1174,6 +1181,7 @@ fn parse_run_inner(
                     font_size_cs,
                     bold_cs,
                     italic_cs,
+                    lang_bidi: lang_bidi.clone(),
                 }));
             }
             "br" => {
@@ -1272,6 +1280,7 @@ fn parse_run_inner(
                     font_size_cs,
                     bold_cs,
                     italic_cs,
+                    lang_bidi: lang_bidi.clone(),
                 }));
             }
             "AlternateContent" => {
@@ -1284,6 +1293,16 @@ fn parse_run_inner(
                             }
                         }
                     }
+                }
+            }
+            "pict" => {
+                // Legacy VML drawing (ECMA-376 Part 4 §14.1): <w:pict> wraps a
+                // <v:shape>/<v:rect>/<v:roundrect> with optional <v:textbox>.
+                // Word still emits these for simple text boxes. We surface the
+                // shape's fill/stroke/size and its txbxContent as a ShapeRun so
+                // the existing shape renderer draws the panel + RTL body text.
+                if let Some(shp) = parse_vml_pict(child, theme) {
+                    runs.push(DocRun::Shape(shp));
                 }
             }
             _ => {}
@@ -1969,6 +1988,118 @@ fn extract_simple_paragraph_text(p: roxmltree::Node, theme: &ThemeColors) -> Opt
     })
 }
 
+/// Parse a legacy VML `<w:pict>` text box (ECMA-376 Part 4 §14.1) into a
+/// ShapeRun. Handles the common Word-emitted form:
+///   <w:pict><v:shape type="#_x0000_t202"
+///       style="…width:300pt;height:60pt…" fillcolor="#fdf2d0"
+///       strokecolor="#c0a000">
+///     <v:textbox><w:txbxContent>…</w:txbxContent></v:textbox>
+///   </v:shape></w:pict>
+/// Size comes from the CSS-like `style` attribute (width/height in pt), fill
+/// and stroke from `fillcolor`/`strokecolor`. The shape is anchored to the
+/// paragraph's leading (top-left) corner — VML `position:relative` text boxes
+/// flow with their anchor paragraph, which Word places at the left margin just
+/// below the preceding content.
+fn parse_vml_pict(pict: roxmltree::Node, theme: &ThemeColors) -> Option<ShapeRun> {
+    // v:shape / v:rect / v:roundrect — any VML shape element with geometry.
+    let shape = pict.descendants().find(|n| {
+        n.is_element()
+            && matches!(n.tag_name().name(), "shape" | "rect" | "roundrect" | "oval")
+    })?;
+
+    // CSS-like `style`: "position:relative;width:300pt;height:60pt;…"
+    let style = shape.attribute("style").unwrap_or("");
+    let css_pt = |prop: &str| -> Option<f64> {
+        for decl in style.split(';') {
+            let mut kv = decl.splitn(2, ':');
+            let k = kv.next()?.trim();
+            let v = kv.next()?.trim();
+            if k.eq_ignore_ascii_case(prop) {
+                // strip a trailing "pt" unit; VML lengths default to pt here.
+                let num = v.trim_end_matches("pt").trim();
+                return num.parse::<f64>().ok();
+            }
+        }
+        None
+    };
+    let width_pt = css_pt("width").unwrap_or(0.0);
+    let height_pt = css_pt("height").unwrap_or(0.0);
+    if width_pt <= 0.0 || height_pt <= 0.0 {
+        return None;
+    }
+
+    // VML colors: `fillcolor` / `strokecolor` are "#rrggbb" (or named); we keep
+    // the 6-hex form the renderer expects (no leading '#').
+    let hex6 = |c: &str| -> Option<String> {
+        let s = c.trim().trim_start_matches('#');
+        if s.len() == 6 && s.chars().all(|ch| ch.is_ascii_hexdigit()) {
+            Some(s.to_ascii_lowercase())
+        } else {
+            None
+        }
+    };
+    let fill = shape
+        .attribute("fillcolor")
+        .and_then(hex6)
+        .map(|color| ShapeFill::Solid { color });
+    let stroke = shape.attribute("strokecolor").and_then(hex6);
+    // VML default stroke weight is 0.75pt when a stroke color is present and no
+    // explicit weight is given (Part 4 §14.1.2.21 strokeweight default).
+    let stroke_width = if stroke.is_some() {
+        shape
+            .descendants()
+            .find(|n| n.is_element() && n.tag_name().name() == "stroke")
+            .and_then(|n| n.attribute("weight"))
+            .and_then(|w| w.trim_end_matches("pt").trim().parse::<f64>().ok())
+            .or_else(|| {
+                shape
+                    .attribute("strokeweight")
+                    .and_then(|w| w.trim_end_matches("pt").trim().parse::<f64>().ok())
+            })
+            .unwrap_or(0.75)
+    } else {
+        0.0
+    };
+
+    // Body text from <v:textbox><w:txbxContent>.
+    let text_blocks: Vec<ShapeText> = shape
+        .descendants()
+        .find(|n| n.is_element() && n.tag_name().name() == "txbxContent")
+        .map(|content| {
+            children_w_flat(content, "p")
+                .into_iter()
+                .filter_map(|p| extract_simple_paragraph_text(p, theme))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    Some(ShapeRun {
+        width_pt,
+        height_pt,
+        anchor_x_pt: 0.0,
+        anchor_y_pt: 0.0,
+        anchor_x_from_margin: true,
+        anchor_y_from_para: true,
+        behind_doc: false,
+        z_order: 0,
+        subpaths: Vec::new(),
+        preset_geometry: Some("rect".to_string()),
+        adj_values: Vec::new(),
+        fill,
+        stroke,
+        stroke_width,
+        rotation: 0.0,
+        // VML t202 text-box default insets are the OOXML defaults (§21.1.2.1.1).
+        text_blocks,
+        text_anchor: None,
+        text_inset_l: 91440.0 / 12700.0,
+        text_inset_t: 45720.0 / 12700.0,
+        text_inset_r: 91440.0 / 12700.0,
+        text_inset_b: 45720.0 / 12700.0,
+        ..Default::default()
+    })
+}
+
 /// Parse a shape's fill (solidFill or gradFill). Returns None for noFill/missing.
 fn parse_shape_fill(sp_pr: roxmltree::Node, theme: &ThemeColors) -> Option<ShapeFill> {
     for child in sp_pr.children().filter(|n| n.is_element()) {
@@ -2437,22 +2568,31 @@ fn parse_table_cell(
 }
 
 fn parse_table_borders(node: roxmltree::Node) -> TableBorders {
+    // ECMA-376 §17.4.* tblBorders: the vertical edges may be given either as the
+    // legacy physical names (w:left/w:right) or as the logical edges
+    // (w:start/w:end, §17.4.66-67). Prefer the physical name when both are
+    // present, else fall back to the logical alias. The renderer handles
+    // visual mirroring for bidiVisual tables via its `mirror` flag, so at
+    // parse time start→left and end→right unconditionally.
     TableBorders {
         top: child_w(node, "top").map(parse_border_spec),
         bottom: child_w(node, "bottom").map(parse_border_spec),
-        left: child_w(node, "left").map(parse_border_spec),
-        right: child_w(node, "right").map(parse_border_spec),
+        left: child_w(node, "left").or_else(|| child_w(node, "start")).map(parse_border_spec),
+        right: child_w(node, "right").or_else(|| child_w(node, "end")).map(parse_border_spec),
         inside_h: child_w(node, "insideH").map(parse_border_spec),
         inside_v: child_w(node, "insideV").map(parse_border_spec),
     }
 }
 
 fn parse_cell_borders(node: roxmltree::Node) -> CellBorders {
+    // ECMA-376 §17.4.* tcBorders: same logical/physical edge aliasing as
+    // tblBorders. w:start/w:end (§17.4.66-67) are the logical vertical edges;
+    // w:left/w:right the physical names. Prefer physical, fall back to logical.
     CellBorders {
         top: child_w(node, "top").map(parse_border_spec),
         bottom: child_w(node, "bottom").map(parse_border_spec),
-        left: child_w(node, "left").map(parse_border_spec),
-        right: child_w(node, "right").map(parse_border_spec),
+        left: child_w(node, "left").or_else(|| child_w(node, "start")).map(parse_border_spec),
+        right: child_w(node, "right").or_else(|| child_w(node, "end")).map(parse_border_spec),
     }
 }
 
@@ -2546,9 +2686,23 @@ fn apply_direct_run(base: &mut RunFmt, direct: &RunFmt) {
     if direct.vert_align.is_some() { base.vert_align = direct.vert_align.clone(); }
     if direct.rtl.is_some() { base.rtl = direct.rtl; }
     if direct.font_family_cs.is_some() { base.font_family_cs = direct.font_family_cs.clone(); }
-    if direct.font_size_cs.is_some() { base.font_size_cs = direct.font_size_cs; }
     if direct.bold_cs.is_some() { base.bold_cs = direct.bold_cs; }
     if direct.italic_cs.is_some() { base.italic_cs = direct.italic_cs; }
+    if direct.lang_bidi.is_some() { base.lang_bidi = direct.lang_bidi.clone(); }
+
+    // Complex-script font size: a directly-applied `w:sz` without an
+    // accompanying `w:szCs` mirrors into the cs size (ECMA-376 §17.3.2.18 —
+    // see `styles::apply_run` for the full rationale). An explicit `w:szCs`
+    // always wins; otherwise inherited-only szCs is carried unchanged.
+    if direct.font_size_cs_set_here {
+        base.font_size_cs = direct.font_size_cs;
+    } else if direct.font_size_set_here {
+        base.font_size_cs = direct.font_size;
+    } else if direct.font_size_cs.is_some() {
+        base.font_size_cs = direct.font_size_cs;
+    }
+    base.font_size_set_here = false;
+    base.font_size_cs_set_here = false;
 }
 
 fn parse_rels(xml: &str) -> HashMap<String, String> {
@@ -2769,11 +2923,187 @@ mod rtl_tests {
         assert_eq!(run.rtl, Some(false));
     }
 
+    /// ECMA-376 §17.3.2.18: a directly-applied `w:sz` with NO accompanying
+    /// `w:szCs` mirrors into the complex-script size (Word draws Arabic in a
+    /// run that only sets `w:sz` at that size — sample-7's underlined title sets
+    /// sz=36 / no szCs and renders the Arabic at 18pt). An explicit `w:szCs`
+    /// still wins independently.
+    #[test]
+    fn direct_sz_without_szcs_mirrors_into_cs_size() {
+        // sz=36 (18pt), no szCs -> font_size_cs == font_size == 18.
+        let body = body_from(
+            r#"<w:p><w:r><w:rPr><w:b/><w:sz w:val="36"/></w:rPr><w:t>نبذة</w:t></w:r></w:p>"#,
+        );
+        let run = body.iter().find_map(|e| match e {
+            BodyElement::Paragraph(p) => p.runs.iter().find_map(|r| match r {
+                DocRun::Text(t) => Some(t),
+                _ => None,
+            }),
+            _ => None,
+        }).expect("text run present");
+        assert_eq!(run.font_size, 18.0, "sz=36 half-pts → 18pt");
+        assert_eq!(
+            run.font_size_cs,
+            Some(18.0),
+            "sz without szCs mirrors into the complex-script size (§17.3.2.18)"
+        );
+
+        // sz=36 AND szCs=24 -> cs size honors the explicit szCs (12pt).
+        let body2 = body_from(
+            r#"<w:p><w:r><w:rPr><w:sz w:val="36"/><w:szCs w:val="24"/></w:rPr><w:t>x</w:t></w:r></w:p>"#,
+        );
+        let run2 = body2.iter().find_map(|e| match e {
+            BodyElement::Paragraph(p) => p.runs.iter().find_map(|r| match r {
+                DocRun::Text(t) => Some(t),
+                _ => None,
+            }),
+            _ => None,
+        }).unwrap();
+        assert_eq!(run2.font_size, 18.0);
+        assert_eq!(run2.font_size_cs, Some(12.0), "explicit szCs wins over sz mirroring");
+    }
+
+    /// ECMA-376 §17.3.2.3 w:bCs, §17.3.2.17 w:iCs, §17.3.2.20 w:lang/@w:bidi —
+    /// complex-script bold/italic toggles and the RTL language tag (lower-cased)
+    /// are surfaced on the run model for the renderer's cs-formatting path.
+    #[test]
+    fn complex_script_bold_italic_and_lang_bidi_are_extracted() {
+        let body = body_from(
+            r#"<w:p><w:r><w:rPr><w:rtl/><w:bCs/><w:iCs/>
+              <w:lang w:val="en-AE" w:bidi="ae-AR"/></w:rPr><w:t>28-02-2026</w:t></w:r></w:p>"#,
+        );
+        let run = body.iter().find_map(|e| match e {
+            BodyElement::Paragraph(p) => p.runs.iter().find_map(|r| match r {
+                DocRun::Text(t) => Some(t),
+                _ => None,
+            }),
+            _ => None,
+        }).expect("text run present");
+        assert_eq!(run.bold_cs, Some(true), "w:bCs → run.boldCs");
+        assert_eq!(run.italic_cs, Some(true), "w:iCs → run.italicCs");
+        assert_eq!(
+            run.lang_bidi.as_deref(),
+            Some("ae-ar"),
+            "w:lang@w:bidi lower-cased → run.langBidi"
+        );
+    }
+
+    /// Legacy VML text box (ECMA-376 Part 4 §14.1): `<w:pict>` with a
+    /// `<v:shape type="#_x0000_t202">` surfaces as a ShapeRun carrying the
+    /// fill/stroke from the VML attributes, the size from the CSS `style`, and
+    /// the `<w:txbxContent>` body text — so the renderer draws the yellow box.
+    #[test]
+    fn vml_pict_textbox_becomes_a_shape_run() {
+        let body = body_from(
+            r##"<w:p><w:r><w:pict xmlns:v="urn:schemas-microsoft-com:vml">
+              <v:shape id="tb1" type="#_x0000_t202"
+                  style="position:relative;width:300pt;height:60pt"
+                  fillcolor="#fdf2d0" strokecolor="#c0a000">
+                <v:textbox><w:txbxContent>
+                  <w:p><w:pPr><w:bidi/><w:jc w:val="right"/></w:pPr>
+                    <w:r><w:rPr><w:rtl/></w:rPr><w:t>مربع نص 2025</w:t></w:r>
+                  </w:p>
+                </w:txbxContent></v:textbox>
+              </v:shape>
+            </w:pict></w:r></w:p>"##,
+        );
+        let para = body.iter().find_map(|e| match e {
+            BodyElement::Paragraph(p) => Some(p),
+            _ => None,
+        }).expect("paragraph present");
+        let shape = para.runs.iter().find_map(|r| match r {
+            DocRun::Shape(s) => Some(s),
+            _ => None,
+        }).expect("VML pict should produce a ShapeRun");
+
+        assert_eq!(shape.width_pt, 300.0, "width from CSS style");
+        assert_eq!(shape.height_pt, 60.0, "height from CSS style");
+        assert_eq!(shape.preset_geometry.as_deref(), Some("rect"));
+        match &shape.fill {
+            Some(ShapeFill::Solid { color }) => assert_eq!(color, "fdf2d0"),
+            other => panic!("expected solid fdf2d0 fill, got {other:?}"),
+        }
+        assert_eq!(shape.stroke.as_deref(), Some("c0a000"));
+        assert!(shape.stroke_width > 0.0, "stroke present ⇒ visible weight");
+        assert_eq!(shape.text_blocks.len(), 1, "one body paragraph");
+        assert_eq!(shape.text_blocks[0].text, "مربع نص 2025");
+        assert_eq!(shape.text_blocks[0].alignment, "right");
+    }
+
+    /// ECMA-376 §17.4.* w:tcBorders with only the logical vertical edges
+    /// (w:start/w:end, §17.4.66-67) must still yield left/right border specs.
+    /// RTL/bidi-aware authoring tools emit start/end instead of left/right;
+    /// the parser maps start→left, end→right (the renderer handles visual
+    /// mirroring for bidiVisual tables).
+    #[test]
+    fn tc_borders_start_end_map_to_left_right() {
+        let body = body_from(
+            r#"
+            <w:tbl>
+              <w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid>
+              <w:tr><w:tc>
+                <w:tcPr>
+                  <w:tcBorders>
+                    <w:start w:sz="1" w:val="single" w:color="D9D9D9"/>
+                    <w:top w:sz="1" w:val="single" w:color="D9D9D9"/>
+                    <w:end w:sz="1" w:val="single" w:color="D9D9D9"/>
+                    <w:bottom w:sz="1" w:val="single" w:color="D9D9D9"/>
+                  </w:tcBorders>
+                </w:tcPr>
+                <w:p><w:r><w:t>x</w:t></w:r></w:p>
+              </w:tc></w:tr>
+            </w:tbl>
+            "#,
+        );
+        let tbl = body.iter().find_map(|e| match e {
+            BodyElement::Table(t) => Some(t),
+            _ => None,
+        }).expect("table present");
+        let cell = &tbl.rows[0].cells[0];
+        let left = cell.borders.left.as_ref().expect("w:start should map to cell.left");
+        let right = cell.borders.right.as_ref().expect("w:end should map to cell.right");
+        assert_eq!(left.color.as_deref(), Some("d9d9d9"), "start color → left");
+        assert_eq!(left.style, "single");
+        assert_eq!(right.color.as_deref(), Some("d9d9d9"), "end color → right");
+        assert_eq!(right.style, "single");
+        // top/bottom (literal physical names) still parsed.
+        assert!(cell.borders.top.is_some());
+        assert!(cell.borders.bottom.is_some());
+    }
+
+    /// ECMA-376 §17.4.* w:tblBorders: a table-level w:start/w:end likewise
+    /// maps to the physical left/right edges.
+    #[test]
+    fn tbl_borders_start_end_map_to_left_right() {
+        let body = body_from(
+            r#"
+            <w:tbl>
+              <w:tblPr>
+                <w:tblBorders>
+                  <w:start w:sz="4" w:val="single" w:color="000000"/>
+                  <w:end w:sz="4" w:val="single" w:color="000000"/>
+                </w:tblBorders>
+              </w:tblPr>
+              <w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid>
+              <w:tr><w:tc><w:p><w:r><w:t>x</w:t></w:r></w:p></w:tc></w:tr>
+            </w:tbl>
+            "#,
+        );
+        let tbl = body.iter().find_map(|e| match e {
+            BodyElement::Table(t) => Some(t),
+            _ => None,
+        }).expect("table present");
+        assert!(tbl.borders.left.is_some(), "w:start should map to tblBorders.left");
+        assert!(tbl.borders.right.is_some(), "w:end should map to tblBorders.right");
+    }
+
     /// ECMA-376 §17.3.2.4 w:bCs / §17.3.2.6 w:iCs are INDEPENDENT toggles from
-    /// §17.3.2.3 w:b / §17.3.2.5 w:i. A run that sets only `w:b` (no `w:bCs`)
-    /// must surface `bold_cs == None`, so a complex-script consumer renders it
-    /// non-bold — this is the sample-7 date-cell case where Word draws the
-    /// dates at regular weight despite the run carrying `w:b`.
+    /// §17.3.2.3 w:b / §17.3.2.5 w:i AT THE PARSER LEVEL: a run that sets only
+    /// `w:b` (no `w:bCs`) surfaces `bold_cs == None`. NOTE: the renderer's cs
+    /// axis intentionally MIRRORS the non-cs value when bCs is absent
+    /// (`csBold = boldCs ?? base.bold`) — PDF sample-7 page-1 headings carry
+    /// `w:b` without `w:bCs` and render BOLD in Word. So `None` here means
+    /// "not set on the cs axis at the parser level", not "renders non-bold".
     #[test]
     fn complex_script_bold_is_independent_of_non_cs_bold() {
         let body = body_from(
@@ -2792,10 +3122,11 @@ mod rtl_tests {
         }).unwrap();
         // `w:b` sets the non-CS bold…
         assert_eq!(run.bold, true, "w:b sets non-CS bold");
-        // …but `w:bCs` is absent, so the CS bold axis stays None (inherit/off),
-        // NOT derived from w:b.
-        assert_eq!(run.bold_cs, None, "absent w:bCs must not inherit w:b");
-        assert_eq!(run.italic_cs, None, "absent w:iCs must not inherit w:i");
+        // …and `w:bCs` is absent, so the parser leaves the CS bold axis None.
+        // The renderer mirrors it from `bold` (boldCs ?? bold) per the PDF-
+        // verified sample-7 page-1 behaviour; that fallback lives in renderer.ts.
+        assert_eq!(run.bold_cs, None, "absent w:bCs stays None at the parser level");
+        assert_eq!(run.italic_cs, None, "absent w:iCs stays None at the parser level");
     }
 
     /// An explicit `w:bCs` / `w:iCs` is surfaced on its own axis (and honors the

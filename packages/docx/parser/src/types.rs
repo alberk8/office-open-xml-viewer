@@ -549,17 +549,20 @@ pub struct TextRun {
     /// units as `font_size`). `None` when unspecified.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub font_size_cs: Option<f64>,
-    /// ECMA-376 §17.3.2.4 `<w:bCs>` — bold toggle for complex-script text.
-    /// Independent of `bold` (§17.3.2.3 w:b). `None` when unspecified, in which
-    /// case a complex-script run is NOT bold (the toggle resolved to absent
-    /// through the whole style chain). `false` is meaningful: an explicit
-    /// `<w:bCs w:val="0"/>` turning off an inherited complex-script bold.
+    /// ECMA-376 §17.3.2.3 `<w:bCs>` — complex-script bold toggle. `None` when
+    /// unspecified (renderer falls back to `bold`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bold_cs: Option<bool>,
-    /// ECMA-376 §17.3.2.6 `<w:iCs>` — italic toggle for complex-script text.
-    /// Independent of `italic` (§17.3.2.5 w:i), same semantics as `bold_cs`.
+    /// ECMA-376 §17.3.2.17 `<w:iCs>` — complex-script italic toggle. `None`
+    /// when unspecified (renderer falls back to `italic`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub italic_cs: Option<bool>,
+    /// ECMA-376 §17.3.2.20 `<w:lang w:bidi>` — the complex-script (RTL) language
+    /// tag, lower-cased (e.g. "ar-sa", "ae-ar", "he-il"). Used to decide whether
+    /// European digits in a complex-script run are classified as AN (Word's
+    /// Arabic/Hebrew digit ordering). `None` when unspecified.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lang_bidi: Option<String>,
 }
 
 #[derive(Serialize, Debug, Clone)]

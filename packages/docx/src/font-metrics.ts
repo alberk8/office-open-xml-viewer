@@ -73,14 +73,26 @@ interface WinMetric {
 /** A known font's win metrics. Keyed by a normalized (lowercased) name test. */
 const WIN_METRICS: ReadonlyArray<readonly [test: (n: string) => boolean, m: WinMetric]> = [
   // Meiryo / Meiryo UI — unitsPerEm 2048, usWinAscent 2210, usWinDescent 1059
-  // → raw sum 3269/2048 = 1.5962. Cross-checked against the sample-3 reference
-  // PDF: the 48 pt Title (`line="168"` = 0.7×) measures 53.8 pt cap-top to
-  // cap-top → singleLine = 53.8 / 0.7 / 48 = 1.60 em, so the sum is pinned to
-  // exactly 1.60 (its long-standing cross-checked value); the ascent:descent
-  // split keeps the OS/2 proportion (2210:1059).
+  // (OS/2 table; USE_TYPO_METRICS fsSelection bit 7 is clear, so Word uses the
+  // win metric for `lineRule="auto"` single spacing, §17.3.1.33). The single-
+  // line ratio is therefore the raw win sum 3269/2048 = 1.5962 em, carried as
+  // the true ascent/descent ratios so the baseline split stays Meiryo's own.
+  //
+  // Provenance / cross-check: sample-3's single-spaced body uses Meiryo UI.
+  // Measured against the Word-export reference PNG, the 11 pt intro paragraph
+  // renders at 17.5 px ≈ 1.591 em/pt — i.e. exactly the 1.5962 win ratio. (An
+  // earlier revision pinned this to a round 1.60 from a 48 pt-title eyeball;
+  // that title is Latin/Arial Nova, not Meiryo, so the pin had no Meiryo basis.
+  // Per the package CLAUDE.md "spec over empirical constant" rule it is replaced
+  // here by the documented OS/2 win sum.) The 9 pt body in the same document
+  // measures ~15.0 px = 1.667 em/pt in Word, ABOVE 1.5962: that residual is
+  // Word's per-line device-pixel rounding at small CJK sizes (cumulative line
+  // tops snapped to whole pixels), not a different single-line ratio — it is not
+  // reproducible from any OS/2 value and is intentionally NOT encoded as a
+  // constant here.
   [
     (n) => n.includes('meiryo') || n.includes('メイリオ'),
-    { asc: 1.6 * (2210 / 3269), desc: 1.6 * (1059 / 3269) },
+    { asc: 2210 / 2048, desc: 1059 / 2048 },
   ],
   // Sakkal Majalla — unitsPerEm 2048, usWinAscent 1810, usWinDescent 1050
   // → asc 0.8838, desc 0.5127, sum = 1.3965. Extracted directly from the
@@ -124,22 +136,26 @@ export function intendedSingleLinePx(family: string | null | undefined, emPx: nu
 
 /**
  * Correct a substitute font's measured Canvas `fontBoundingBox` ascent/descent
- * to the DOCUMENT font's design line box, so both the rendered line height AND
- * the baseline position within it match Word regardless of which fallback drew
- * the glyphs.
+ * against the DOCUMENT font's design line box.
  *
- * When `family` is in the win-metric table the returned ascent/descent are the
- * document font's `usWinAscent / unitsPerEm × emPx` and
- * `usWinDescent / unitsPerEm × emPx` — i.e. the intended line box with the
- * intended baseline split, not the substitute's. This both RAISES boxes for
- * substitutes that understate the document font (Meiryo via Hiragino) and
- * SHRINKS boxes for substitutes that overstate it (Sakkal Majalla via Noto
- * Naskh Arabic, §17.4.81 / §17.4.84 cell centering). Using the document font's
- * own ascent:descent split keeps vertically-centered text on center even when
- * the substitute's split differs. When `family` is not in the table, the
- * measured metrics are returned unchanged. The `ascentPx`/`descentPx` arguments
- * are unused for tabled fonts but kept so callers can pass the substitute
- * metrics uniformly.
+ * Two regimes, decided by comparing the substitute's natural box with the
+ * document font's win box (`usWinAscent+usWinDescent / unitsPerEm`):
+ *
+ * - Substitute box ≤ document box (e.g. Meiryo drawn via Hiragino): return the
+ *   substitute's measured metrics UNCHANGED. The {@link intendedSingleLinePx}
+ *   floor (applied by layoutLines) raises the LINE BOX to the document font's
+ *   win height, and the renderer centers the natural line inside it — keeping
+ *   the substitute's glyph ink centered where Word's ink sits. Replacing the
+ *   split here instead shifted every line's ink upward and regressed the
+ *   Word-reference VRT (private/sample-3).
+ *
+ * - Substitute box > document box (Sakkal Majalla drawn via Noto Naskh Arabic,
+ *   win 2.2 em vs 1.3965 em): return the document font's win ascent/descent.
+ *   Without the shrink, exact-height rows (§17.4.81) and vAlign-centered cells
+ *   (§17.4.84) overflow — the sample-7 page-2 header case.
+ *
+ * When `family` is not in the win-metric table, the measured metrics are
+ * returned unchanged.
  */
 export function correctLineMetrics(
   family: string | null | undefined,
@@ -149,5 +165,9 @@ export function correctLineMetrics(
 ): { ascent: number; descent: number } {
   const m = lookupWinMetric(family);
   if (m === null) return { ascent: ascentPx, descent: descentPx };
+  const targetTotal = (m.asc + m.desc) * emPx;
+  if (ascentPx + descentPx <= targetTotal) {
+    return { ascent: ascentPx, descent: descentPx };
+  }
   return { ascent: m.asc * emPx, descent: m.desc * emPx };
 }

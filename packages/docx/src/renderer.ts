@@ -1523,6 +1523,41 @@ interface WrapLayoutCtx {
   pageH: number;
 }
 
+/**
+ * Resolve the formatting axis that actually governs a run's glyphs.
+ *
+ * ECMA-376 §17.3.2.30 `w:rtl` marks a run as complex-script. For such a run the
+ * complex-script properties take effect — §17.3.2.4 `bCs` (bold), §17.3.2.6
+ * `iCs` (italic), §17.3.2.26 `rFonts@cs` (typeface), §17.3.2.39 `szCs` (size) —
+ * instead of the non-CS `b`/`i`/`rFonts@ascii`/`sz`, which apply to
+ * non-complex (Latin/CJK) text. `bCs`/`iCs` are INDEPENDENT toggles: an absent
+ * `bCs` does not inherit `b`'s value, so a complex-script run that carries only
+ * `w:b` renders non-bold. (sample-7's date cells carry `b` without `bCs`, and
+ * Word draws them at regular weight; the header carries both and is bold.)
+ */
+function effectiveRunStyle(base: DocxTextRun | FieldRun): {
+  bold: boolean;
+  italic: boolean;
+  fontFamily: string | null;
+  fontSize: number;
+} {
+  const r = base as DocxTextRun;
+  if (r.rtl === true) {
+    return {
+      bold: r.boldCs ?? false,
+      italic: r.italicCs ?? false,
+      fontFamily: r.fontFamilyCs ?? base.fontFamily,
+      fontSize: r.fontSizeCs ?? base.fontSize,
+    };
+  }
+  return {
+    bold: base.bold,
+    italic: base.italic,
+    fontFamily: base.fontFamily,
+    fontSize: base.fontSize,
+  };
+}
+
 function buildSegments(runs: DocRun[], state: RenderState): LayoutSeg[] {
   const segs: LayoutSeg[] = [];
   const pushTextPiece = (
@@ -1539,17 +1574,22 @@ function buildSegments(runs: DocRun[], state: RenderState): LayoutSeg[] {
       ? { text: baseRuby.text, fontSizePt: baseRuby.fontSizePt }
       : undefined;
     const revision = (base as DocxTextRun).revision;
+    const eff = effectiveRunStyle(base);
+    const effBold = eff.bold;
+    const effItalic = eff.italic;
+    const effFontFamily = eff.fontFamily;
+    const effFontSize = eff.fontSize;
     let firstSeg = true;
     for (const word of splitTextForLayout(displayText)) {
       segs.push({
         text: word,
-        bold: base.bold,
-        italic: base.italic,
+        bold: effBold,
+        italic: effItalic,
         underline: base.underline,
         strikethrough: base.strikethrough,
-        fontSize: base.fontSize,
+        fontSize: effFontSize,
         color: base.color,
-        fontFamily: base.fontFamily,
+        fontFamily: effFontFamily,
         vertAlign,
         measuredWidth: 0,
         smallCaps: base.smallCaps ?? false,

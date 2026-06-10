@@ -22,7 +22,18 @@ describe('lineBoxHeight — degenerate zero line spacing', () => {
     expect(lineBoxHeight(auto(0), 12, 3, 1, undefined)).toBe(15);
   });
   it('still honors a positive exact line value', () => {
-    expect(lineBoxHeight(exact(240), 12, 3, 1, undefined)).toBe(240);
+    // 12pt exact (w:line="240" twips / 20 = 12pt; LineSpacing.value is pt).
+    expect(lineBoxHeight(exact(12), 12, 3, 1, undefined)).toBe(12);
+  });
+  it('treats negative exact/auto values as single spacing too', () => {
+    expect(lineBoxHeight(exact(-5), 12, 3, 1, undefined)).toBe(15);
+    expect(lineBoxHeight(auto(-1), 12, 3, 1, undefined)).toBe(15);
+  });
+  it('snaps a degenerate line to the grid pitch in docGrid sections', () => {
+    // Same fallback as unspecified spacing: on-grid, the pitch governs.
+    expect(
+      lineBoxHeight(exact(0), 12, 3, 1, { type: 'lines', linePitchPt: 18 }),
+    ).toBe(18);
   });
   it('still applies the auto multiplier for a positive value', () => {
     expect(lineBoxHeight(auto(2), 12, 3, 1, undefined)).toBe(30); // natural 15 × 2

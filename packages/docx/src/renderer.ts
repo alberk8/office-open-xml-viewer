@@ -2954,6 +2954,9 @@ function isGridLineRule(ctx: DocGridCtx | undefined): boolean {
  *   exact   → value in pt, converted to px (ignores font and grid).
  *   atLeast → max(natural, value in pt × scale).
  *   null    → natural, or grid pitch if the section defines one.
+ *
+ * Exported for unit tests only — not part of the package API (not
+ * re-exported from index.ts).
  */
 export function lineBoxHeight(
   ls: LineSpacing | null,

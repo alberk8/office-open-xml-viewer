@@ -545,7 +545,7 @@ pub struct TextRun {
     /// references resolved to a literal family). `None` when unspecified.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub font_family_cs: Option<String>,
-    /// ECMA-376 §17.3.2.18 `<w:szCs>` — complex-script font size in pt (same
+    /// ECMA-376 §17.3.2.39 `<w:szCs>` — complex-script font size in pt (same
     /// units as `font_size`). `None` when unspecified.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub font_size_cs: Option<f64>,

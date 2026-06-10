@@ -351,7 +351,7 @@ export interface DocxTextRun {
   /** ECMA-376 §17.3.2.26 `<w:rFonts w:cs>` — complex-script typeface
    *  (theme references resolved to a literal family). */
   fontFamilyCs?: string;
-  /** ECMA-376 §17.3.2.18 `<w:szCs>` — complex-script font size in pt
+  /** ECMA-376 §17.3.2.39 `<w:szCs>` — complex-script font size in pt
    *  (same units as `fontSize`). */
   fontSizeCs?: number;
 }

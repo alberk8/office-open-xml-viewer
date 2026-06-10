@@ -1100,7 +1100,7 @@ fn parse_run_inner(
     let double_strikethrough = fmt.dstrike.unwrap_or(false);
     let highlight = fmt.highlight.clone();
     // RTL / complex-script properties (ECMA-376 §17.3.2.30 / §17.3.2.26 /
-    // §17.3.2.18). Phase 0: recorded on the run, not yet used for layout. The
+    // §17.3.2.39). Phase 0: recorded on the run, not yet used for layout. The
     // cs font goes through the same theme-ref resolution as the ascii/eastAsia
     // axes so consumers receive a literal family.
     let rtl = fmt.rtl;
@@ -2573,7 +2573,7 @@ mod rtl_tests {
     }
 
     /// ECMA-376 §17.3.1.6 w:bidi, §17.3.2.30 w:rtl, §17.3.2.26 w:rFonts@cs,
-    /// §17.3.2.18 w:szCs, §17.4.1 w:bidiVisual — all surfaced on the model.
+    /// §17.3.2.39 w:szCs, §17.4.1 w:bidiVisual — all surfaced on the model.
     #[test]
     fn rtl_direction_attributes_are_extracted() {
         let body = body_from(

@@ -4,12 +4,10 @@
 // core to the string / code-unit surface renderers use.
 
 import type { BidiEngine } from '../engine.js';
+import { REMOVED_LEVEL } from '../types.js';
 import type { BaseDirection, BidiLevels } from '../types.js';
 import { mirror as mirrorGlyph } from '../char-data.js';
 import { resolveLevels, reorderByLevels, REMOVED } from './rules.js';
-
-/** Code-unit sentinel for code units removed by rule X9 (REMOVED maps here). */
-const REMOVED_UNIT = 255;
 
 /** Decode a UTF-16 string into code points + how many code units each occupies. */
 function decode(text: string): { cps: number[]; units: number[] } {
@@ -38,7 +36,7 @@ class Uax9Engine implements BidiEngine {
     const out = new Uint8Array(text.length);
     let u = 0;
     for (let i = 0; i < cpLevels.length; i++) {
-      const v = cpLevels[i] === REMOVED ? REMOVED_UNIT : cpLevels[i];
+      const v = cpLevels[i] === REMOVED ? REMOVED_LEVEL : cpLevels[i];
       for (let k = 0; k < units[i]; k++) out[u++] = v;
     }
     return { levels: out, paragraphLevel };

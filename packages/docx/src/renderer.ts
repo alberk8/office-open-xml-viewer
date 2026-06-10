@@ -14,7 +14,7 @@ import {
   resolveBaseDirection,
 } from '@silurus/ooxml-core';
 import type { MathNode, MathRenderer } from '@silurus/ooxml-core';
-import { intendedSingleLinePx } from './font-metrics.js';
+import { intendedSingleLinePx, correctLineMetrics } from './font-metrics.js';
 import {
   segmentsHaveRtl,
   computeLineVisualOrder,
@@ -2134,8 +2134,15 @@ function layoutLines(
     const h = s.fontSize;
     // Prefer font-metric ascent/descent (stable per font+size) so baselines and
     // line boxes do not jitter based on the specific characters on each line.
-    let asc = m.fontBoundingBoxAscent ?? m.actualBoundingBoxAscent ?? s.fontSize * scale * 0.8;
-    const desc = m.fontBoundingBoxDescent ?? m.actualBoundingBoxDescent ?? s.fontSize * scale * 0.2;
+    // When the document font is substituted by one with different vertical
+    // metrics, rescale to the document font's design line box so the line
+    // height (and thus baseline centering, row auto-heights, cell vAlign
+    // §17.4.84, and pagination) match Word — see font-metrics.ts.
+    const rawAsc = m.fontBoundingBoxAscent ?? m.actualBoundingBoxAscent ?? s.fontSize * scale * 0.8;
+    const rawDesc = m.fontBoundingBoxDescent ?? m.actualBoundingBoxDescent ?? s.fontSize * scale * 0.2;
+    const corrected = correctLineMetrics(s.fontFamily, effectiveFontPx(s), rawAsc, rawDesc);
+    let asc = corrected.ascent;
+    const desc = corrected.descent;
     // Ruby annotation: small text rendered above the base. Reserve ascent
     // room for the rt glyphs (ECMA-376 §17.3.3.25). The actual line spacing
     // in docGrid sections is set further down by the paragraph-wide
@@ -2765,7 +2772,13 @@ function renderTable(table: DocTable, state: RenderState): void {
           drawH = 0;
           for (let rj = ri; rj <= endRi; rj++) drawH += rowHeights[rj];
         }
-        if (!dryRun) renderCell(cell, table, leadX, y, cellW, drawH, state, mirror);
+        // ECMA-376 §17.4.81: an exact row height is honored verbatim and
+        // content taller than the row is clipped to the row box (Word clips;
+        // we would otherwise overflow into neighboring rows). A vMerge=restart
+        // cell spans multiple rows, so it is never governed by a single row's
+        // exact height — only single-row cells clip.
+        const clipExact = row.rowHeightRule === 'exact' && cell.vMerge !== true;
+        if (!dryRun) renderCell(cell, table, leadX, y, cellW, drawH, state, mirror, clipExact);
         else measureCellContent(cell, table, cellW, scale, state);
       }
 
@@ -2930,6 +2943,7 @@ function renderCell(
   h: number,
   state: RenderState,
   mirror = false,
+  clipExact = false,
 ): void {
   const { ctx, scale } = state;
 
@@ -2969,13 +2983,39 @@ function renderCell(
     // rendering of resume "bar chart" cells. Skip a single trailing empty
     // paragraph after a non-paragraph block.
     const visibleContent = trimTrailingStructuralMarker(cell.content);
-    const contentH = visibleContent.reduce(
+    let contentH = visibleContent.reduce(
       (s, ce) => s + measureCellElementHeight(cellState, ce, w - ml - mr, scale), 0);
+    // Word collapses the LAST paragraph's space-after against the cell's bottom
+    // content boundary when vertically aligning. That trailing spacing produces
+    // no ink (nothing follows it inside the cell), so including it in the
+    // centered block height lifts the visible text above true center. Word
+    // centers the line box alone: a header cell whose paragraph carries an 8 pt
+    // space-after still centers the ~16.8 pt line box, not 24.8 pt. This mirrors
+    // how block space-after collapses at a container edge (ECMA-376 §17.3.1.33
+    // describes spacing between paragraphs, not at the frame boundary). The
+    // render path already adds this space-after after the final line where it
+    // has no visual effect, so trimming it here only fixes the measurement.
+    // Spacing BETWEEN two paragraphs inside the cell is left intact.
+    const lastEl = visibleContent[visibleContent.length - 1];
+    if (lastEl && lastEl.type === 'paragraph') {
+      contentH -= (lastEl as unknown as DocParagraph).spaceAfter * scale;
+    }
     if (cell.vAlign === 'center') cellState.y = y + (h - contentH) / 2;
     else cellState.y = y + h - contentH - mb;
   }
 
-  renderCellContent(cell.content, cellState);
+  if (clipExact) {
+    // ECMA-376 §17.4.81: clip content to the exact row box so taller content
+    // does not bleed into adjacent rows (Word's behavior for hRule="exact").
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(x, y, w, h);
+    ctx.clip();
+    renderCellContent(cell.content, cellState);
+    ctx.restore();
+  } else {
+    renderCellContent(cell.content, cellState);
+  }
 }
 
 /** Drop a trailing empty paragraph that follows a non-paragraph block (nested

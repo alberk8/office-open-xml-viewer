@@ -2521,22 +2521,31 @@ fn parse_table_cell(
 }
 
 fn parse_table_borders(node: roxmltree::Node) -> TableBorders {
+    // ECMA-376 §17.4.* tblBorders: the vertical edges may be given either as the
+    // legacy physical names (w:left/w:right) or as the logical edges
+    // (w:start/w:end, §17.4.66-67). Prefer the physical name when both are
+    // present, else fall back to the logical alias. The renderer handles
+    // visual mirroring for bidiVisual tables via its `mirror` flag, so at
+    // parse time start→left and end→right unconditionally.
     TableBorders {
         top: child_w(node, "top").map(parse_border_spec),
         bottom: child_w(node, "bottom").map(parse_border_spec),
-        left: child_w(node, "left").map(parse_border_spec),
-        right: child_w(node, "right").map(parse_border_spec),
+        left: child_w(node, "left").or_else(|| child_w(node, "start")).map(parse_border_spec),
+        right: child_w(node, "right").or_else(|| child_w(node, "end")).map(parse_border_spec),
         inside_h: child_w(node, "insideH").map(parse_border_spec),
         inside_v: child_w(node, "insideV").map(parse_border_spec),
     }
 }
 
 fn parse_cell_borders(node: roxmltree::Node) -> CellBorders {
+    // ECMA-376 §17.4.* tcBorders: same logical/physical edge aliasing as
+    // tblBorders. w:start/w:end (§17.4.66-67) are the logical vertical edges;
+    // w:left/w:right the physical names. Prefer physical, fall back to logical.
     CellBorders {
         top: child_w(node, "top").map(parse_border_spec),
         bottom: child_w(node, "bottom").map(parse_border_spec),
-        left: child_w(node, "left").map(parse_border_spec),
-        right: child_w(node, "right").map(parse_border_spec),
+        left: child_w(node, "left").or_else(|| child_w(node, "start")).map(parse_border_spec),
+        right: child_w(node, "right").or_else(|| child_w(node, "end")).map(parse_border_spec),
     }
 }
 
@@ -2802,5 +2811,72 @@ mod rtl_tests {
         assert_eq!(shape.text_blocks.len(), 1, "one body paragraph");
         assert_eq!(shape.text_blocks[0].text, "مربع نص 2025");
         assert_eq!(shape.text_blocks[0].alignment, "right");
+    }
+
+    /// ECMA-376 §17.4.* w:tcBorders with only the logical vertical edges
+    /// (w:start/w:end, §17.4.66-67) must still yield left/right border specs.
+    /// RTL/bidi-aware authoring tools emit start/end instead of left/right;
+    /// the parser maps start→left, end→right (the renderer handles visual
+    /// mirroring for bidiVisual tables).
+    #[test]
+    fn tc_borders_start_end_map_to_left_right() {
+        let body = body_from(
+            r#"
+            <w:tbl>
+              <w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid>
+              <w:tr><w:tc>
+                <w:tcPr>
+                  <w:tcBorders>
+                    <w:start w:sz="1" w:val="single" w:color="D9D9D9"/>
+                    <w:top w:sz="1" w:val="single" w:color="D9D9D9"/>
+                    <w:end w:sz="1" w:val="single" w:color="D9D9D9"/>
+                    <w:bottom w:sz="1" w:val="single" w:color="D9D9D9"/>
+                  </w:tcBorders>
+                </w:tcPr>
+                <w:p><w:r><w:t>x</w:t></w:r></w:p>
+              </w:tc></w:tr>
+            </w:tbl>
+            "#,
+        );
+        let tbl = body.iter().find_map(|e| match e {
+            BodyElement::Table(t) => Some(t),
+            _ => None,
+        }).expect("table present");
+        let cell = &tbl.rows[0].cells[0];
+        let left = cell.borders.left.as_ref().expect("w:start should map to cell.left");
+        let right = cell.borders.right.as_ref().expect("w:end should map to cell.right");
+        assert_eq!(left.color.as_deref(), Some("d9d9d9"), "start color → left");
+        assert_eq!(left.style, "single");
+        assert_eq!(right.color.as_deref(), Some("d9d9d9"), "end color → right");
+        assert_eq!(right.style, "single");
+        // top/bottom (literal physical names) still parsed.
+        assert!(cell.borders.top.is_some());
+        assert!(cell.borders.bottom.is_some());
+    }
+
+    /// ECMA-376 §17.4.* w:tblBorders: a table-level w:start/w:end likewise
+    /// maps to the physical left/right edges.
+    #[test]
+    fn tbl_borders_start_end_map_to_left_right() {
+        let body = body_from(
+            r#"
+            <w:tbl>
+              <w:tblPr>
+                <w:tblBorders>
+                  <w:start w:sz="4" w:val="single" w:color="000000"/>
+                  <w:end w:sz="4" w:val="single" w:color="000000"/>
+                </w:tblBorders>
+              </w:tblPr>
+              <w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid>
+              <w:tr><w:tc><w:p><w:r><w:t>x</w:t></w:r></w:p></w:tc></w:tr>
+            </w:tbl>
+            "#,
+        );
+        let tbl = body.iter().find_map(|e| match e {
+            BodyElement::Table(t) => Some(t),
+            _ => None,
+        }).expect("table present");
+        assert!(tbl.borders.left.is_some(), "w:start should map to tblBorders.left");
+        assert!(tbl.borders.right.is_some(), "w:end should map to tblBorders.right");
     }
 }

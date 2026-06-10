@@ -29,9 +29,17 @@ const segText = (s: unknown): string | undefined => {
   return typeof t === 'string' ? t : undefined;
 };
 
-/** Cheap test: does this run of segments contain any strong-RTL character? */
+/** Does this segment carry a run-level `<w:rtl>` (ECMA-376 §17.3.2.30)? */
+const segRtl = (s: unknown): boolean => (s as { rtl?: unknown }).rtl === true;
+
+/**
+ * Cheap gate: does this run of segments need the bidi pass? True when any
+ * segment contains a strong-RTL character OR carries a run-level `<w:rtl>`
+ * mark (§17.3.2.30 — e.g. a digits-only run that must resolve RTL).
+ */
 export function segmentsHaveRtl(segments: readonly unknown[]): boolean {
   for (const s of segments) {
+    if (segRtl(s)) return true;
     const t = segText(s);
     if (t !== undefined && RTL_GATE.test(t)) return true;
   }
@@ -46,6 +54,8 @@ export interface LineVisualOrder {
 }
 
 const OBJECT_PLACEHOLDER = '￼'; // OBJECT REPLACEMENT CHARACTER (bidi class ON)
+const RLE = '‫'; // RIGHT-TO-LEFT EMBEDDING
+const PDF = '‬'; // POP DIRECTIONAL FORMATTING
 
 /**
  * Compute the visual draw order of a line's segments under `baseRtl`. Text
@@ -54,6 +64,11 @@ const OBJECT_PLACEHOLDER = '￼'; // OBJECT REPLACEMENT CHARACTER (bidi class ON
  * the embedding level of its first code unit (segments are single-script in
  * practice because they are space-split); Canvas resolves any residual
  * intra-segment bidi when the slice is drawn with the matching `ctx.direction`.
+ *
+ * Segments flagged `rtl` (run-level `<w:rtl>`, §17.3.2.30) are wrapped in
+ * RLE…PDF and assigned the RTL embedding level directly, so a run whose text is
+ * purely neutral/numeric (e.g. a literal "1. " list prefix) still embeds and
+ * mirrors right-to-left as Word does.
  */
 export function computeLineVisualOrder(
   segments: readonly unknown[],
@@ -62,19 +77,39 @@ export function computeLineVisualOrder(
   const n = segments.length;
   if (n === 0) return { order: [], rtl: [] };
 
+  // Concatenate every segment into one logical string for the bidi algorithm.
+  // A run-level `<w:rtl>` segment (§17.3.2.30) is wrapped in RLE…PDF so that its
+  // neutral/weak characters (e.g. leading Western digits in "1. ") resolve to an
+  // RTL embedding, matching Word. `segStart[i]` points at the segment's FIRST
+  // REAL code unit (skipping the injected RLE) so the per-segment level is read
+  // from the content, not the formatting control.
   let full = '';
   const segStart: number[] = new Array(n);
   for (let i = 0; i < n; i++) {
-    segStart[i] = full.length;
     const t = segText(segments[i]) ?? '';
+    const isRtl = segRtl(segments[i]);
+    if (isRtl) full += RLE;
+    segStart[i] = full.length;
     full += t.length > 0 ? t : OBJECT_PLACEHOLDER;
+    if (isRtl) full += PDF;
   }
 
   const engine = getDefaultBidiEngine();
   const { levels, paragraphLevel } = engine.computeLevels(full, baseRtl ? 'rtl' : 'ltr');
 
+  // Embedding level established by a top-level RLE = smallest odd level above
+  // the paragraph level (UAX#9 X2). A run-level `<w:rtl>` segment draws RTL by
+  // definition (§17.3.2.30), so it takes this odd level directly — without it,
+  // a digits-only run (European Number) would resolve to an even level and be
+  // drawn LTR even though Word mirrors it ("1. " → ".1") at the trailing edge.
+  const rtlEmbedLevel = paragraphLevel | 1;
+
   const segLevels = new Uint8Array(n);
   for (let i = 0; i < n; i++) {
+    if (segRtl(segments[i])) {
+      segLevels[i] = rtlEmbedLevel;
+      continue;
+    }
     const lvl = levels[segStart[i]];
     // 255 = removed by X9 (no glyph); fall back to the paragraph level.
     segLevels[i] = lvl === 255 ? paragraphLevel : lvl;

@@ -1391,6 +1391,10 @@ interface LayoutTextSeg {
   ruby?: { text: string; fontSizePt: number };
   /** Track-changes revision attached to this run (insertion / deletion). */
   revision?: { kind: 'insertion' | 'deletion' | string; author?: string };
+  /** ECMA-376 §17.3.2.30 `<w:rtl>` — run carries right-to-left characteristics.
+   *  When true the segment's text is treated as a strong-RTL embedding in the
+   *  per-line bidi pass (so leading digits / neutrals resolve RTL). */
+  rtl?: boolean;
 }
 
 /**
@@ -1488,6 +1492,7 @@ function buildSegments(runs: DocRun[], state: RenderState): LayoutSeg[] {
       ? { text: baseRuby.text, fontSizePt: baseRuby.fontSizePt }
       : undefined;
     const revision = (base as DocxTextRun).revision;
+    const rtl = (base as DocxTextRun).rtl === true ? true : undefined;
     let firstSeg = true;
     for (const word of splitTextForLayout(displayText)) {
       segs.push({
@@ -1506,6 +1511,7 @@ function buildSegments(runs: DocRun[], state: RenderState): LayoutSeg[] {
         highlight: base.highlight ?? null,
         ruby: firstSeg ? ruby : undefined,
         revision,
+        rtl,
       });
       firstSeg = false;
     }

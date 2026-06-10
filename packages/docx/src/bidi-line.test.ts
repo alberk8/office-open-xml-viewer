@@ -8,6 +8,12 @@ describe('segmentsHaveRtl', () => {
     expect(segmentsHaveRtl([{ text: 'مرحبا' }])).toBe(true);
     expect(segmentsHaveRtl([{ text: 'abc ' }, { text: 'שלום' }])).toBe(true);
   });
+
+  it('detects a run-level rtl mark even on neutral-only text', () => {
+    // "1. " has no strong-RTL char, but the run carries <w:rtl> (§17.3.2.30).
+    expect(segmentsHaveRtl([{ text: '1. ', rtl: true }])).toBe(true);
+    expect(segmentsHaveRtl([{ text: '1. ' }])).toBe(false);
+  });
 });
 
 describe('resolveAlignEdge', () => {
@@ -51,6 +57,27 @@ describe('computeLineVisualOrder', () => {
     expect(rtl[1]).toBe(false); // the Latin segment is LTR
     expect(rtl[0]).toBe(true);
     expect(rtl[2]).toBe(true);
+  });
+
+  it('resolves a leading-digit run-level rtl run with digits at the trailing (right) end', () => {
+    // "1. " + Hebrew, both run-level rtl, base LTR (no w:bidi). Per §17.3.2.30
+    // the digits must embed RTL, so visually the Hebrew is leftmost and the
+    // "1. " (read RTL → ".1") sits at the right end.
+    const { order, rtl } = computeLineVisualOrder(
+      [{ text: '1. ', rtl: true }, { text: 'תוכן', rtl: true }],
+      false,
+    );
+    expect(order).toEqual([1, 0]); // Hebrew visually left, "1." visually right
+    expect(rtl).toEqual([true, true]);
+  });
+
+  it('keeps the LTR fast path byte-identical when no rtl marks and no strong-RTL', () => {
+    const { order, rtl } = computeLineVisualOrder(
+      [{ text: '1. ' }, { text: 'item' }],
+      false,
+    );
+    expect(order).toEqual([0, 1]);
+    expect(rtl).toEqual([false, false]);
   });
 
   it('places a neutral object by surrounding direction', () => {

@@ -182,8 +182,11 @@ export class XlsxViewer {
   private isSelecting = false;
   private selectionOverlay: HTMLDivElement;
   private keydownHandler: ((e: KeyboardEvent) => void) | null = null;
-  // Pending touch/pen tap: only commit selection on pointerup if movement stays within tap threshold,
-  // so swipe-to-scroll on mobile doesn't change the selected cell.
+  // Deferred selection press: committed on pointerup only if the pointer
+  // neither moved beyond the tap threshold nor caused a scroll. Used for
+  // touch/pen (swipe-to-scroll must not change the cell) and for mouse
+  // presses inside the overlay-scrollbar band (a thumb drag must not select
+  // the cell underneath).
   private pendingTap: { x: number; y: number; shiftKey: boolean; pointerId: number } | null = null;
 
   constructor(container: HTMLElement, opts: XlsxViewerOptions = {}) {
@@ -277,6 +280,10 @@ export class XlsxViewer {
     container.appendChild(wrapper);
 
     this.scrollHost.addEventListener('scroll', () => {
+      // Any scroll cancels a deferred tap: the press that started it was a
+      // scrollbar-thumb drag (overlay scrollbars) or a touch swipe, not a
+      // cell click.
+      this.pendingTap = null;
       // Track the start-anchored position, but only while the host is laid
       // out: a hidden host reports clientWidth 0 and fires bogus scroll
       // events when the browser clamps scrollLeft, which must not overwrite
@@ -905,9 +912,35 @@ export class XlsxViewer {
     this.scrollHost.addEventListener('pointerdown', (e: PointerEvent) => {
       if (e.button !== 0) return;
 
+      // A pointerdown on the native scrollbar must not move the cell
+      // selection — dragging the thumb would otherwise select whatever cell
+      // sits underneath it. Two scrollbar styles need different handling:
+      // classic scrollbars reserve layout space, so the press lands in the
+      // band between the content box (clientWidth/Height) and the border-box
+      // edge and can be rejected exactly; OS overlay scrollbars (macOS
+      // "show when scrolling") float over the content without affecting
+      // client sizes, so a press near a scrollable edge is geometrically
+      // indistinguishable from a cell click. For that case we defer the
+      // selection to pointerup via the pendingTap path and cancel it when a
+      // scroll event arrives first (the press was a thumb drag). A plain
+      // click in the band still selects the cell on release.
+      const hostRect = this.scrollHost.getBoundingClientRect();
+      const localX = e.clientX - hostRect.left - this.scrollHost.clientLeft;
+      const localY = e.clientY - hostRect.top - this.scrollHost.clientTop;
+      if (localX >= this.scrollHost.clientWidth || localY >= this.scrollHost.clientHeight) {
+        return; // classic scrollbar gutter
+      }
+      // Overlay scrollbar hit band (~15 CSS px on macOS / Windows 11).
+      const OVERLAY_SCROLLBAR_BAND = 16;
+      const inOverlayBand =
+        (this.scrollHost.scrollWidth > this.scrollHost.clientWidth &&
+          this.scrollHost.clientHeight - localY <= OVERLAY_SCROLLBAR_BAND) ||
+        (this.scrollHost.scrollHeight > this.scrollHost.clientHeight &&
+          this.scrollHost.clientWidth - localX <= OVERLAY_SCROLLBAR_BAND);
+
       // Touch / pen: defer selection until pointerup so swipe-to-scroll doesn't change the cell.
       // Mouse: select immediately to preserve drag-to-extend behavior.
-      if (e.pointerType !== 'mouse') {
+      if (e.pointerType !== 'mouse' || inOverlayBand) {
         this.pendingTap = { x: e.clientX, y: e.clientY, shiftKey: e.shiftKey, pointerId: e.pointerId };
         return;
       }

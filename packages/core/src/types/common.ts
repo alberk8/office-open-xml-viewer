@@ -10,7 +10,7 @@ export type PathCmd =
   | { cmd: 'arcTo';      wr: number; hr: number; stAng: number; swAng: number }
   | { cmd: 'close' };
 
-export type Fill = SolidFill | NoFill | GradientFill | PatternFill;
+export type Fill = SolidFill | NoFill | GradientFill | PatternFill | ImageFill;
 
 export interface SolidFill {
   fillType: 'solid';
@@ -47,6 +47,34 @@ export interface PatternFill {
   bg: string;
   /** Preset name, e.g. "pct25", "horz", "diagCross", "lgGrid". */
   preset: string;
+}
+
+/**
+ * ECMA-376 §20.1.8.30 (CT_RelativeRect) — the destination rectangle a stretched
+ * blip is mapped into, as edge insets relative to the fill region. Values are
+ * fractions (ST_Percentage / 100000); **negative values let the image bleed
+ * past the box (overscan)**. Absent edges default to 0.
+ */
+export interface FillRect {
+  l?: number;
+  t?: number;
+  r?: number;
+  b?: number;
+}
+
+/**
+ * Image fill — ECMA-376 §20.1.8.14 (CT_BlipFillProperties). The embedded blip
+ * is resolved to a base64 data URL at parse time. Only the `stretch` fill-mode
+ * (§20.1.8.58) is modelled; `tile` is not yet supported.
+ */
+export interface ImageFill {
+  fillType: 'image';
+  /** `data:<mime>;base64,…` of the embedded blip. */
+  dataUrl: string;
+  /** `<a:stretch><a:fillRect>` insets. Absent → fills the whole box. */
+  fillRect?: FillRect;
+  /** `a:blip > a:alphaModFix@amt` as a fraction (0.0–1.0). Absent = opaque. */
+  alpha?: number;
 }
 
 export interface Shadow {

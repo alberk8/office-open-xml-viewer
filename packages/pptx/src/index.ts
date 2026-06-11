@@ -30,6 +30,8 @@ export type {
   NoFill,
   GradientFill,
   GradientStop,
+  ImageFill,
+  FillRect,
   Stroke,
   // Effect types (reachable via ShapeElement.shadow / .glow / …).
   Shadow,

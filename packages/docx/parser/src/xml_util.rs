@@ -92,7 +92,10 @@ pub fn bool_prop(node: Node, tag: &str) -> Option<bool> {
     })
 }
 
-pub fn find_root_element<'a, 'input>(doc: &'a Document<'input>, tag: &str) -> Option<Node<'a, 'input>> {
+pub fn find_root_element<'a, 'input>(
+    doc: &'a Document<'input>,
+    tag: &str,
+) -> Option<Node<'a, 'input>> {
     doc.root_element()
         .descendants()
         .find(|n| n.tag_name().name() == tag)

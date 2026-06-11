@@ -387,8 +387,21 @@ export interface PictureElement {
    * stroked along the picture's clip silhouette (roundRect / custGeom / rect).
    */
   stroke: Stroke | null;
-  /** OOXML adj value (0–100000) for roundRect clip, null = plain rectangle */
-  clipAdjust: number | null;
+  /**
+   * `<p:spPr><a:prstGeom prst="…">` preset name (e.g. `"roundRect"`,
+   * `"ellipse"`). ECMA-376 §20.1.9.18: a picture's preset geometry is its clip
+   * silhouette and the path its border / contour hug. Undefined / omitted = a
+   * plain rectangle (`prst="rect"` or no prstGeom). When set, the renderer
+   * builds the silhouette via the shared preset-geometry engine (any of the 186
+   * presets). `custGeom` takes priority when both are present.
+   */
+  prstGeom?: string;
+  /**
+   * Adjust guides from the prstGeom `<a:avLst>` (1/1000-of-a-percent OOXML
+   * units), in `gd@name` declaration order (index 0 = adj/adj1, 1 = adj2, …).
+   * Omitted when avLst is empty — the preset's own declared defaults then apply.
+   */
+  prstAdjust?: number[];
   /**
    * ECMA-376 a:srcRect — source image crop as fractions (0..1) of the source
    * width/height. Omitted when the image is not cropped.

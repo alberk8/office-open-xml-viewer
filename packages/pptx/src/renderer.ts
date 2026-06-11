@@ -34,6 +34,7 @@ import {
   applyReflection,
   renderPresetShape,
   hasPreset,
+  buildPresetGeometryPath,
   getConnectorAnchors,
   computeScene3dQuad,
   isScene3dNonIdentity,
@@ -2133,12 +2134,26 @@ async function renderPicture(
       cw: number,
       ch: number,
     ): void => {
-      if (el.clipAdjust != null) {
-        const minDim = Math.min(cw, ch);
-        const r = (el.clipAdjust / 100000) * minDim;
-        target.roundRect(cx, cy, cw, ch, r);
-      } else if (el.custGeom && el.custGeom.length > 0) {
+      if (el.custGeom && el.custGeom.length > 0) {
+        // custGeom takes priority over prstGeom (ECMA-376 §20.1.9.8).
         buildCustomPath(target, el.custGeom, cx, cy, cw, ch);
+      } else if (el.prstGeom) {
+        // §20.1.9.18 — the picture's preset geometry is its clip silhouette.
+        // Driven by the shared preset-geometry engine (roundRect, ellipse, and
+        // the other 184 presets), with the avLst adjust handles; the engine
+        // substitutes each preset's declared default for any omitted guide.
+        const ok = buildPresetGeometryPath(
+          target,
+          el.prstGeom,
+          cx,
+          cy,
+          cw,
+          ch,
+          el.prstAdjust ?? [],
+        );
+        // Unknown preset name → fall back to a plain rectangle so the bitmap
+        // still draws (matches the pre-generalisation rect fallback).
+        if (!ok) target.rect(cx, cy, cw, ch);
       } else {
         target.rect(cx, cy, cw, ch);
       }
@@ -2167,7 +2182,7 @@ async function renderPicture(
       cw: number,
       ch: number,
     ): void => {
-      if (el.clipAdjust != null || (el.custGeom && el.custGeom.length > 0)) {
+      if (el.prstGeom || (el.custGeom && el.custGeom.length > 0)) {
         tracePictureSilhouette(target, cx, cy, cw, ch);
         target.clip();
       }

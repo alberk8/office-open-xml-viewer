@@ -906,9 +906,18 @@ struct PictureElement {
     /// resolves to `<a:noFill/>` (border explicitly suppressed).
     #[serde(skip_serializing_if = "Option::is_none")]
     stroke: Option<Stroke>,
-    /// OOXML adj value (0–100000) for roundRect clip; None = plain rectangle
+    /// `<p:spPr><a:prstGeom prst="…">` preset name (e.g. "roundRect",
+    /// "ellipse"). ECMA-376 §20.1.9.18: a picture's preset geometry is its clip
+    /// silhouette and the path its border / contour hug. None = plain rectangle
+    /// (prst="rect" or no prstGeom). custGeom takes priority when present.
     #[serde(skip_serializing_if = "Option::is_none")]
-    clip_adjust: Option<i64>,
+    prst_geom: Option<String>,
+    /// Adjust guides from the prstGeom `<a:avLst>` (1/1000-of-a-percent OOXML
+    /// units, in `gd@name` declaration order). Index 0 = adj/adj1, 1 = adj2, …
+    /// Empty / None → the preset's own declared defaults apply. Carried generically
+    /// so any of the 186 presets (not just roundRect) can be reconstructed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    prst_adjust: Option<Vec<i64>>,
     /// ECMA-376 §20.1.8.55 a:srcRect — source image crop in 1/100000 fractions of
     /// source width/height. Only serialized when any edge is non-zero.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -5777,25 +5786,43 @@ fn parse_shape(
 //  Picture parsing  (p:pic)
 // ===========================
 
-/// Corner radius for a picture body clipped by `<a:prstGeom prst="roundRect">`
-/// on its spPr (§20.1.9.18 — the preset geometry of a picture acts as its clip
-/// silhouette). Returns the `adj` guide in 1000ths of a percent; when avLst
-/// omits the guide, the roundRect preset's own definition supplies 16667
-/// (OOXML presetShapeDefinitions). Non-roundRect presets are handled by the
-/// shared preset/custGeom paths, not this corner-radius shortcut.
-fn parse_round_rect_clip_adjust(sp_pr: roxmltree::Node<'_, '_>) -> Option<i64> {
-    let pg =
-        child(sp_pr, "prstGeom").filter(|pg| attr(pg, "prst").as_deref() == Some("roundRect"))?;
-    Some(
-        child(pg, "avLst")
-            .and_then(|avlst| avlst.children().find(|n| n.is_element()))
-            .and_then(|gd| attr(&gd, "fmla"))
-            .and_then(|fmla| {
-                fmla.strip_prefix("val ")
-                    .and_then(|v| v.parse::<i64>().ok())
-            })
-            .unwrap_or(16_667),
-    )
+/// Preset clip geometry for a picture body (§20.1.9.18 — the preset geometry of
+/// a `<p:pic>` acts as its clip silhouette and the path its border / contour
+/// hug). Returns the prstGeom `prst` name plus every `<a:avLst><a:gd>` adjust
+/// value in declaration order (1/1000-of-a-percent OOXML units), so any of the
+/// 186 presets — roundRect, ellipse, and the rest — can be reconstructed by the
+/// shared preset-geometry engine on the TS side. The preset's own declared
+/// defaults fill in any omitted guide, so the `adj` Vec may be shorter than the
+/// preset's adjust count (the engine substitutes defaults per index).
+///
+/// `prst="rect"` returns None: a plain rectangle needs no clip path (the bitmap
+/// already fills the bbox), matching the previous behaviour.
+fn parse_pic_prst_geom(sp_pr: roxmltree::Node<'_, '_>) -> (Option<String>, Option<Vec<i64>>) {
+    let pg = match child(sp_pr, "prstGeom") {
+        Some(n) => n,
+        None => return (None, None),
+    };
+    let prst = match attr(&pg, "prst") {
+        Some(p) if p != "rect" => p,
+        _ => return (None, None),
+    };
+    let adjust: Vec<i64> = child(pg, "avLst")
+        .map(|av| {
+            av.children()
+                .filter(|n| n.is_element() && n.tag_name().name() == "gd")
+                .filter_map(|gd| {
+                    attr(&gd, "fmla")
+                        .and_then(|f| f.strip_prefix("val ").and_then(|v| v.parse::<i64>().ok()))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let adjust = if adjust.is_empty() {
+        None
+    } else {
+        Some(adjust)
+    };
+    (Some(prst), adjust)
 }
 
 fn parse_picture(
@@ -5844,6 +5871,7 @@ fn parse_picture(
     // for `<a:noFill/>`, so an explicitly border-less picture stays None.
     let stroke = child(sp_pr, "ln").and_then(|n| parse_stroke(n, theme));
 
+    let (prst_geom, prst_adjust) = parse_pic_prst_geom(sp_pr);
     Some(PictureElement {
         x: t.x,
         y: t.y,
@@ -5854,7 +5882,8 @@ fn parse_picture(
         flip_v: t.flip_v,
         data_url,
         stroke,
-        clip_adjust: parse_round_rect_clip_adjust(sp_pr),
+        prst_geom,
+        prst_adjust,
         src_rect: parse_src_rect(blip_fill),
         alpha: parse_blip_alpha(blip_fill),
         cust_geom,
@@ -6849,8 +6878,10 @@ fn parse_sp_tree_node(
                             if let Some(bytes) = read_zip_bytes(zip, &image_path) {
                                 let mime = mime_from_ext(&image_path);
                                 let data_url = format!("data:{mime};base64,{}", B64.encode(&bytes));
-                                // If the sp has a roundRect preset geometry, record adj for corner clipping
-                                let clip_adjust = sp_pr_node.and_then(parse_round_rect_clip_adjust);
+                                // §20.1.9.18 — the sp's prstGeom (any preset, not
+                                // just roundRect) is the picture's clip silhouette.
+                                let (prst_geom, prst_adjust) =
+                                    sp_pr_node.map(parse_pic_prst_geom).unwrap_or((None, None));
                                 let cust_geom = sp_pr_node
                                     .and_then(|p| child(p, "custGeom"))
                                     .map(parse_cust_geom);
@@ -6881,7 +6912,8 @@ fn parse_sp_tree_node(
                                     flip_v: t.flip_v,
                                     data_url,
                                     stroke,
-                                    clip_adjust,
+                                    prst_geom,
+                                    prst_adjust,
                                     src_rect: blip_fill_node.and_then(parse_src_rect),
                                     alpha: blip_fill_node.and_then(parse_blip_alpha),
                                     cust_geom,
@@ -6931,7 +6963,8 @@ fn parse_sp_tree_node(
                                     flip_v: t.flip_v,
                                     data_url: bf.data_url,
                                     stroke,
-                                    clip_adjust: None,
+                                    prst_geom: None,
+                                    prst_adjust: None,
                                     src_rect: bf.src_rect,
                                     alpha: bf.alpha,
                                     cust_geom: None,
@@ -6996,7 +7029,8 @@ fn parse_sp_tree_node(
                                         flip_v: t.flip_v,
                                         data_url,
                                         stroke,
-                                        clip_adjust: None,
+                                        prst_geom: None,
+                                        prst_adjust: None,
                                         src_rect: blip_fill.and_then(parse_src_rect),
                                         alpha: blip_fill.and_then(parse_blip_alpha),
                                         cust_geom: None,
@@ -8267,45 +8301,76 @@ mod tests {
     }
 
     /// §20.1.9.18 — `<a:prstGeom prst="roundRect">` on a picture's spPr clips
-    /// the bitmap to a rounded rect. An explicit `adj` guide wins.
+    /// the bitmap to a rounded rect. An explicit `adj` guide is carried through;
+    /// the preset default is supplied by the shared engine, not the parser.
     #[test]
-    fn test_pic_round_rect_clip_explicit_adj() {
+    fn test_pic_prst_geom_round_rect_explicit_adj() {
         let xml = r#"<spPr xmlns="http://schemas.openxmlformats.org/drawingml/2006/main">
             <prstGeom prst="roundRect"><avLst><gd name="adj" fmla="val 8594"/></avLst></prstGeom>
         </spPr>"#;
         let doc = roxmltree::Document::parse(xml).unwrap();
         assert_eq!(
-            parse_round_rect_clip_adjust(doc.root_element()),
-            Some(8_594)
+            parse_pic_prst_geom(doc.root_element()),
+            (Some("roundRect".to_owned()), Some(vec![8_594]))
         );
     }
 
-    /// When avLst omits the guide, the roundRect preset's own definition
-    /// supplies `adj = 16667` (OOXML presetShapeDefinitions).
+    /// When avLst omits the guide, the parser carries the name with no adjust;
+    /// the preset's own default (roundRect adj = 16667) is filled in downstream
+    /// by the TS preset-geometry engine, keeping defaults in one place.
     #[test]
-    fn test_pic_round_rect_clip_default_adj() {
+    fn test_pic_prst_geom_round_rect_default_adj() {
         let xml = r#"<spPr xmlns="http://schemas.openxmlformats.org/drawingml/2006/main">
             <prstGeom prst="roundRect"><avLst/></prstGeom>
         </spPr>"#;
         let doc = roxmltree::Document::parse(xml).unwrap();
         assert_eq!(
-            parse_round_rect_clip_adjust(doc.root_element()),
-            Some(16_667)
+            parse_pic_prst_geom(doc.root_element()),
+            (Some("roundRect".to_owned()), None)
         );
     }
 
-    /// A plain rect (or no prstGeom at all) means no corner clipping.
+    /// §20.1.9.18 generalised — a non-roundRect preset (ellipse, empty avLst) is
+    /// now carried generically so the picture clips to that silhouette.
     #[test]
-    fn test_pic_round_rect_clip_absent() {
+    fn test_pic_prst_geom_ellipse() {
+        let xml = r#"<spPr xmlns="http://schemas.openxmlformats.org/drawingml/2006/main">
+            <prstGeom prst="ellipse"><avLst/></prstGeom>
+        </spPr>"#;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        assert_eq!(
+            parse_pic_prst_geom(doc.root_element()),
+            (Some("ellipse".to_owned()), None)
+        );
+    }
+
+    /// Multiple adjust guides are captured in declaration order.
+    #[test]
+    fn test_pic_prst_geom_multi_adj() {
+        let xml = r#"<spPr xmlns="http://schemas.openxmlformats.org/drawingml/2006/main">
+            <prstGeom prst="round2SameRect"><avLst>
+                <gd name="adj1" fmla="val 16667"/><gd name="adj2" fmla="val 0"/>
+            </avLst></prstGeom>
+        </spPr>"#;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        assert_eq!(
+            parse_pic_prst_geom(doc.root_element()),
+            (Some("round2SameRect".to_owned()), Some(vec![16_667, 0]))
+        );
+    }
+
+    /// A plain rect (or no prstGeom at all) means no clip path.
+    #[test]
+    fn test_pic_prst_geom_absent() {
         let rect = r#"<spPr xmlns="http://schemas.openxmlformats.org/drawingml/2006/main">
             <prstGeom prst="rect"><avLst/></prstGeom>
         </spPr>"#;
         let doc = roxmltree::Document::parse(rect).unwrap();
-        assert_eq!(parse_round_rect_clip_adjust(doc.root_element()), None);
+        assert_eq!(parse_pic_prst_geom(doc.root_element()), (None, None));
 
         let bare = r#"<spPr xmlns="http://schemas.openxmlformats.org/drawingml/2006/main"/>"#;
         let doc = roxmltree::Document::parse(bare).unwrap();
-        assert_eq!(parse_round_rect_clip_adjust(doc.root_element()), None);
+        assert_eq!(parse_pic_prst_geom(doc.root_element()), (None, None));
     }
 
     /// ECMA-376 §20.1.8.42 — `<a:ln cmpd="dbl"/>` should round-trip.

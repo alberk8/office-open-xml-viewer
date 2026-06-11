@@ -49,6 +49,7 @@ export { buildShapePath, drawStar, drawPolygon, ooxmlArcTo } from './shape/prese
 export {
   renderPresetShape,
   hasPreset,
+  buildPresetGeometryPath,
   getConnectorAnchors,
 } from './shape/preset-geometry';
 export { type PresetPath } from './shape/preset-geometry/path-executor';

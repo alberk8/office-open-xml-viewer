@@ -15,6 +15,12 @@ class RecordingCtx {
   maxSavedDepth = 0;
   imageSmoothingEnabled = true;
   imageSmoothingQuality: 'low' | 'medium' | 'high' = 'low';
+  /** Device scale the live transform reports (DPR). Cells compose on top of it. */
+  deviceScale = 1;
+
+  constructor(deviceScale = 1) {
+    this.deviceScale = deviceScale;
+  }
 
   save(): void {
     this.savedDepth++;
@@ -28,8 +34,8 @@ class RecordingCtx {
   lineTo(): void {}
   closePath(): void {}
   getTransform(): { a: number; b: number; c: number; d: number; e: number; f: number } {
-    // Identity base transform — the warp composes its cells on top of this.
-    return { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 };
+    // Base transform = uniform device scale. The warp composes its cells on top.
+    return { a: this.deviceScale, b: 0, c: 0, d: this.deviceScale, e: 0, f: 0 };
   }
   clip(): void {
     this.clips++;
@@ -199,6 +205,27 @@ describe('drawProjected', () => {
       expect(blit.dh).toBeGreaterThanOrEqual(80);
       expect(blit.dh).toBeLessThanOrEqual(83);
     });
+  });
+
+  it('subdivides FINER at a higher device scale (raster-space error metric)', () => {
+    // Regression for the "white crack grid on large / HiDPI renders": the mesh
+    // density must track the cells' raster resolution, not the CSS corner space.
+    // A perspective quad rendered under a 2× live transform rasterises at 2×
+    // resolution, so its affine cells drift 2× as far in device px — the mesh
+    // must split further to keep adjacent cells overlapping. Measuring the error
+    // in CSS px (the old bug) left it scale-blind, under-subdividing at 2× and
+    // opening transparent seams.
+    const corners: [Vec2, Vec2, Vec2, Vec2] = [
+      { x: 30, y: 0 },
+      { x: 70, y: 0 },
+      { x: 100, y: 80 },
+      { x: 0, y: 80 },
+    ];
+    const at1 = new RecordingCtx(1);
+    const at2 = new RecordingCtx(2);
+    drawProjected(fakeImage, asCtx(at1), 100, 80, corners, 0.5);
+    drawProjected(fakeImage, asCtx(at2), 100, 80, corners, 0.5);
+    expect(at2.draws.length).toBeGreaterThan(at1.draws.length);
   });
 
   it('end-to-end: projects a camera quad onto cells covering the image', () => {

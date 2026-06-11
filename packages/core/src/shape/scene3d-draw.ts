@@ -95,13 +95,30 @@ function applyH(h: H, u: number, v: number): Vec2 {
  * source and dest stay consistent (no edge-pixel stretching) and the opaque core
  * of each cell fully covers its neighbour's fringe.
  *
- * The overlap must be measured in DEVICE pixels, not CSS pixels: the AA fringe is
- * a rasteriser artefact and is ~1px wide *after* the device-scale in `base` is
- * applied. A fixed CSS-px bleed under-covers on HiDPI (the fringe is DPR× wider in
- * device space). Empirically (browser measurement, gradient source, extreme
- * foreshortening, DPR 1 and 2) 0.5 device px leaves a residual seam (max Δ≈19–54)
- * while ≥0.75 device px removes it entirely (max Δ≈0–1); we use 1.0 device px for
- * headroom. Larger bleeds (tested to 1.5) introduce no sample-mismatch artefact.
+ * The overlap must be measured in the DEVICE pixels of the FINAL `dst` image,
+ * not CSS pixels and not the intermediate buffer's pixels: the AA fringe / gap
+ * the bleed has to cover is a `dst`-rasteriser artefact ~1px wide after the
+ * device scale. A fixed CSS-px bleed under-covers on HiDPI (the fringe is DPR×
+ * wider in device space).
+ *
+ * Crucially the bleed is sized off `bleedDevScale` — the linear scale from the
+ * cell-coordinate space to FINAL `dst` device px — NOT off `base`'s own scale.
+ * In the supersampled path the cells run under `auxBase = base · SUPERSAMPLE`, so
+ * `base`'s scale is SUPERSAMPLE× the dst scale; sizing the bleed off it would
+ * yield only `BLEED_DEVICE_PX / SUPERSAMPLE` device px of overlap after the
+ * downscale (≈0.5 px at S=2 — below the fringe width), which lets the slide
+ * background show through as a grid of fully-transparent cracks. The crack count
+ * grows with the shape's on-screen size because a larger quad subdivides into
+ * more cells, so more interior cell boundaries under-cover. Passing the true
+ * dst-device scale makes the overlap a constant `BLEED_DEVICE_PX` device px of
+ * the final image regardless of the shape's size, the canvas DPR, or the
+ * supersample factor.
+ *
+ * Empirically (browser measurement, gradient source, extreme foreshortening,
+ * DPR 1/2/3, shapes from 280–1400 css px) 0.5 device px leaves transparent
+ * cracks; ≥1.0 device px of FINAL-image overlap removes them entirely. We use
+ * 1.0 device px. Larger bleeds (tested to 1.5) introduce no sample-mismatch
+ * artefact.
  */
 /** A 2D affine transform as the canvas 6-tuple (a,b,c,d,e,f). */
 type Affine = [number, number, number, number, number, number];
@@ -134,6 +151,7 @@ function drawCell(
   imgW: number,
   imgH: number,
   base: Affine,
+  bleedDevScale: number,
   sx0: number,
   sy0: number,
   sx1: number,
@@ -152,15 +170,18 @@ function drawCell(
   const vx = (pv.x - p0.x) / sh;
   const vy = (pv.y - p0.y) / sh;
 
-  // Seam-hiding bleed: BLEED_DEVICE_PX device pixels along each dest axis,
-  // expressed in source units. The cell's dest edge lengths (p0→pu, p0→pv) are
-  // in `base`'s pre-image space (CSS px), so multiply by the device scale folded
-  // into `base` to get the edge length in DEVICE px, then make the source bleed
-  // such that the dest overlap is BLEED_DEVICE_PX device px regardless of the
-  // cell's scale or the canvas DPR.
-  const devScale = Math.sqrt(Math.abs(base[0] * base[3] - base[1] * base[2])) || 1;
-  const destLenU = (Math.hypot(pu.x - p0.x, pu.y - p0.y) || 1) * devScale;
-  const destLenV = (Math.hypot(pv.x - p0.x, pv.y - p0.y) || 1) * devScale;
+  // Seam-hiding bleed: BLEED_DEVICE_PX pixels of the FINAL dst image along each
+  // dest axis, expressed in source units. The cell's dest edge lengths (p0→pu,
+  // p0→pv) are in the cell-coordinate space (the same space as the quad
+  // corners), so multiply by `bleedDevScale` — the scale from that space to
+  // FINAL dst device px — to get the edge length in dst device px, then size the
+  // source bleed so the dest overlap is BLEED_DEVICE_PX dst device px regardless
+  // of the cell's scale, the canvas DPR, or the intermediate supersample factor.
+  // (Deliberately NOT `base`'s scale: in the supersampled path `base` carries the
+  // extra ×SUPERSAMPLE, which would shrink the post-downscale overlap below the
+  // fringe width and reopen the cracks.)
+  const destLenU = (Math.hypot(pu.x - p0.x, pu.y - p0.y) || 1) * bleedDevScale;
+  const destLenV = (Math.hypot(pv.x - p0.x, pv.y - p0.y) || 1) * bleedDevScale;
   const bleedU = (BLEED_DEVICE_PX * sw) / destLenU;
   const bleedV = (BLEED_DEVICE_PX * sh) / destLenV;
 
@@ -189,9 +210,20 @@ function drawCell(
 /**
  * Recursively warp source sub-rect [u0,u1]×[v0,v1] (unit-square coords) into the
  * destination quad described by homography H. A cell is drawn directly when its
- * centre's affine-vs-homography disagreement is below `tol` device px; otherwise
- * it is split along its longer axis and recursed. `depth` caps recursion so a
- * pathological quad can't blow the stack.
+ * affine-vs-homography disagreement is below `tol` of the cells' OWN raster
+ * pixels; otherwise it is split along its longer axis and recursed. `depth` caps
+ * recursion so a pathological quad can't blow the stack.
+ *
+ * The error MUST be measured in the cells' raster space, not the (CSS) corner
+ * space: the cell corners arrive in the live-transform pre-image space, but the
+ * cells actually rasterise under `base`, whose scale is the DPR (direct path) or
+ * DPR·SUPERSAMPLE (intermediate buffer). Comparing a CSS-px residual against a
+ * device-px tolerance under-subdivides as the shape gets larger or the DPR rises,
+ * leaving affine cells whose drift across their shared edge exceeds the seam
+ * bleed — that drift is exactly what opened the grid of transparent cracks on
+ * large / HiDPI renders. Scaling the residual by `base`'s linear scale ties the
+ * mesh density to the actual raster resolution, so the seam stays covered at
+ * every shape size, DPR, and supersample factor.
  */
 function warpRecursive(
   ctx: AnyCtx,
@@ -199,6 +231,7 @@ function warpRecursive(
   imgW: number,
   imgH: number,
   base: Affine,
+  bleedDevScale: number,
   h: H,
   u0: number,
   v0: number,
@@ -216,7 +249,9 @@ function warpRecursive(
   // Affine prediction of the cell centre (bilinear midpoint of the 4 dest
   // corners) vs. the true homography position of the centre. Their distance is
   // the perspective error this cell would incur if drawn as a single affine
-  // parallelogram.
+  // parallelogram. The corners are in the live-transform pre-image space, so
+  // scale the residual by `base`'s linear scale to express it in the cells' own
+  // raster pixels — the space `tol` is defined in (see the doc comment).
   const um = (u0 + u1) / 2;
   const vm = (v0 + v1) / 2;
   const trueMid = applyH(h, um, vm);
@@ -224,7 +259,8 @@ function warpRecursive(
     x: (c00.x + c10.x + c01.x + c11.x) / 4,
     y: (c00.y + c10.y + c01.y + c11.y) / 4,
   };
-  const err = Math.hypot(trueMid.x - affMid.x, trueMid.y - affMid.y);
+  const baseScale = affineScale(base);
+  const err = Math.hypot(trueMid.x - affMid.x, trueMid.y - affMid.y) * baseScale;
 
   if (depth <= 0 || err <= tol) {
     // Draw as two affine triangles' worth via a single parallelogram derived
@@ -234,7 +270,7 @@ function warpRecursive(
     const sy0 = v0 * imgH;
     const sx1 = u1 * imgW;
     const sy1 = v1 * imgH;
-    drawCell(ctx, img, imgW, imgH, base, sx0, sy0, sx1, sy1, c00, c10, c01);
+    drawCell(ctx, img, imgW, imgH, base, bleedDevScale, sx0, sy0, sx1, sy1, c00, c10, c01);
     return;
   }
 
@@ -242,11 +278,11 @@ function warpRecursive(
   const du = u1 - u0;
   const dv = v1 - v0;
   if (du >= dv) {
-    warpRecursive(ctx, img, imgW, imgH, base, h, u0, v0, um, v1, tol, depth - 1);
-    warpRecursive(ctx, img, imgW, imgH, base, h, um, v0, u1, v1, tol, depth - 1);
+    warpRecursive(ctx, img, imgW, imgH, base, bleedDevScale, h, u0, v0, um, v1, tol, depth - 1);
+    warpRecursive(ctx, img, imgW, imgH, base, bleedDevScale, h, um, v0, u1, v1, tol, depth - 1);
   } else {
-    warpRecursive(ctx, img, imgW, imgH, base, h, u0, v0, u1, vm, tol, depth - 1);
-    warpRecursive(ctx, img, imgW, imgH, base, h, u0, vm, u1, v1, tol, depth - 1);
+    warpRecursive(ctx, img, imgW, imgH, base, bleedDevScale, h, u0, v0, u1, vm, tol, depth - 1);
+    warpRecursive(ctx, img, imgW, imgH, base, bleedDevScale, h, u0, vm, u1, v1, tol, depth - 1);
   }
 }
 
@@ -315,13 +351,21 @@ export function drawProjected(
   // coordinate system instead of `setTransform` wiping it to the identity.
   const t = dst.getTransform();
   const base: Affine = [t.a, t.b, t.c, t.d, t.e, t.f];
+  // Linear scale from the live (corner) coordinate space to dst device px.
+  const dstDevScale = affineScale(base);
 
   // ── Supersampled path ────────────────────────────────────────────────────
   // Render the mesh into an intermediate buffer at SUPERSAMPLE× the device
   // resolution of the quad's bounding box, then blit it down in one go.
-  if (drawProjectedSupersampled(src, dst, srcW, srcH, corners, base, h, tol, MAX_DEPTH)) {
+  if (drawProjectedSupersampled(src, dst, srcW, srcH, corners, base, dstDevScale, h, tol, MAX_DEPTH)) {
     return;
   }
+
+  // No aux canvas (e.g. headless unit tests, or a context that refused an
+  // OffscreenCanvas / <canvas>): fall back to drawing the mesh directly onto
+  // dst with per-cell bleed only. This lacks the supersample downscale that
+  // dissolves textured-source seams, so warn once instead of degrading silently.
+  warnFallbackOnce();
 
   // ── Direct path (fallback when no aux canvas, e.g. headless unit tests) ───
   dst.save();
@@ -335,8 +379,31 @@ export function drawProjected(
   dst.lineTo(corners[3].x, corners[3].y);
   dst.closePath();
   dst.clip();
-  warpRecursive(dst, src, srcW, srcH, base, h, 0, 0, 1, 1, tol, MAX_DEPTH);
+  warpRecursive(dst, src, srcW, srcH, base, dstDevScale, h, 0, 0, 1, 1, tol, MAX_DEPTH);
   dst.restore();
+}
+
+/** Uniform linear scale of an affine 6-tuple (√|det|), clamped to ≥ a tiny ε. */
+function affineScale(m: Affine): number {
+  return Math.sqrt(Math.abs(m[0] * m[3] - m[1] * m[2])) || 1;
+}
+
+let fallbackWarned = false;
+/**
+ * Warn (once per process) that scene3d warp fell back to the non-supersampled
+ * direct path because no aux canvas was available. Guarded so a deck with many
+ * 3D shapes doesn't flood the console.
+ */
+function warnFallbackOnce(): void {
+  if (fallbackWarned) return;
+  fallbackWarned = true;
+  if (typeof console !== 'undefined' && typeof console.warn === 'function') {
+    console.warn(
+      '[ooxml] scene3d: no offscreen canvas available — using the direct warp ' +
+        'fallback (per-cell bleed only, no supersample). Textured-source seams ' +
+        'may be faintly visible; the silhouette and geometry are unaffected.',
+    );
+  }
 }
 
 /** Supersample factor for the intermediate warp buffer (see drawProjected). */
@@ -355,6 +422,7 @@ function drawProjectedSupersampled(
   srcH: number,
   corners: [Vec2, Vec2, Vec2, Vec2],
   base: Affine,
+  dstDevScale: number,
   h: H,
   tol: number,
   maxDepth: number,
@@ -416,7 +484,11 @@ function drawProjectedSupersampled(
   actx.clip();
   // Tolerance is in device px; at SUPERSAMPLE× resolution the same visual
   // tolerance corresponds to S× more buffer px, so subdivide to tol·S there.
-  warpRecursive(actx, dstSrc, srcW, srcH, auxBase, h, 0, 0, 1, 1, tol * s, maxDepth);
+  // The bleed, however, is sized off `dstDevScale` (the FINAL dst device scale),
+  // NOT auxBase's scale — auxBase is S× larger, and sizing the bleed off it would
+  // leave only BLEED_DEVICE_PX/S device px of overlap after the downscale, which
+  // reopens the transparent cell-seam cracks at large shape sizes.
+  warpRecursive(actx, dstSrc, srcW, srcH, auxBase, dstDevScale, h, 0, 0, 1, 1, tol * s, maxDepth);
   actx.restore();
 
   // Blit the intermediate down onto dst. The intermediate covers device-px box

@@ -129,6 +129,13 @@ export interface ShapeElement {
    *  same space as x/y/width/height). When present the renderer lays text out in
    *  this rectangle instead of the preset/ellipse-derived text rectangle. */
   textRect?: TextRect;
+  /** `<a:scene3d>` 3D camera scene (ECMA-376 §20.1.5.5). When the camera is
+   *  non-identity the renderer projects the shape through the camera
+   *  homography (Phase A). */
+  scene3d?: Scene3d;
+  /** `<a:sp3d>` 3D shape properties (ECMA-376 §20.1.5.12). Parsed but not
+   *  rendered in Phase A. */
+  sp3d?: Sp3d;
 }
 
 /** Absolute text-frame rectangle in EMU (from SmartArt `<dsp:txXfrm>`). */
@@ -137,6 +144,96 @@ export interface TextRect {
   y: number;
   width: number;
   height: number;
+}
+
+// ===== DrawingML 3D scene (scene3d / sp3d) =====
+// 1:1 with the Rust parser's Rot3d / Camera3d / LightRig / Scene3d / Bevel3d /
+// Sp3d. Phase A renders only the camera (perspective homography of the planar
+// shape); sp3d / lightRig are parsed but rendered in Phase B.
+
+/**
+ * 3D rotation in sphere coordinates — ECMA-376 §20.1.5.11 (`CT_SphereCoords`).
+ * Angles are in **degrees** (the XML carries 60000ths of a degree; the parser
+ * divides once). Per the spec, `lat`/`lon` are latitude/longitude and `rev` is
+ * the revolution about the resulting view axis.
+ */
+export interface Rot3d {
+  /** Latitude — rotation about the horizontal (X) axis, degrees. */
+  lat: number;
+  /** Longitude — rotation about the vertical (Y) axis, degrees. */
+  lon: number;
+  /** Revolution — in-plane rotation about the view (Z) axis, degrees. */
+  rev: number;
+}
+
+/**
+ * `<a:camera>` — ECMA-376 §20.1.5.5 (`CT_Camera`). `prst` selects one of the
+ * 62 preset cameras (§20.1.10.47); `fov`/`zoom`/`rot` optionally override it.
+ */
+export interface Camera3d {
+  /** Preset camera name (`ST_PresetCameraType`), e.g. "perspectiveRelaxed". */
+  prst: string;
+  /** Field-of-view override in degrees. Omitted = preset default. */
+  fov?: number;
+  /** Zoom factor as a unit ratio (1.0 = 100%). Omitted = 1.0. */
+  zoom?: number;
+  /** Camera rotation override. Omitted = preset base orientation. */
+  rot?: Rot3d;
+}
+
+/**
+ * `<a:lightRig>` — ECMA-376 §20.1.5.9 (`CT_LightRig`). Parsed for Phase B
+ * (lighting/bevel shading); the Phase A camera renderer ignores it.
+ */
+export interface LightRig {
+  /** Light-rig preset (`ST_LightRigType`), e.g. "threePt". */
+  rig: string;
+  /** Light direction (`ST_LightRigDirection`): tl/t/tr/l/r/bl/b/br. */
+  dir: string;
+  /** Optional rotation override of the rig. */
+  rot?: Rot3d;
+}
+
+/**
+ * `<a:scene3d>` — ECMA-376 §20.1.4.1.41 (`CT_Scene3D`). Camera + light rig for
+ * a shape's 3D scene.
+ */
+export interface Scene3d {
+  camera: Camera3d;
+  lightRig?: LightRig;
+}
+
+/**
+ * `<a:bevel>` — ECMA-376 §20.1.5.3 (`CT_Bevel`). Lengths in EMU; `w`/`h`
+ * default to 76200 EMU and `prst` to "circle".
+ */
+export interface Bevel3d {
+  /** Bevel width in EMU. */
+  w: number;
+  /** Bevel height in EMU. */
+  h: number;
+  /** Bevel preset name (`ST_BevelPresetType`). */
+  prst: string;
+}
+
+/**
+ * `<a:sp3d>` — ECMA-376 §20.1.5.12 (`CT_Shape3D`). Parsed in full but **not
+ * rendered in Phase A** (camera-only). bevel/contour/extrusion are Phase B.
+ * Numeric fields are omitted from JSON when zero.
+ */
+export interface Sp3d {
+  /** Z position of the front face in EMU (default 0). */
+  z?: number;
+  /** Extrusion (depth) height in EMU (default 0). */
+  extrusionH?: number;
+  /** Contour (outline) width in EMU (default 0). */
+  contourW?: number;
+  /** Preset surface material (`ST_PresetMaterialType`), default "warmMatte". */
+  prstMaterial: string;
+  /** Top bevel. */
+  bevelT?: Bevel3d;
+  /** Bottom bevel. */
+  bevelB?: Bevel3d;
 }
 
 export interface TableElement {
@@ -308,6 +405,13 @@ export interface PictureElement {
   softEdge?: SoftEdge;
   /** Mirrored reflection from effectLst > reflection. ECMA-376 §20.1.8.50. */
   reflection?: Reflection;
+  /** `<a:scene3d>` 3D camera scene (ECMA-376 §20.1.5.5). A `p:pic`'s spPr is
+   *  `CT_ShapeProperties`, so 3D scenes apply to images. When non-identity the
+   *  renderer projects the picture through the camera homography (Phase A). */
+  scene3d?: Scene3d;
+  /** `<a:sp3d>` 3D shape properties (ECMA-376 §20.1.5.12). Parsed but not
+   *  rendered in Phase A. */
+  sp3d?: Sp3d;
 }
 
 // ===== Worker message protocol =====

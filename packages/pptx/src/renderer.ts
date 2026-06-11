@@ -2510,18 +2510,16 @@ async function renderPicture(
       }
       // 2) sp3d contour edge (ECMA-376 §20.1.5.12 `contourW` / `<a:contourClr>`).
       //    The spec's contour is the extruded 3D edge surface lit by the scene's
-      //    light rig. Phase A draws a FLAT approximation: a uniform-width outline
-      //    in the contour colour, with no bevel shading or light-rig response
-      //    (bevelT/bevelB shading remains Phase B — see the Sp3d type doc).
-      //    Position assumption: the contour grows OUTWARD from the front face
-      //    in 3D, so Phase A draws it as an OUTSIDE-aligned stroke (the framed
-      //    edge sits just beyond the picture, not over the image). Canvas has no
-      //    outside-stroke mode, so we (a) clip to the region OUTSIDE the
-      //    silhouette — traced silhouette + an enclosing rect with the even-odd
-      //    rule — then (b) stroke the silhouette at 2× width centred on the
-      //    edge; only the outer half survives the clip. When Phase B implements
-      //    the true 3D extruded edge (with bevel/light-rig shading) it replaces
-      //    this flat band.
+      //    light rig. We draw a FLAT approximation: a uniform-width outline in
+      //    the contour colour, with no per-edge light-rig response. (The bevel
+      //    lip itself IS shaded — applyBevelShading runs on the body before this;
+      //    the contour is the thin rim OUTSIDE that bevel.) Position assumption:
+      //    the contour grows OUTWARD from the front face in 3D, so we draw it as
+      //    an OUTSIDE-aligned stroke (the framed edge sits just beyond the
+      //    picture, not over the image). Canvas has no outside-stroke mode, so we
+      //    (a) clip to the region OUTSIDE the silhouette — traced silhouette + an
+      //    enclosing rect with the even-odd rule — then (b) stroke the silhouette
+      //    at 2× width centred on the edge; only the outer half survives the clip.
       const sp3d = el.sp3d;
       if (sp3d && (sp3d.contourW ?? 0) > 0 && sp3d.contourClr) {
         const wPx = Math.max(0.5, (sp3d.contourW as number) * scale);
@@ -2544,10 +2542,11 @@ async function renderPicture(
       }
     };
 
-    // scene3d (ECMA-376 §20.1.5.5, Phase A camera projection). Active only when
-    // the camera actually transforms the shape; identity/front cameras fall
-    // through to the normal flat draw. sp3d (bevel/contour/extrusion) is parsed
-    // but NOT rendered in Phase A — see the TS Sp3d type doc.
+    // scene3d (ECMA-376 §20.1.5.5 camera projection). Active only when the
+    // camera actually transforms the shape; identity/front cameras fall through
+    // to the normal flat draw (but sp3d bevel/extrusion still apply via the flat
+    // path below). sp3d bevel/extrusion shading is wired in just after this; the
+    // contour edge is the flat approximation in strokePictureEdges.
     const scene3d = el.scene3d && isScene3dNonIdentity(el.scene3d.camera) ? el.scene3d : null;
 
     // Paint JUST the (clipped, optionally cropped) bitmap body at a local rect —

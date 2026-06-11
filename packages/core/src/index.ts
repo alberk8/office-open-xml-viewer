@@ -63,9 +63,9 @@ export {
   type PaintShape,
   type EffectBBox,
 } from './shape/effects';
-// DrawingML 3D camera perspective projection (Phase A — planar homography).
-// ECMA-376 §20.1.5.5 (camera) / §20.1.5.11 (rot). sp3d / lightRig shading is
-// Phase B and not implemented here.
+// DrawingML 3D camera perspective projection (planar homography).
+// ECMA-376 §20.1.5.5 (camera) / §20.1.5.11 (rot). sp3d bevel / extrusion / light
+// shading lives in ./shape/bevel-shading (exported below).
 export {
   computeScene3dQuad,
   isScene3dNonIdentity,

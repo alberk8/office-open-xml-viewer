@@ -65,8 +65,8 @@ export class XlsxWorkbook {
   private bridge: WorkerBridge<WorkerResponse>;
   private parsedWorkbook: ParsedWorkbook | null = null;
   private sheetCache = new Map<number, Worksheet>();
-  /** Cache of loaded images keyed by their data URL. Shared across sheets. */
-  private imageCache = new Map<string, HTMLImageElement>();
+  /** Cache of decoded image bitmaps keyed by their data URL. Shared across sheets. */
+  private imageCache = new Map<string, CanvasImageSource>();
   private rawData: ArrayBuffer | null = null;
   private maxZipEntryBytes: number | undefined;
   /** Opt-in OMML equation engine, injected once at {@link load}. Every
@@ -265,13 +265,9 @@ export class XlsxWorkbook {
     if (uncached.length > 0) {
       await Promise.all(
         uncached.map(async (url) => {
-          const el = new Image();
-          el.src = url;
-          await new Promise<void>((resolve, reject) => {
-            el.onload = () => resolve();
-            el.onerror = () => reject(new Error('image decode failed'));
-          });
-          this.imageCache.set(url, el);
+          const blob = await (await fetch(url)).blob();
+          const bmp = await createImageBitmap(blob);
+          this.imageCache.set(url, bmp);
         }),
       ).catch(() => { /* swallow image failures so the grid still renders */ });
     }

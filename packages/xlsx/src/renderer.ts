@@ -2562,7 +2562,7 @@ function sheetYForRow(
 function renderImages(
   ctx: CanvasRenderingContext2D,
   ws: Worksheet,
-  loadedImages: Map<string, HTMLImageElement>,
+  loadedImages: Map<string, CanvasImageSource>,
   cs: number,
   startRow: number,
   startCol: number,
@@ -2646,7 +2646,7 @@ function renderShapeGroups(
   scrollAreaY: number,
   scrollAreaW: number,
   scrollAreaH: number,
-  loadedImages?: Map<string, HTMLImageElement>,
+  loadedImages?: Map<string, CanvasImageSource>,
 ): void {
   if (scrollAreaW <= 0 || scrollAreaH <= 0) return;
   const anchors = ws.shapeGroups;
@@ -2708,7 +2708,7 @@ function drawShape(
   shape: ShapeInfo,
   sx: number, sy: number, sw: number, sh: number,
   cs: number,
-  loadedImages?: Map<string, HTMLImageElement>,
+  loadedImages?: Map<string, CanvasImageSource>,
 ): void {
   ctx.save();
   if (shape.rot !== 0) {

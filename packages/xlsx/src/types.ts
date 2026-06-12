@@ -862,8 +862,8 @@ export interface RenderViewportOptions {
   freezeCols?: number;
   /** Scale factor applied to all cell/header dimensions (default 1). */
   cellScale?: number;
-  /** Pre-loaded Image elements keyed by their dataUrl (for ImageAnchor rendering). */
-  loadedImages?: Map<string, HTMLImageElement>;
+  /** Pre-decoded image sources keyed by their dataUrl (for ImageAnchor rendering). */
+  loadedImages?: Map<string, CanvasImageSource>;
   /** Called once per cell that contains text, with canvas-pixel position and cell address. */
   onTextRun?: (info: XlsxTextRunInfo) => void;
   /** Highlighted row range for selected row headers (1-indexed inclusive).

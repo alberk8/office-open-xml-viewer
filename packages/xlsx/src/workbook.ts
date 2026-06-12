@@ -3,6 +3,8 @@ import wasmAssetUrl from './wasm/xlsx_parser_bg.wasm?url';
 import {
   preloadGoogleFonts,
   WorkerBridge,
+  SCRIPT_GOOGLE_FONTS,
+  SCRIPT_PRELOAD_NAMES,
   type FontPreloadEntry,
   type LoadOptions as CoreLoadOptions,
   type MathRenderer,
@@ -52,6 +54,11 @@ const XLSX_GOOGLE_FONTS: Record<string, FontPreloadEntry> = {
   // is enabled — see `_load`, which always queues these names.
   'noto naskh arabic': { url: NOTO_NASKH_ARABIC_URL, loadFamily: 'Noto Naskh Arabic' },
   'noto sans arabic': { url: NOTO_SANS_ARABIC_URL, loadFamily: 'Noto Sans Arabic' },
+  // CJK (KR/SC/TC/JP), Cyrillic (Noto Sans/Serif), Thai, Devanagari and Hebrew
+  // Noto faces, shared with docx/pptx via @silurus/ooxml-core. The renderer
+  // chooses the CJK Noto per cell from the cell's font name; non-CJK scripts are
+  // appended to the default chain. Loaded only when useGoogleFonts is on.
+  ...SCRIPT_GOOGLE_FONTS,
 };
 
 /** Options for {@link XlsxWorkbook.load}. The shared load-options type from
@@ -122,6 +129,10 @@ export class XlsxWorkbook {
       // renderer's DEFAULT_FONT_FAMILY chain ends with these two Noto faces).
       names.add('Noto Naskh Arabic');
       names.add('Noto Sans Arabic');
+      // Always queue every script Noto face so a glyph falling through the
+      // chain (CJK / Cyrillic / Thai / Devanagari / Hebrew) resolves to a real
+      // web font even when no cell font maps to it by name.
+      for (const n of SCRIPT_PRELOAD_NAMES) names.add(n);
       await preloadGoogleFonts(names, XLSX_GOOGLE_FONTS);
     }
   }

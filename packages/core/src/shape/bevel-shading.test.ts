@@ -439,7 +439,12 @@ describe('bevel band geometry — slide-6 ellipse rim (issue #410→…→band-g
   const SLIDE_W_EMU = 12192000;
   const SHAPE_W_EMU = 3785692, SHAPE_H_EMU = 4793942;
   const BEVEL_W_EMU = 304800, BEVEL_H_EMU = 152400;
-  const TARGET_WIDTH = 1920;
+  // A modest render width keeps the devScale-8 raster tractable in CI (the full
+  // 1920-px-wide deck would be ~29 MP at dev 8 → EDT timeout) WITHOUT changing what
+  // is tested: the band/shape geometry is governed by the EMU RATIO `bevel/shape`,
+  // which is independent of TARGET_WIDTH, and the conversion is exercised over the
+  // real (cssScale × devScale) multiplier across devScale {1,4,8}.
+  const TARGET_WIDTH = 600;
   const cssScale = TARGET_WIDTH / SLIDE_W_EMU;
 
   for (const devScale of [1, 4, 8]) {

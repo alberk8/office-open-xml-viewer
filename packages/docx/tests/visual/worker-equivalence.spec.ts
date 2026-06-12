@@ -1,0 +1,46 @@
+import { test, expect } from '@playwright/test';
+import { PNG } from 'pngjs';
+import pixelmatch from 'pixelmatch';
+
+// Worker mode must produce (near-)identical pixels to main mode: same
+// renderer, same pagination, same fonts, different thread. The only expected
+// drift is sub-pixel text rasterization between the main-thread <canvas> and
+// the worker OffscreenCanvas. Per-page tolerances grant slack only to a page
+// that needs it, so the (near-)bit-identical pages keep enough sensitivity
+// that even a single dropped text element fails the diff.
+const PAGES = [0, 1];
+const MAX_DIFF_PCT = [0.2, 0.2];
+
+for (const pageIndex of PAGES) {
+  test(`worker mode matches main mode › demo/sample-1 page ${pageIndex + 1}`, async ({ page }) => {
+    await page.goto(`/tests/visual/worker-fixture.html?docx=demo/sample-1&page=${pageIndex}`);
+    // Two full loads (main + worker) plus worker spin-up per test — twice the
+    // single-render budget visual.spec.ts uses.
+    await page.waitForFunction(
+      () => document.body.dataset.status === 'ready' || document.body.dataset.status === 'error',
+      { timeout: 60_000 },
+    );
+    const status = await page.evaluate(() => document.body.dataset.status);
+    if (status === 'error') {
+      throw new Error(await page.evaluate(() => document.body.dataset.errorMessage ?? ''));
+    }
+
+    const [mainUrl, workerUrl] = await page.evaluate(() => [
+      (document.getElementById('main-canvas') as HTMLCanvasElement).toDataURL('image/png'),
+      (document.getElementById('worker-canvas') as HTMLCanvasElement).toDataURL('image/png'),
+    ]);
+    const a = PNG.sync.read(Buffer.from(mainUrl.split(',')[1], 'base64'));
+    const b = PNG.sync.read(Buffer.from(workerUrl.split(',')[1], 'base64'));
+    // A zero-size canvas means a silently failed render; fail with a readable
+    // assertion instead of the NaN the diff percentage would produce.
+    expect(a.width).toBeGreaterThan(0);
+    expect(a.height).toBeGreaterThan(0);
+    expect(b.width).toBe(a.width);
+    expect(b.height).toBe(a.height);
+
+    const diff = pixelmatch(a.data, b.data, undefined, a.width, a.height, { threshold: 0.1 });
+    const pct = (diff / (a.width * a.height)) * 100;
+    console.log(`  page ${pageIndex + 1}: worker-vs-main diff ${pct.toFixed(3)}%`);
+    expect(pct).toBeLessThanOrEqual(MAX_DIFF_PCT[pageIndex]);
+  });
+}

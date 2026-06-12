@@ -889,6 +889,24 @@ export function computePages(
   return pages;
 }
 
+/** Paginate with a throwaway measure context. Pagination must use the same
+ *  fontFamilyClasses + kinsoku rules as the render path, otherwise line-break
+ *  decisions (and thus page breaks) diverge between measurement and paint
+ *  (ECMA-376 §17.15.1.58–.60). Shared by the main-thread DocxDocument and the
+ *  render worker so the two modes can never paginate differently. */
+export function paginateDocument(doc: DocxDocumentModel): PaginatedBodyElement[][] {
+  const ctx = new OffscreenCanvas(1, 1).getContext('2d');
+  if (!ctx) return [doc.body];
+  return computePages(
+    doc.body,
+    doc.section,
+    ctx,
+    doc.fontFamilyClasses ?? {},
+    resolveKinsokuRules(doc.settings),
+    doc.footnotes ?? [],
+  );
+}
+
 function buildMeasureState(
   ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
   section: SectionProps,

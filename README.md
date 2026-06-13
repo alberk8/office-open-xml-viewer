@@ -86,6 +86,43 @@ per-render argument. (Excel stores "Insert > Equation" as OMML inside the shared
 DrawingML `<xdr:txBody>` grammar, so `XlsxViewer` renders equations embedded in
 shapes / text boxes the same way.)
 
+### Off-main-thread rendering
+
+By default the headless engines parse in a worker but render on the main thread.
+Pass `mode: 'worker'` to `.load()` to parse **and** render entirely inside a Web
+Worker — the main thread only paints the returned `ImageBitmap` via a
+`bitmaprenderer` context, keeping it free for scrolling and input. It requires
+`Worker` + `OffscreenCanvas`.
+
+```typescript
+import { PptxPresentation } from '@silurus/ooxml/pptx';
+
+// Render entirely inside a Web Worker — the main thread only paints bitmaps.
+const pres = await PptxPresentation.load('/deck.pptx', { mode: 'worker' });
+const canvas = document.getElementById('pptx-canvas') as HTMLCanvasElement;
+const bitmap = await pres.renderSlideToBitmap(0, { width: 960, dpr: window.devicePixelRatio });
+const ctx = canvas.getContext('bitmaprenderer') as ImageBitmapRenderingContext;
+ctx.transferFromImageBitmap(bitmap); // consumes the bitmap
+```
+
+The `*ToBitmap` method exists on all three engines —
+`PptxPresentation.renderSlideToBitmap(slideIndex, opts)`,
+`DocxDocument.renderPageToBitmap(pageIndex, opts)`, and
+`XlsxWorkbook.renderViewportToBitmap(sheetIndex, viewport, opts)` (the xlsx
+variant **requires** `opts.width` and `opts.height`, since a worker has no DOM
+element to measure). They work in **both** modes — in main mode they render to
+an internal `OffscreenCanvas` — so you can write mode-agnostic code.
+
+Notes:
+
+- The returned `ImageBitmap` is owned by the caller: `transferFromImageBitmap`
+  consumes it, or call `bitmap.close()` when done.
+- The canvas-target methods (`renderSlide(canvas)`, `renderPage(canvas)`,
+  `renderViewport(canvas)`) are unavailable in worker mode — use the `*ToBitmap`
+  variants instead.
+- OMML equations require `mode: 'main'`; in worker mode they are skipped (with a
+  console warning).
+
 ---
 
 <details>

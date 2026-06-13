@@ -1,4 +1,5 @@
 export { DocxDocument, type LoadOptions } from './document';
+export type { WireRenderPageOptions } from './worker-protocol';
 export { DocxViewer, type DocxViewerOptions } from './viewer';
 export { autoResize, type AutoResizeOptions } from '@silurus/ooxml-core';
 export { noteText } from './types';

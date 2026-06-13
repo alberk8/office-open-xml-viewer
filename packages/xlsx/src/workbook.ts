@@ -3,95 +3,79 @@ import wasmAssetUrl from './wasm/xlsx_parser_bg.wasm?url';
 import {
   preloadGoogleFonts,
   WorkerBridge,
-  SCRIPT_GOOGLE_FONTS,
+  defaultDpr,
   SCRIPT_PRELOAD_NAMES,
-  type FontPreloadEntry,
   type LoadOptions as CoreLoadOptions,
   type MathRenderer,
 } from '@silurus/ooxml-core';
-import type { ParsedWorkbook, Worksheet, ViewportRange, RenderViewportOptions, WorkerResponse, Cell } from './types.js';
-import { renderViewport, prepareWorksheetMath, worksheetHasUncachedMath } from './renderer.js';
+import type { ParsedWorkbook, Worksheet, ViewportRange, RenderViewportOptions, WorkerRequest, WorkerResponse, Cell } from './types.js';
+import { renderWorksheetViewport } from './render-orchestrator.js';
+import { XLSX_GOOGLE_FONTS } from './google-fonts.js';
 import { formatCellValue } from './number-format.js';
 import {
   parseListFormula,
   resolveListValues,
   type ResolvedList,
 } from './validation-list.js';
+import type {
+  RenderWorkerRequest,
+  RenderWorkerResponse,
+  WireRenderViewportOptions,
+} from './worker-protocol.js';
 
-/** Office font name → metric-compatible Google Fonts substitute. These are
- *  the well-known pairings Microsoft and Google both publish and ship on
- *  Linux distributions: Calibri → Carlito, Cambria → Caladea (same advance
- *  widths and ascender / descender). Loading the substitute on a system
- *  that lacks the Office face keeps text width measurements close to
- *  Excel's. The substitute font-family differs from the requested name, so
- *  `loadFamily` redirects FontFaceSet loading appropriately. */
-const NOTO_NASKH_ARABIC_URL =
-  'https://fonts.googleapis.com/css2?family=Noto+Naskh+Arabic:wght@400;700&display=swap';
-const NOTO_SANS_ARABIC_URL =
-  'https://fonts.googleapis.com/css2?family=Noto+Sans+Arabic:wght@400;700&display=swap';
-
-const XLSX_GOOGLE_FONTS: Record<string, FontPreloadEntry> = {
-  'calibri': {
-    url: 'https://fonts.googleapis.com/css2?family=Carlito:ital,wght@0,400;0,700;1,400;1,700&display=swap',
-    loadFamily: 'Carlito',
-  },
-  'cambria': {
-    url: 'https://fonts.googleapis.com/css2?family=Caladea:ital,wght@0,400;0,700;1,400;1,700&display=swap',
-    loadFamily: 'Caladea',
-  },
-  // Common Arabic-script faces that hosts rarely ship. Map them to Noto
-  // substitutes so RTL workbooks (e.g. the LibreOffice-authored sample-29,
-  // which requests Sakkal Majalla / Univers Next Arabic) render with a real
-  // web font instead of an oversized OS fallback. "Naskh" covers traditional
-  // serif-like Arabic faces; "Sans" covers the modern geometric ones.
-  'sakkal majalla': { url: NOTO_NASKH_ARABIC_URL, loadFamily: 'Noto Naskh Arabic' },
-  'traditional arabic': { url: NOTO_NASKH_ARABIC_URL, loadFamily: 'Noto Naskh Arabic' },
-  'simplified arabic': { url: NOTO_NASKH_ARABIC_URL, loadFamily: 'Noto Naskh Arabic' },
-  'arabic typesetting': { url: NOTO_NASKH_ARABIC_URL, loadFamily: 'Noto Naskh Arabic' },
-  'univers next arabic': { url: NOTO_SANS_ARABIC_URL, loadFamily: 'Noto Sans Arabic' },
-  // Self-referencing entries so the generic Arabic fallback fonts (appended to
-  // the renderer's font chain) are themselves loaded whenever useGoogleFonts
-  // is enabled — see `_load`, which always queues these names.
-  'noto naskh arabic': { url: NOTO_NASKH_ARABIC_URL, loadFamily: 'Noto Naskh Arabic' },
-  'noto sans arabic': { url: NOTO_SANS_ARABIC_URL, loadFamily: 'Noto Sans Arabic' },
-  // CJK (KR/SC/TC/JP), Cyrillic (Noto Sans/Serif), Thai, Devanagari and Hebrew
-  // Noto faces, shared with docx/pptx via @silurus/ooxml-core. The renderer
-  // chooses the CJK Noto per cell from the cell's font name; non-CJK scripts are
-  // appended to the default chain. Loaded only when useGoogleFonts is on.
-  ...SCRIPT_GOOGLE_FONTS,
-};
-
-/** Options for {@link XlsxWorkbook.load}. The shared load-options type from
- *  `@silurus/ooxml-core` (`useGoogleFonts`, `maxZipEntryBytes`). */
-export type LoadOptions = CoreLoadOptions;
+/** Options for {@link XlsxWorkbook.load}. Extends the shared load-options type
+ *  from `@silurus/ooxml-core` (`useGoogleFonts`, `maxZipEntryBytes`, `math`)
+ *  with the worker-rendering mode. */
+export interface LoadOptions extends CoreLoadOptions {
+  /**
+   * 'main' (default): parse in a worker, render on the main thread (current
+   * behaviour). 'worker': parse AND render inside the worker; use
+   * {@link XlsxWorkbook.renderViewportToBitmap} and paint the returned
+   * ImageBitmap via an `ImageBitmapRenderingContext`. Requires OffscreenCanvas.
+   * The math engine is unavailable in this mode (equations are skipped).
+   */
+  mode?: 'main' | 'worker';
+}
 
 export class XlsxWorkbook {
   private worker: Worker;
-  private bridge: WorkerBridge<WorkerResponse>;
+  private bridge: WorkerBridge<WorkerResponse | RenderWorkerResponse>;
   private parsedWorkbook: ParsedWorkbook | null = null;
   private sheetCache = new Map<number, Worksheet>();
-  /** Cache of loaded images keyed by their data URL. Shared across sheets. */
-  private imageCache = new Map<string, HTMLImageElement>();
+  /** Cache of decoded image bitmaps keyed by their data URL. Shared across sheets. */
+  private imageCache = new Map<string, CanvasImageSource>();
   private rawData: ArrayBuffer | null = null;
   private maxZipEntryBytes: number | undefined;
   /** Opt-in OMML equation engine, injected once at {@link load}. Every
    *  `renderViewport` call reuses it — equations in shapes render when present,
    *  and are skipped (engine tree-shaken) when omitted. */
   private math: MathRenderer | undefined;
+  private _mode: 'main' | 'worker' = 'main';
 
-  private constructor() {
-    this.worker = new InlineWorker();
-    this.bridge = new WorkerBridge<WorkerResponse>(this.worker, {
+  private constructor(worker: Worker, mode: 'main' | 'worker') {
+    this.worker = worker;
+    this._mode = mode;
+    this.bridge = new WorkerBridge<WorkerResponse | RenderWorkerResponse>(this.worker, {
       correlate: (res) => res.id,
       toError: (res) => (res.type === 'error' ? res.message : undefined),
     });
     const wasmUrl = new URL(wasmAssetUrl, location.href).href;
-    this.bridge.post({ type: 'init', wasmUrl });
+    this.bridge.post({ type: 'init', wasmUrl } satisfies WorkerRequest);
   }
 
   /** Parse an XLSX from a URL or ArrayBuffer. */
   static async load(source: string | ArrayBuffer, opts: LoadOptions = {}): Promise<XlsxWorkbook> {
-    const wb = new XlsxWorkbook();
+    const mode = opts.mode ?? 'main';
+    if (mode === 'worker' && (typeof Worker === 'undefined' || typeof OffscreenCanvas === 'undefined')) {
+      throw new Error("mode: 'worker' requires Worker and OffscreenCanvas support");
+    }
+    // The render worker is reachable only through this dynamic import, so
+    // main-mode bundles never pull in its (renderer-bearing) chunk.
+    const worker =
+      mode === 'worker'
+        ? (await import('./render-worker-host')).createRenderWorker()
+        : new InlineWorker();
+    const wb = new XlsxWorkbook(worker, mode);
     await wb._load(source, opts);
     return wb;
   }
@@ -108,14 +92,34 @@ export class XlsxWorkbook {
     this.rawData = data;
     this.maxZipEntryBytes = opts.maxZipEntryBytes;
     this.math = opts.math;
-    const parsed = await this.bridge.request((id) => ({
-      type: 'parse',
-      id,
-      data: data.slice(0),
-      maxZipEntryBytes: this.maxZipEntryBytes,
-    }));
+    if (opts.math && this._mode === 'worker') {
+      console.warn(
+        "[ooxml] the math engine is unavailable in mode: 'worker'; equations will be skipped. Use mode: 'main' for workbooks with equations.",
+      );
+    }
+    // In worker mode the worker preloads fonts before its first render
+    // (rendering measures text), so the flag is forwarded; in main mode fonts
+    // are loaded here after parse.
+    const parsed = await this.bridge.request((id) =>
+      this._mode === 'worker'
+        ? ({
+            type: 'parse',
+            id,
+            data: data.slice(0),
+            maxZipEntryBytes: this.maxZipEntryBytes,
+            useGoogleFonts: !!opts.useGoogleFonts,
+          } satisfies RenderWorkerRequest)
+        : ({
+            type: 'parse',
+            id,
+            data: data.slice(0),
+            maxZipEntryBytes: this.maxZipEntryBytes,
+          } satisfies WorkerRequest),
+    );
+    // Both modes carry the light, workbook-level ParsedWorkbook back, so
+    // sheetNames / tabColors / resolveValidationList keep working.
     this.parsedWorkbook = (parsed as Extract<WorkerResponse, { type: 'parsed' }>).workbook;
-    if (opts.useGoogleFonts) {
+    if (this._mode === 'main' && opts.useGoogleFonts) {
       // Walk every styled font in the workbook and queue Google Fonts
       // substitutes for any Office faces (Calibri → Carlito, Cambria →
       // Caladea). Documents that use only system fonts produce zero
@@ -236,89 +240,60 @@ export class XlsxWorkbook {
     viewport: ViewportRange,
     opts: RenderViewportOptions = {},
   ): Promise<void> {
+    if (this._mode === 'worker') {
+      throw new Error(
+        "renderViewport(canvas) is unavailable in mode: 'worker'; use renderViewportToBitmap() and paint it via an ImageBitmapRenderingContext",
+      );
+    }
     if (!this.parsedWorkbook) throw new Error('Workbook not loaded');
     // Hot path: during scroll the worksheet is already cached. Skip the await
     // to keep the whole render in a single synchronous task so the browser
-    // doesn't paint between the canvas clear (below) and the draw.
+    // doesn't paint between the canvas clear and the draw.
     const ws = this.sheetCache.get(sheetIndex) ?? await this.getWorksheet(sheetIndex);
-    const styles = this.parsedWorkbook.styles;
+    return renderWorksheetViewport(
+      { ws, styles: this.parsedWorkbook.styles, imageCache: this.imageCache, math: this.math },
+      target,
+      viewport,
+      opts,
+    );
+  }
 
-    // ── Step 1: Preload any uncached image bitmaps BEFORE touching the canvas.
-    //
-    // Images can appear either as top-level twoCellAnchor `<xdr:pic>` (captured
-    // in `ws.images`) or as a leaf inside an `<xdr:grpSp>` (captured as a
-    // ShapeGeom with `type: 'image'`). We collect both so the renderer never
-    // hits a missing bitmap during the synchronous draw pass.
-    //
-    // Doing this *before* the canvas resize is critical for scroll smoothness:
-    // setting `canvas.width` wipes the canvas, and an `await` after that wipe
-    // yields to the browser's paint cycle, causing a visible white flash on
-    // every scroll frame. By awaiting first (and only when there's something
-    // uncached), the whole resize+draw runs synchronously in a single tick and
-    // the old frame stays visible until the new one is ready.
-    const uncached: string[] = [];
-    if (ws.images) {
-      for (const img of ws.images) {
-        if (!this.imageCache.has(img.dataUrl)) uncached.push(img.dataUrl);
+  /**
+   * Render a sheet viewport and return it as an ImageBitmap (both modes; in
+   * worker mode the render runs entirely off the main thread). `opts.width` /
+   * `opts.height` are required: there is no DOM element to measure in a worker
+   * or on an OffscreenCanvas. Paint with
+   * `canvas.getContext('bitmaprenderer').transferFromImageBitmap(bitmap)`.
+   *
+   * The returned ImageBitmap is owned by the caller: pass it to
+   * `transferFromImageBitmap` (which consumes it) or call `bitmap.close()`
+   * when done, or its backing memory is held until GC.
+   */
+  async renderViewportToBitmap(
+    sheetIndex: number,
+    viewport: ViewportRange,
+    opts: WireRenderViewportOptions & { width: number; height: number },
+  ): Promise<ImageBitmap> {
+    const wireOpts = { ...opts, dpr: opts.dpr ?? defaultDpr() };
+    if (this._mode === 'worker') {
+      if (!Number.isInteger(sheetIndex) || sheetIndex < 0 || sheetIndex >= this.sheetCount) {
+        throw new Error(`Sheet index ${sheetIndex} out of range (count: ${this.sheetCount})`);
       }
+      const res = await this.bridge.request(
+        (id) => ({ type: 'renderViewport', id, sheetIndex, viewport, opts: wireOpts }) satisfies RenderWorkerRequest,
+      );
+      return (res as Extract<RenderWorkerResponse, { type: 'viewportRendered' }>).bitmap;
     }
-    if (ws.shapeGroups) {
-      for (const grp of ws.shapeGroups) {
-        for (const shape of grp.shapes) {
-          if (shape.geom.type === 'image' && !this.imageCache.has(shape.geom.dataUrl)) {
-            uncached.push(shape.geom.dataUrl);
-          }
-        }
-      }
-    }
-    if (uncached.length > 0) {
-      await Promise.all(
-        uncached.map(async (url) => {
-          const el = new Image();
-          el.src = url;
-          await new Promise<void>((resolve, reject) => {
-            el.onload = () => resolve();
-            el.onerror = () => reject(new Error('image decode failed'));
-          });
-          this.imageCache.set(url, el);
-        }),
-      ).catch(() => { /* swallow image failures so the grid still renders */ });
-    }
-
-    // ── Step 1b: Pre-rasterize equations in shapes BEFORE the canvas resize,
-    // for the same no-white-flash reason as the image preload. Gated on
-    // `worksheetHasUncachedMath` so steady-state scroll/zoom frames take NO
-    // await and stay fully synchronous — only the first frame that reveals new
-    // equations pays the (idempotently cached) MathJax cost. Opt-in: skipped
-    // entirely unless the caller supplies a `math` engine.
-    if (this.math && worksheetHasUncachedMath(ws)) {
-      await prepareWorksheetMath(ws, this.math);
-    }
-
-    // ── Step 2: Resize + draw, all synchronous from here.
-    const dpr = opts.dpr ?? (typeof window !== 'undefined' ? window.devicePixelRatio : 1);
-    const rawW = target instanceof HTMLCanvasElement ? (target.clientWidth || 800) : target.width;
-    const rawH = target instanceof HTMLCanvasElement ? (target.clientHeight || 600) : target.height;
-    const width = opts.width ?? rawW;
-    const height = opts.height ?? rawH;
-
-    target.width = Math.round(width * dpr);
-    target.height = Math.round(height * dpr);
-    // Set CSS display size so the browser renders at 1:1 device pixels (no browser-level scaling).
-    // Without this, canvas.width=2400 on a DPR=2 display causes the canvas to be laid out at
-    // 2400 CSS px, making all content appear blurry when viewed in a 1200 CSS px container.
-    if (target instanceof HTMLCanvasElement) {
-      target.style.width = `${width}px`;
-      target.style.height = `${height}px`;
-    }
-
-    const ctx = (target as HTMLCanvasElement).getContext('2d') as CanvasRenderingContext2D;
-    ctx.scale(dpr, dpr);
-
-    renderViewport(ctx, ws, styles, viewport, { ...opts, dpr, loadedImages: this.imageCache });
+    const off = new OffscreenCanvas(1, 1);
+    await this.renderViewport(off, sheetIndex, viewport, wireOpts);
+    return off.transferToImageBitmap();
   }
 
   destroy(): void {
     this.bridge.terminate();
+    this.parsedWorkbook = null;
+    this.sheetCache.clear();
+    this.imageCache.clear();
+    this.rawData = null;
   }
 }

@@ -3,58 +3,20 @@ import wasmAssetUrl from './wasm/docx_parser_bg.wasm?url';
 import {
   preloadGoogleFonts,
   WorkerBridge,
-  SCRIPT_GOOGLE_FONTS,
+  defaultDpr,
   SCRIPT_PRELOAD_NAMES,
-  type FontPreloadEntry,
   type LoadOptions as CoreLoadOptions,
   type MathRenderer,
 } from '@silurus/ooxml-core';
-import type { PaginatedBodyElement, DocxDocumentModel, RenderPageOptions, WorkerResponse, DocComment, DocNote } from './types';
-import { computePages, renderDocumentToCanvas, documentHasMath, prepareMathRuns, resolveKinsokuRules } from './renderer';
-
-/** Theme-referenced typefaces commonly used by DOCX templates. Mirrors the
- *  PPTX map — these are the well-known free webfont alternatives Microsoft
- *  Office templates pull from. Substitutes that diverge from the requested
- *  family name (Calibri → Carlito, Cambria → Caladea) include
- *  `loadFamily` so the FontFaceSet load is driven against the substitute. */
-const NOTO_NASKH_ARABIC_URL =
-  'https://fonts.googleapis.com/css2?family=Noto+Naskh+Arabic:wght@400;700&display=swap';
-const NOTO_SANS_ARABIC_URL =
-  'https://fonts.googleapis.com/css2?family=Noto+Sans+Arabic:wght@400;700&display=swap';
-
-const DOCX_GOOGLE_FONTS: Record<string, FontPreloadEntry> = {
-  'calibri':           { url: 'https://fonts.googleapis.com/css2?family=Carlito:ital,wght@0,400;0,700;1,400;1,700&display=swap', loadFamily: 'Carlito' },
-  'cambria':           { url: 'https://fonts.googleapis.com/css2?family=Caladea:ital,wght@0,400;0,700;1,400;1,700&display=swap', loadFamily: 'Caladea' },
-  'nunito sans':       { url: 'https://fonts.googleapis.com/css2?family=Nunito+Sans:ital,wght@0,400;0,700;1,400;1,700&display=swap' },
-  'nunito':            { url: 'https://fonts.googleapis.com/css2?family=Nunito:ital,wght@0,400;0,700;1,400;1,700&display=swap' },
-  'open sans':         { url: 'https://fonts.googleapis.com/css2?family=Open+Sans:ital,wght@0,400;0,700;1,400;1,700&display=swap' },
-  'roboto':            { url: 'https://fonts.googleapis.com/css2?family=Roboto:ital,wght@0,400;0,700;1,400;1,700&display=swap' },
-  'lato':              { url: 'https://fonts.googleapis.com/css2?family=Lato:ital,wght@0,400;0,700;1,400;1,700&display=swap' },
-  'montserrat':        { url: 'https://fonts.googleapis.com/css2?family=Montserrat:ital,wght@0,400;0,700;1,400;1,700&display=swap' },
-  'poppins':           { url: 'https://fonts.googleapis.com/css2?family=Poppins:ital,wght@0,400;0,700;1,400;1,700&display=swap' },
-  'raleway':           { url: 'https://fonts.googleapis.com/css2?family=Raleway:ital,wght@0,400;0,700;1,400;1,700&display=swap' },
-  'playfair display':  { url: 'https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400;0,700;1,400;1,700&display=swap' },
-  // Common Arabic-script faces that hosts rarely ship. Map them to Noto
-  // substitutes so RTL documents (e.g. sample-7, which requests Sakkal Majalla
-  // / Univers Next Arabic) render with a real web font instead of an oversized
-  // OS fallback. "Naskh" covers traditional serif-like Arabic faces; "Sans"
-  // covers the modern geometric ones.
-  'sakkal majalla':      { url: NOTO_NASKH_ARABIC_URL, loadFamily: 'Noto Naskh Arabic' },
-  'traditional arabic':  { url: NOTO_NASKH_ARABIC_URL, loadFamily: 'Noto Naskh Arabic' },
-  'simplified arabic':   { url: NOTO_NASKH_ARABIC_URL, loadFamily: 'Noto Naskh Arabic' },
-  'arabic typesetting':  { url: NOTO_NASKH_ARABIC_URL, loadFamily: 'Noto Naskh Arabic' },
-  'univers next arabic': { url: NOTO_SANS_ARABIC_URL, loadFamily: 'Noto Sans Arabic' },
-  // Self-referencing entries so the generic Arabic fallback fonts (appended to
-  // the renderer's font chain) are themselves loaded whenever useGoogleFonts
-  // is enabled — see `load`, which always queues these names.
-  'noto naskh arabic':   { url: NOTO_NASKH_ARABIC_URL, loadFamily: 'Noto Naskh Arabic' },
-  'noto sans arabic':    { url: NOTO_SANS_ARABIC_URL, loadFamily: 'Noto Sans Arabic' },
-  // CJK (KR/SC/TC/JP), Cyrillic (Noto Sans/Serif), Thai, Devanagari and Hebrew
-  // Noto faces, shared with pptx/xlsx via @silurus/ooxml-core. The renderer
-  // appends these to the font chain (CJK ordered by document language); they are
-  // loaded only when useGoogleFonts is on — no binaries ship in the bundle.
-  ...SCRIPT_GOOGLE_FONTS,
-};
+import type { PaginatedBodyElement, DocxDocumentModel, RenderPageOptions, WorkerRequest, WorkerResponse, DocComment, DocNote } from './types';
+import { renderDocumentToCanvas, documentHasMath, prepareMathRuns, paginateDocument } from './renderer';
+import { DOCX_GOOGLE_FONTS } from './google-fonts';
+import type {
+  DocumentMeta,
+  RenderWorkerRequest,
+  RenderWorkerResponse,
+  WireRenderPageOptions,
+} from './worker-protocol';
 
 /** Options for {@link DocxDocument.load}. Extends the shared load-options type
  *  from `@silurus/ooxml-core` (`useGoogleFonts`, `maxZipEntryBytes`) with the
@@ -66,26 +28,47 @@ export interface LoadOptions extends CoreLoadOptions {
    * omitted, equations are skipped and the ~3 MB engine never enters the bundle.
    */
   math?: MathRenderer;
+  /**
+   * 'main' (default): parse in a worker, render on the main thread (current
+   * behaviour). 'worker': parse, paginate AND render inside the worker; use
+   * {@link DocxDocument.renderPageToBitmap} and paint the returned ImageBitmap
+   * via an `ImageBitmapRenderingContext`. Requires OffscreenCanvas. The math
+   * engine is unavailable in this mode (equations are skipped).
+   */
+  mode?: 'main' | 'worker';
 }
 
 export class DocxDocument {
   private _document: DocxDocumentModel | null = null;
+  private _meta: DocumentMeta | null = null;
   private _pages: PaginatedBodyElement[][] | null = null;
+  private _mode: 'main' | 'worker' = 'main';
   private _worker: Worker;
-  private _bridge: WorkerBridge<WorkerResponse>;
+  private _bridge: WorkerBridge<WorkerResponse | RenderWorkerResponse>;
 
-  private constructor() {
-    this._worker = new InlineWorker();
-    this._bridge = new WorkerBridge<WorkerResponse>(this._worker, {
+  private constructor(worker: Worker, mode: 'main' | 'worker') {
+    this._worker = worker;
+    this._mode = mode;
+    this._bridge = new WorkerBridge<WorkerResponse | RenderWorkerResponse>(this._worker, {
       correlate: (res) => res.id,
       toError: (res) => (res.type === 'error' ? res.message : undefined),
     });
     const wasmUrl = new URL(wasmAssetUrl, location.href).href;
-    this._bridge.post({ type: 'init', wasmUrl });
+    this._bridge.post({ type: 'init', wasmUrl } satisfies WorkerRequest);
   }
 
   static async load(source: string | ArrayBuffer, opts: LoadOptions = {}): Promise<DocxDocument> {
-    const doc = new DocxDocument();
+    const mode = opts.mode ?? 'main';
+    if (mode === 'worker' && (typeof Worker === 'undefined' || typeof OffscreenCanvas === 'undefined')) {
+      throw new Error("mode: 'worker' requires Worker and OffscreenCanvas support");
+    }
+    // The render worker is reachable only through this dynamic import, so
+    // main-mode bundles never pull in its (renderer-bearing) chunk.
+    const worker =
+      mode === 'worker'
+        ? (await import('./render-worker-host')).createRenderWorker()
+        : new InlineWorker();
+    const doc = new DocxDocument(worker, mode);
     let buffer: ArrayBuffer;
     if (typeof source === 'string') {
       const res = await fetch(source);
@@ -94,15 +77,27 @@ export class DocxDocument {
     } else {
       buffer = source;
     }
-    await doc._parse(buffer, opts.maxZipEntryBytes);
-    if (opts.useGoogleFonts) {
+    if (opts.math && mode === 'worker') {
+      console.warn(
+        "[ooxml] the math engine is unavailable in mode: 'worker'; equations will be skipped. Use mode: 'main' for documents with equations.",
+      );
+    }
+    // In worker mode the worker preloads fonts before paginating (pagination
+    // measures text), so the flag is forwarded; in main mode fonts are loaded
+    // here after parse, before the lazy first pagination.
+    await doc._parse(
+      buffer,
+      opts.maxZipEntryBytes,
+      mode === 'worker' ? !!opts.useGoogleFonts : false,
+    );
+    if (mode === 'main' && opts.useGoogleFonts && doc._document) {
       // Always load the generic Arabic fallbacks so any Arabic-script run gets
       // a real web font even when its named family is unmapped (the renderer's
       // font fallback chains end with these two Noto faces).
       await preloadGoogleFonts(
         [
-          doc._document?.majorFont,
-          doc._document?.minorFont,
+          doc._document.majorFont,
+          doc._document.minorFont,
           'Noto Naskh Arabic',
           'Noto Sans Arabic',
           // Always queue every script Noto face so a glyph that falls through
@@ -115,31 +110,56 @@ export class DocxDocument {
     }
     // Equations are converted + rasterized before pagination (which reads their
     // extents synchronously). Requires the opt-in `math` engine; without it,
-    // equations are skipped (and the engine asset is never bundled).
-    if (opts.math && doc._document && documentHasMath(doc._document.body)) {
+    // equations are skipped (and the engine asset is never bundled). Math is
+    // main-mode only (the engine needs a DOM, absent in workers).
+    if (mode === 'main' && opts.math && doc._document && documentHasMath(doc._document.body)) {
       await prepareMathRuns(doc._document.body, opts.math);
     }
     return doc;
   }
 
-  private async _parse(buffer: ArrayBuffer, maxZipEntryBytes?: number): Promise<void> {
+  private async _parse(
+    buffer: ArrayBuffer,
+    maxZipEntryBytes?: number,
+    useGoogleFonts = false,
+  ): Promise<void> {
     const res = await this._bridge.request(
-      (id) => ({ type: 'parse', id, data: buffer, maxZipEntryBytes }),
+      (id) =>
+        this._mode === 'worker'
+          ? ({ type: 'parse', id, data: buffer, maxZipEntryBytes, useGoogleFonts } satisfies RenderWorkerRequest)
+          : ({ type: 'parse', id, data: buffer, maxZipEntryBytes } satisfies WorkerRequest),
       [buffer],
     );
-    this._document = (res as Extract<WorkerResponse, { type: 'parsed' }>).document;
+    if (this._mode === 'worker') {
+      this._meta = (res as Extract<RenderWorkerResponse, { type: 'parsedMeta' }>).meta;
+    } else {
+      this._document = (res as Extract<WorkerResponse, { type: 'parsed' }>).document;
+    }
   }
 
   destroy(): void {
     this._bridge.terminate();
+    this._document = null;
+    this._meta = null;
+    this._pages = null;
   }
 
   get pageCount(): number {
+    if (this._meta) return this._meta.pageCount;
     if (!this._document) return 0;
     return this._getPages().length;
   }
 
+  /**
+   * The raw parsed document model. Available only in `mode: 'main'`; in
+   * `mode: 'worker'` the model stays in the worker and this throws.
+   */
   get document(): DocxDocumentModel {
+    if (this._meta && !this._document) {
+      throw new Error(
+        "the raw document model stays in the worker in mode: 'worker'; use mode: 'main' if you need direct model access",
+      );
+    }
     if (!this._document) throw new Error('Document not loaded');
     return this._document;
   }
@@ -153,7 +173,7 @@ export class DocxDocument {
    * comments part. The same data is also reachable via `document.comments`.
    */
   get comments(): DocComment[] {
-    return this._document?.comments ?? [];
+    return this._meta?.comments ?? this._document?.comments ?? [];
   }
 
   /**
@@ -164,7 +184,7 @@ export class DocxDocument {
    * additionally exposes them as data. Returns `[]` when absent.
    */
   get footnotes(): DocNote[] {
-    return this._document?.footnotes ?? [];
+    return this._meta?.footnotes ?? this._document?.footnotes ?? [];
   }
 
   /**
@@ -173,29 +193,13 @@ export class DocxDocument {
    * `[]` when absent.
    */
   get endnotes(): DocNote[] {
-    return this._document?.endnotes ?? [];
+    return this._meta?.endnotes ?? this._document?.endnotes ?? [];
   }
 
   private _getPages(): PaginatedBodyElement[][] {
     if (this._pages) return this._pages;
     if (!this._document) return [];
-    const measure = new OffscreenCanvas(1, 1);
-    const ctx = measure.getContext('2d');
-    if (!ctx) {
-      this._pages = [this._document.body];
-      return this._pages;
-    }
-    // Pagination must use the same fontFamilyClasses + kinsoku rules as the
-    // render path, otherwise line-break decisions (and thus page breaks)
-    // diverge between measurement and paint. ECMA-376 §17.15.1.58–.60.
-    this._pages = computePages(
-      this._document.body,
-      this._document.section,
-      ctx,
-      this._document.fontFamilyClasses ?? {},
-      resolveKinsokuRules(this._document.settings),
-      this._document.footnotes ?? [],
-    );
+    this._pages = paginateDocument(this._document);
     return this._pages;
   }
 
@@ -204,6 +208,11 @@ export class DocxDocument {
     pageIndex: number,
     opts: RenderPageOptions = {},
   ): Promise<void> {
+    if (this._mode === 'worker') {
+      throw new Error(
+        "renderPage(canvas) is unavailable in mode: 'worker'; use renderPageToBitmap() and paint it via an ImageBitmapRenderingContext",
+      );
+    }
     if (!this._document) throw new Error('Document not loaded');
     const pages = this._getPages();
     return renderDocumentToCanvas(this._document, target, pageIndex, {
@@ -211,5 +220,30 @@ export class DocxDocument {
       totalPages: pages.length,
       prebuiltPages: pages,
     });
+  }
+
+  /**
+   * Render a page and return it as an ImageBitmap. Works in both modes; in
+   * worker mode the render runs entirely off the main thread. Paint with:
+   * `canvas.getContext('bitmaprenderer').transferFromImageBitmap(bitmap)`.
+   *
+   * The returned ImageBitmap is owned by the caller: pass it to
+   * `transferFromImageBitmap` (which consumes it) or call `bitmap.close()`
+   * when done, or its backing memory is held until GC.
+   */
+  async renderPageToBitmap(pageIndex: number, opts: WireRenderPageOptions = {}): Promise<ImageBitmap> {
+    const wireOpts = { ...opts, dpr: opts.dpr ?? defaultDpr() };
+    if (this._mode === 'worker') {
+      if (!Number.isInteger(pageIndex) || pageIndex < 0 || pageIndex >= this.pageCount) {
+        throw new Error(`Page index ${pageIndex} out of range (count: ${this.pageCount})`);
+      }
+      const res = await this._bridge.request(
+        (id) => ({ type: 'renderPage', id, pageIndex, opts: wireOpts }) satisfies RenderWorkerRequest,
+      );
+      return (res as Extract<RenderWorkerResponse, { type: 'pageRendered' }>).bitmap;
+    }
+    const off = new OffscreenCanvas(1, 1);
+    await this.renderPage(off, pageIndex, wireOpts);
+    return off.transferToImageBitmap();
   }
 }

@@ -4,7 +4,7 @@ import type {
   CfRule, CellRange, CfStop, CfValue, Dxf, Hyperlink, DefinedName,
   Run, ChartData, GradientFillSpec, ShapeInfo, SlicerItem,
 } from './types.js';
-import { renderChart, renderSparkline, renderPresetShape, PT_TO_PX, EMU_PER_PX, mathToMathML, recolorSvg, classifyCjkFont, cjkFallbackChain, NON_CJK_SANS_FALLBACKS, NON_CJK_SERIF_FALLBACKS, type ChartModel, type SparklineModel, type MathNode, type MathRenderer } from '@silurus/ooxml-core';
+import { renderChart, renderSparkline, renderPresetShape, createAuxCanvas, PT_TO_PX, EMU_PER_PX, mathToMathML, recolorSvg, classifyCjkFont, cjkFallbackChain, NON_CJK_SANS_FALLBACKS, NON_CJK_SERIF_FALLBACKS, type ChartModel, type SparklineModel, type MathNode, type MathRenderer } from '@silurus/ooxml-core';
 import { evalFormulaToBool, todaySerial, nowSerial } from './formula.js';
 import { formatCellValue } from './number-format.js';
 import { type CfContext, compileCf, evaluateCf } from './conditional-format.js';
@@ -406,10 +406,12 @@ function hatchPattern(
   // multiplies it back. Result: the source bit lands on exactly one
   // destination device pixel regardless of the user's CSS zoom.
   const tile = rows.length;
-  const off = document.createElement('canvas');
-  off.width = tile;
-  off.height = tile;
-  const octx = off.getContext('2d');
+  const off = createAuxCanvas(tile, tile);
+  if (!off) { PATTERN_CACHE.set(key, null); return null; }
+  const octx = off.getContext('2d') as
+    | CanvasRenderingContext2D
+    | OffscreenCanvasRenderingContext2D
+    | null;
   if (!octx) { PATTERN_CACHE.set(key, null); return null; }
 
   octx.fillStyle = hexToRgba(bgHex);
@@ -2604,7 +2606,7 @@ function sheetYForRow(
 function renderImages(
   ctx: CanvasRenderingContext2D,
   ws: Worksheet,
-  loadedImages: Map<string, HTMLImageElement>,
+  loadedImages: Map<string, CanvasImageSource>,
   cs: number,
   startRow: number,
   startCol: number,
@@ -2688,7 +2690,7 @@ function renderShapeGroups(
   scrollAreaY: number,
   scrollAreaW: number,
   scrollAreaH: number,
-  loadedImages?: Map<string, HTMLImageElement>,
+  loadedImages?: Map<string, CanvasImageSource>,
 ): void {
   if (scrollAreaW <= 0 || scrollAreaH <= 0) return;
   const anchors = ws.shapeGroups;
@@ -2750,7 +2752,7 @@ function drawShape(
   shape: ShapeInfo,
   sx: number, sy: number, sw: number, sh: number,
   cs: number,
-  loadedImages?: Map<string, HTMLImageElement>,
+  loadedImages?: Map<string, CanvasImageSource>,
 ): void {
   ctx.save();
   if (shape.rot !== 0) {

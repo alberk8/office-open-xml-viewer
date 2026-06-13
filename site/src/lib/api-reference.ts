@@ -24,6 +24,7 @@ const ZIP = { name: 'maxZipEntryBytes', type: 'number', def: '512 MiB', desc: 'P
 const GFONTS = { name: 'useGoogleFonts', type: 'boolean', def: 'false', desc: 'Load metric-compatible webfonts and non-Latin script fallbacks (Noto Arabic / CJK KR·SC·TC·JP / Cyrillic / Hebrew / Thai / Devanagari) from Google Fonts so layout matches Office and non-Latin text never falls back to tofu. Off by default for privacy.' };
 const DPR = { name: 'dpr', type: 'number', def: 'devicePixelRatio', desc: 'Device pixel ratio for the backing store (crispness on HiDPI).' };
 const MATH = { name: 'math', type: 'MathRenderer', def: 'undefined', desc: 'Opt-in OMML equation engine (MathJax + STIX Two Math, ~4 MB). Import it from the separate @silurus/ooxml/math entry — `import { math } from "@silurus/ooxml/math"` — and pass it to render equations. Omit it and equations are skipped — the engine tree-shakes away entirely.' };
+const MODE = { name: 'mode', type: "'main' | 'worker'", def: "'main'", desc: "'main' parses in a worker and renders on the main thread (default). 'worker' parses AND renders entirely inside the worker; the main thread only paints the ImageBitmap returned by the render*ToBitmap method via a `bitmaprenderer` context. Requires Worker + OffscreenCanvas. The canvas-target render methods are unavailable in 'worker' mode, and equations require 'main'." };
 
 export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
   pptx: [
@@ -58,11 +59,12 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
       name: 'PptxPresentation',
       ctor: 'await PptxPresentation.load(source, options?)',
       note: 'Headless engine — parse once, render any slide into any canvas you supply (scroll views, thumbnail grids, master–detail).',
-      options: [GFONTS, ZIP, MATH],
+      options: [GFONTS, ZIP, MATH, MODE],
       methods: [
         { sig: 'static load(source, options?): Promise<PptxPresentation>', desc: 'Parse a deck from a URL or ArrayBuffer.' },
         { sig: 'get slideCount(): number', desc: 'Total slides.' },
-        { sig: 'renderSlide(canvas, index, opts?: { width?, dpr? }): Promise<void>', desc: 'Render one slide into the given canvas at the given width. Equations render when a `math` engine was passed to `load`.' },
+        { sig: 'renderSlide(canvas, index, opts?: { width?, dpr? }): Promise<void>', desc: 'Render one slide into the given canvas at the given width. Equations render when a `math` engine was passed to `load`. Unavailable in `mode: "worker"` — use renderSlideToBitmap.' },
+        { sig: 'renderSlideToBitmap(index, opts?: { width?, dpr? }): Promise<ImageBitmap>', desc: 'Render one slide and return it as an ImageBitmap (both modes; in worker mode the render runs off the main thread). The bitmap is caller-owned: pass it to `transferFromImageBitmap` (which consumes it) or call `bitmap.close()`.' },
         { sig: 'getNotes(slideIndex: number): string | null', desc: 'Speaker-notes text for a slide (0-based; ECMA-376 §13.3.5). Returns null when the slide has no notes part or the index is out of range.' },
         { sig: 'destroy(): void', desc: 'Release the worker.' },
       ],
@@ -100,11 +102,12 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
       name: 'DocxDocument',
       ctor: 'await DocxDocument.load(source, options?)',
       note: 'Headless engine — render any page into any canvas you supply.',
-      options: [GFONTS, ZIP, MATH],
+      options: [GFONTS, ZIP, MATH, MODE],
       methods: [
         { sig: 'static load(source, options?): Promise<DocxDocument>', desc: 'Parse a document from a URL or ArrayBuffer.' },
         { sig: 'get pageCount(): number', desc: 'Total pages.' },
-        { sig: 'renderPage(canvas, index, opts?: { width?, dpr?, showTrackChanges? }): Promise<void>', desc: 'Render one page into the given canvas.' },
+        { sig: 'renderPage(canvas, index, opts?: { width?, dpr?, showTrackChanges? }): Promise<void>', desc: 'Render one page into the given canvas. Unavailable in `mode: "worker"` — use renderPageToBitmap.' },
+        { sig: 'renderPageToBitmap(index, opts?: { width?, dpr?, showTrackChanges? }): Promise<ImageBitmap>', desc: 'Render one page and return it as an ImageBitmap (both modes; in worker mode the render runs off the main thread). The bitmap is caller-owned: pass it to `transferFromImageBitmap` (which consumes it) or call `bitmap.close()`.' },
       ],
     },
   ],
@@ -144,12 +147,13 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
       name: 'XlsxWorkbook',
       ctor: 'await XlsxWorkbook.load(source, options?)',
       note: 'Headless engine — parse once, render any sheet viewport into any canvas you supply.',
-      options: [GFONTS, ZIP, MATH],
+      options: [GFONTS, ZIP, MATH, MODE],
       methods: [
         { sig: 'static load(source, options?): Promise<XlsxWorkbook>', desc: 'Parse a workbook from a URL or ArrayBuffer.' },
         { sig: 'get sheetNames(): string[]', desc: 'Names of all sheets.' },
         { sig: 'get sheetCount(): number', desc: 'Total sheets.' },
-        { sig: 'renderViewport(canvas, sheetIndex, viewport, opts?: { width?, height?, dpr?, cellScale? }): Promise<void>', desc: 'Render a row/col window of a sheet into the given canvas. Equations in shapes render when a `math` engine was passed to `load`.' },
+        { sig: 'renderViewport(canvas, sheetIndex, viewport, opts?: { width?, height?, dpr?, cellScale? }): Promise<void>', desc: 'Render a row/col window of a sheet into the given canvas. Equations in shapes render when a `math` engine was passed to `load`. Unavailable in `mode: "worker"` — use renderViewportToBitmap.' },
+        { sig: 'renderViewportToBitmap(sheetIndex, viewport, opts: { width, height, dpr?, cellScale? }): Promise<ImageBitmap>', desc: 'Render a sheet viewport and return it as an ImageBitmap (both modes; in worker mode the render runs off the main thread). `width` and `height` are required — a worker has no DOM element to measure. The bitmap is caller-owned: pass it to `transferFromImageBitmap` (which consumes it) or call `bitmap.close()`.' },
         { sig: 'resolveValidationList(sheetIndex, formula1): Promise<ResolvedList>', desc: 'Resolve a list-type data-validation `formula1` (ECMA-376 §18.3.1.32) into the allowed values to display — inline quoted list, a range reference (each cell’s display string), or `{ kind: \'formula\' }` for named ranges. Read-only.' },
         { sig: 'destroy(): void', desc: 'Release the worker.' },
       ],

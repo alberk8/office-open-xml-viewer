@@ -12,6 +12,8 @@ import {
   recolorSvg,
   PT_TO_PX,
   resolveBaseDirection,
+  isHTMLCanvas,
+  defaultDpr,
   classifyCjkFont,
   cjkFallbackChain,
   NON_CJK_SANS_FALLBACKS,
@@ -345,7 +347,7 @@ export async function renderDocumentToCanvas(
   opts: RenderDocumentOptions = {},
 ): Promise<void> {
   const sec = doc.section;
-  const dpr = opts.dpr ?? devicePixelRatio ?? 1;
+  const dpr = opts.dpr ?? defaultDpr();
   const cssWidth = opts.width ?? sec.pageWidth * PT_TO_PX;
   const scale = cssWidth / sec.pageWidth;  // px per pt
   const cssHeight = sec.pageHeight * scale;
@@ -353,7 +355,7 @@ export async function renderDocumentToCanvas(
   canvas.width = Math.round(cssWidth * dpr);
   canvas.height = Math.round(cssHeight * dpr);
 
-  if (canvas instanceof HTMLCanvasElement) {
+  if (isHTMLCanvas(canvas)) {
     canvas.style.width = `${cssWidth}px`;
     canvas.style.height = `${cssHeight}px`;
     if (!canvas.style.display) canvas.style.display = 'block';
@@ -889,6 +891,24 @@ export function computePages(
     }
   }
   return pages;
+}
+
+/** Paginate with a throwaway measure context. Pagination must use the same
+ *  fontFamilyClasses + kinsoku rules as the render path, otherwise line-break
+ *  decisions (and thus page breaks) diverge between measurement and paint
+ *  (ECMA-376 §17.15.1.58–.60). Shared by the main-thread DocxDocument and the
+ *  render worker so the two modes can never paginate differently. */
+export function paginateDocument(doc: DocxDocumentModel): PaginatedBodyElement[][] {
+  const ctx = new OffscreenCanvas(1, 1).getContext('2d');
+  if (!ctx) return [doc.body];
+  return computePages(
+    doc.body,
+    doc.section,
+    ctx,
+    doc.fontFamilyClasses ?? {},
+    resolveKinsokuRules(doc.settings),
+    doc.footnotes ?? [],
+  );
 }
 
 function buildMeasureState(

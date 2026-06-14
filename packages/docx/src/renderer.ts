@@ -967,9 +967,7 @@ function estimateParagraphHeight(
   const grid = paraGrid(para, state);
   let textH: number;
   if (segs.length === 0) {
-    const fs = getDefaultFontSize(para);
-    const { asc, desc } = emptyLineNaturalPx(fs, 1);
-    textH = lineBoxHeight(para.lineSpacing, asc, desc, 1, grid, paraHasRuby, emptyIntendedSinglePx(para, 1));
+    textH = paragraphMarkLineHeight(para, 1, grid, paraHasRuby);
   } else {
     // When anchor-image floats are active on the current page the paragraph
     // wraps around them, adding lines compared to a full-width layout. Use
@@ -982,7 +980,12 @@ function estimateParagraphHeight(
       pageH: state.pageH,
     } : undefined;
     const lines = layoutLines(state.ctx, segs, paraW, para.indentFirst, 1, para.tabStops, wrapCtx, state.fontFamilyClasses, indLeft, state.kinsoku);
-    if (paraHasRuby) {
+    if (lines.length === 0) {
+      // Anchor-only paragraph: layoutLines placed no inline content but the
+      // paragraph mark still occupies one line (§17.3.1.29) — mirror the
+      // renderer so pagination math agrees.
+      textH = paragraphMarkLineHeight(para, 1, grid, paraHasRuby);
+    } else if (paraHasRuby) {
       // Word uses the same line height for every line in a ruby paragraph,
       // snapped to an integer docGrid pitch.
       const uniform = snapParaLineToGrid(
@@ -1067,6 +1070,13 @@ function splitParagraphAcrossPages(
     pageH: measureState.pageH,
   } : undefined;
   const lines = layoutLines(measureState.ctx, segs, paraW, para.indentFirst, 1, para.tabStops, wrapCtx, measureState.fontFamilyClasses, indLeft, measureState.kinsoku);
+  if (lines.length === 0) {
+    // Anchor-only paragraph: no inline lines to split, but the paragraph mark
+    // still occupies one line (§17.3.1.29). Emit it as a single unit, matching
+    // the literal-empty branch above so the renderer's one-line advance agrees.
+    pages[pages.length - 1].push(para as PaginatedBodyElement);
+    return { endY: initialY + estimateParagraphHeight(measureState, para, contentWPt, suppressSpaceBefore, marginLeftPt) };
+  }
   const paraHasRuby = paragraphHasRuby(para);
 
   const perLineH = (l: typeof lines[number]) => lineBoxHeight(para.lineSpacing, l.ascent, l.descent, 1, measureState.docGrid, paraHasRuby, l.intendedSingle);
@@ -1670,9 +1680,7 @@ function renderParagraph(
   const grid = paraGrid(para, state);
 
   if (segments.length === 0) {
-    const fontSizePt = getDefaultFontSize(para);
-    const { asc, desc } = emptyLineNaturalPx(fontSizePt, scale);
-    const emptyH = lineBoxHeight(para.lineSpacing, asc, desc, scale, grid, paraHasRuby, emptyIntendedSinglePx(para, scale));
+    const emptyH = paragraphMarkLineHeight(para, scale, grid, paraHasRuby);
     if (para.shading && !dryRun) {
       ctx.fillStyle = `#${para.shading}`;
       ctx.fillRect(contentX + indLeft, textAreaTopY, paraW, emptyH);
@@ -1695,6 +1703,33 @@ function renderParagraph(
   } : undefined;
 
   const lines = layoutLines(ctx, segments, paraW, firstLineX - paraX, scale, para.tabStops, wrapCtx, state.fontFamilyClasses, indLeft, state.kinsoku);
+
+  // A paragraph whose only segments are wrap-float anchors (wp:anchor) places no
+  // inline content on any line, so layoutLines returns zero lines. Per ECMA-376
+  // §17.3.1.29 the paragraph mark still produces one line box; §20.4.2.x removes
+  // the floating object from the inline flow but does not suppress that mark.
+  // Reserve the same paragraph-mark line height the literal-empty path uses, so
+  // consecutive anchor-only paragraphs don't collapse onto each other. The
+  // anchor floats themselves are registered and drawn by registerAnchorFloats /
+  // renderAnchorImages on their own absolute-position path, so this only adds the
+  // in-flow paragraph-mark advance (no double counting, no double draw).
+  if (lines.length === 0) {
+    const emptyH = paragraphMarkLineHeight(para, scale, grid, paraHasRuby);
+    if (para.shading && !dryRun) {
+      ctx.fillStyle = `#${para.shading}`;
+      ctx.fillRect(contentX + indLeft, textAreaTopY, paraW, emptyH);
+    }
+    state.y += emptyH;
+    if (para.borders && !dryRun) {
+      drawParaBorders(ctx, contentX + indLeft, textAreaTopY, paraW, emptyH, para.borders, scale);
+    }
+    const isFinalSlice = !lineSlice || lineSlice.end >= lines.length;
+    if (isFinalSlice) state.y += para.spaceAfter * scale;
+    if (!lineSlice || lineSlice.start === 0) {
+      renderAnchorImages(para, state, paragraphStartY);
+    }
+    return;
+  }
 
   // For paragraphs that carry any ruby annotation, Word renders every line
   // at the SAME height. Per the user's note: when the section's docGrid is
@@ -4362,4 +4397,24 @@ export function lineBoxHeight(
 /** Natural single-line height in px for an empty paragraph (no rendered text). */
 function emptyLineNaturalPx(fontSizePt: number, scale: number): { asc: number; desc: number } {
   return { asc: fontSizePt * scale * 0.8, desc: fontSizePt * scale * 0.2 };
+}
+
+/**
+ * Height (px) of the paragraph-mark line box for a paragraph that places no
+ * inline content on any line. Per ECMA-376 §17.3.1.29 the paragraph mark always
+ * produces one line box even when the paragraph has no inline runs; floating
+ * objects (§20.4.2.x `wp:anchor`) are removed from the inline flow but never
+ * suppress that paragraph-mark line. This is the height used both by the
+ * literal empty-paragraph path and by paragraphs whose only segments are
+ * wrap-float anchors (which `layoutLines` skips, yielding zero lines).
+ */
+function paragraphMarkLineHeight(
+  para: DocParagraph,
+  scale: number,
+  grid: DocGridCtx | undefined,
+  paraHasRuby: boolean,
+): number {
+  const fs = getDefaultFontSize(para);
+  const { asc, desc } = emptyLineNaturalPx(fs, scale);
+  return lineBoxHeight(para.lineSpacing, asc, desc, scale, grid, paraHasRuby, emptyIntendedSinglePx(para, scale));
 }

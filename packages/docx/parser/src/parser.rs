@@ -2388,8 +2388,107 @@ fn parse_wgp_images(
     results
 }
 
-/// Expand wps:wsp descendants of a wgp into ShapeRun entries. Applies
-/// wgp grpSpPr transform (chOff/chExt → off/ext scale) to each child shape.
+/// Cumulative child-coord-space → page-space affine transform built up while
+/// descending a `wpg:wgp` / nested `wpg:grpSp` tree. A child point `local`
+/// (EMU, in the immediate group's child coordinate system) maps to page EMU as
+/// `page = off_emu + local * scale` (independent per axis; OOXML group
+/// transforms have no skew). ECMA-376 §20.1.7.5 (`a:grpSpPr` group transform)
+/// and §20.1.7.6 (`a:xfrm` child offset/extent) define this scale/offset, and
+/// nested groups compose their transforms multiplicatively.
+#[derive(Clone, Copy)]
+struct GroupTransform {
+    scale_x: f64,
+    scale_y: f64,
+    off_x_emu: f64,
+    off_y_emu: f64,
+}
+
+impl GroupTransform {
+    const IDENTITY: GroupTransform = GroupTransform {
+        scale_x: 1.0,
+        scale_y: 1.0,
+        off_x_emu: 0.0,
+        off_y_emu: 0.0,
+    };
+
+    /// Compose with the transform of a child group whose own `grpSpPr/xfrm`
+    /// gives off/ext/chOff/chExt. The child group maps grandchild coordinates
+    /// `g` to this group's child space via `mid = g_off - g_chOff*g_scale +
+    /// g*g_scale`; applying `self` (child→page) on top yields the composite
+    /// `page = self.off + self.scale*(mid)`. Expanding gives:
+    ///   new_scale = self.scale * g_scale
+    ///   new_off   = self.off + self.scale * (g_off - g_chOff * g_scale)
+    fn compose_child(self, xfrm: roxmltree::Node) -> GroupTransform {
+        let (off_x, off_y, ext_cx, ext_cy, ch_off_x, ch_off_y, ch_ext_cx, ch_ext_cy) =
+            read_group_xfrm(xfrm);
+        let g_scale_x = if ch_ext_cx > 0.0 && ext_cx > 0.0 {
+            ext_cx / ch_ext_cx
+        } else {
+            1.0
+        };
+        let g_scale_y = if ch_ext_cy > 0.0 && ext_cy > 0.0 {
+            ext_cy / ch_ext_cy
+        } else {
+            1.0
+        };
+        GroupTransform {
+            scale_x: self.scale_x * g_scale_x,
+            scale_y: self.scale_y * g_scale_y,
+            off_x_emu: self.off_x_emu + self.scale_x * (off_x - ch_off_x * g_scale_x),
+            off_y_emu: self.off_y_emu + self.scale_y * (off_y - ch_off_y * g_scale_y),
+        }
+    }
+}
+
+/// Read off/ext/chOff/chExt (EMU) from a group `a:xfrm`. Returns
+/// (off_x, off_y, ext_cx, ext_cy, ch_off_x, ch_off_y, ch_ext_cx, ch_ext_cy).
+fn read_group_xfrm(xfrm: roxmltree::Node) -> (f64, f64, f64, f64, f64, f64, f64, f64) {
+    let attr = |node: Option<roxmltree::Node>, name: &str| {
+        node.and_then(|n| n.attribute(name).and_then(|v| v.parse::<f64>().ok()))
+            .unwrap_or(0.0)
+    };
+    let off = xfrm
+        .children()
+        .find(|n| n.is_element() && n.tag_name().name() == "off");
+    let ext = xfrm
+        .children()
+        .find(|n| n.is_element() && n.tag_name().name() == "ext");
+    let ch_off = xfrm
+        .children()
+        .find(|n| n.is_element() && n.tag_name().name() == "chOff");
+    let ch_ext = xfrm
+        .children()
+        .find(|n| n.is_element() && n.tag_name().name() == "chExt");
+    (
+        attr(off, "x"),
+        attr(off, "y"),
+        attr(ext, "cx"),
+        attr(ext, "cy"),
+        attr(ch_off, "x"),
+        attr(ch_off, "y"),
+        attr(ch_ext, "cx"),
+        attr(ch_ext, "cy"),
+    )
+}
+
+/// Locate a group's `grpSpPr > xfrm` (the group's own transform), if present.
+/// Applies to both `wpg:wgp` and nested `wpg:grpSp`, which carry their
+/// transform in a direct `grpSpPr` child.
+fn group_xfrm<'a, 'i>(group: roxmltree::Node<'a, 'i>) -> Option<roxmltree::Node<'a, 'i>> {
+    group
+        .children()
+        .find(|n| n.is_element() && n.tag_name().name() == "grpSpPr")
+        .and_then(|gsp| {
+            gsp.children()
+                .find(|n| n.is_element() && n.tag_name().name() == "xfrm")
+        })
+}
+
+/// Expand the wps:wsp shapes of a `wpg:wgp` into ShapeRun entries, composing
+/// nested `wpg:grpSp` group transforms recursively (ECMA-376 §20.1.7.5/.6).
+/// Each grpSp scales and offsets its children relative to its parent group, so
+/// the cumulative child→page transform must be the product of every group on
+/// the path from the wgp down to the wsp — not just the outermost grpSpPr.
 fn parse_wgp_shapes(
     wgp: roxmltree::Node,
     theme: &ThemeColors,
@@ -2399,101 +2498,115 @@ fn parse_wgp_shapes(
     y_from_para: bool,
     anchor_meta: &AnchorMeta,
 ) -> Vec<ShapeRun> {
-    // Read group transform: off/ext (page-relative) vs chOff/chExt (child coord space).
-    let grp_xfrm = wgp
-        .descendants()
-        .find(|n| n.is_element() && n.tag_name().name() == "grpSpPr")
-        .and_then(|gsp| {
-            gsp.children()
-                .find(|n| n.is_element() && n.tag_name().name() == "xfrm")
-        });
-    let (off_x, off_y, ext_cx, ext_cy, ch_off_x, ch_off_y, ch_ext_cx, ch_ext_cy) = grp_xfrm
-        .map(|x| {
-            let off = x
-                .children()
-                .find(|n| n.is_element() && n.tag_name().name() == "off");
-            let ext = x
-                .children()
-                .find(|n| n.is_element() && n.tag_name().name() == "ext");
-            let ch_off = x
-                .children()
-                .find(|n| n.is_element() && n.tag_name().name() == "chOff");
-            let ch_ext = x
-                .children()
-                .find(|n| n.is_element() && n.tag_name().name() == "chExt");
+    // Base transform = the outermost wgp grpSpPr/xfrm (chOff/chExt → off/ext).
+    let base = match group_xfrm(wgp) {
+        Some(x) => GroupTransform::IDENTITY.compose_child(x),
+        None => GroupTransform::IDENTITY,
+    };
+
+    // Outer group dimensions in pt — passed to EVERY child (nested or not) so
+    // the renderer resolves align/pctPos against the whole group's bounding
+    // box. Falls back to the child-coord-space ext when the group omits an
+    // outer ext (rare). This is the outermost wgp's box and is invariant to
+    // nesting depth.
+    let (group_w_pt, group_h_pt) = match group_xfrm(wgp) {
+        Some(x) => {
+            let (_, _, ext_cx, ext_cy, _, _, ch_ext_cx, ch_ext_cy) = read_group_xfrm(x);
             (
-                off.and_then(|o| o.attribute("x").and_then(|v| v.parse::<f64>().ok()))
-                    .unwrap_or(0.0),
-                off.and_then(|o| o.attribute("y").and_then(|v| v.parse::<f64>().ok()))
-                    .unwrap_or(0.0),
-                ext.and_then(|e| e.attribute("cx").and_then(|v| v.parse::<f64>().ok()))
-                    .unwrap_or(0.0),
-                ext.and_then(|e| e.attribute("cy").and_then(|v| v.parse::<f64>().ok()))
-                    .unwrap_or(0.0),
-                ch_off
-                    .and_then(|o| o.attribute("x").and_then(|v| v.parse::<f64>().ok()))
-                    .unwrap_or(0.0),
-                ch_off
-                    .and_then(|o| o.attribute("y").and_then(|v| v.parse::<f64>().ok()))
-                    .unwrap_or(0.0),
-                ch_ext
-                    .and_then(|e| e.attribute("cx").and_then(|v| v.parse::<f64>().ok()))
-                    .unwrap_or(0.0),
-                ch_ext
-                    .and_then(|e| e.attribute("cy").and_then(|v| v.parse::<f64>().ok()))
-                    .unwrap_or(0.0),
+                (if ext_cx > 0.0 { ext_cx } else { ch_ext_cx }) / 12700.0,
+                (if ext_cy > 0.0 { ext_cy } else { ch_ext_cy }) / 12700.0,
             )
-        })
-        .unwrap_or((0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0));
-
-    let sx = if ch_ext_cx > 0.0 && ext_cx > 0.0 {
-        ext_cx / ch_ext_cx
-    } else {
-        1.0
+        }
+        None => (0.0, 0.0),
     };
-    let sy = if ch_ext_cy > 0.0 && ext_cy > 0.0 {
-        ext_cy / ch_ext_cy
-    } else {
-        1.0
-    };
-    // Page-relative offset of the group origin, in EMU. ch_off is subtracted
-    // because child coordinates are measured relative to chOff.
-    let group_page_off_x_emu = off_x - ch_off_x * sx;
-    let group_page_off_y_emu = off_y - ch_off_y * sy;
-
-    // Outer group dimensions in pt — passed to each child so the renderer can
-    // resolve align/pctPos against the GROUP's bounding box, then offset each
-    // child within it. Falls back to the child-coord-space ext when the group
-    // omits an outer ext (rare).
-    let group_w_pt = (if ext_cx > 0.0 { ext_cx } else { ch_ext_cx }) / 12700.0;
-    let group_h_pt = (if ext_cy > 0.0 { ext_cy } else { ch_ext_cy }) / 12700.0;
 
     let mut results = Vec::new();
-    for (idx, wsp) in wgp
-        .descendants()
-        .filter(|n| n.is_element() && n.tag_name().name() == "wsp")
-        .enumerate()
-    {
-        if let Some(mut shape) = parse_wsp_shape(
-            wsp,
-            theme,
-            anchor_pos_x,
-            x_from_margin,
-            anchor_pos_y,
-            y_from_para,
-            anchor_meta,
-            sx,
-            sy,
-            group_page_off_x_emu / 12700.0,
-            group_page_off_y_emu / 12700.0,
-            idx as u32,
-        ) {
-            shape.group_width_pt = Some(group_w_pt);
-            shape.group_height_pt = Some(group_h_pt);
-            results.push(shape);
+    let mut z_order: u32 = 0;
+    walk_group_children(
+        wgp,
+        base,
+        theme,
+        anchor_pos_x,
+        x_from_margin,
+        anchor_pos_y,
+        y_from_para,
+        anchor_meta,
+        group_w_pt,
+        group_h_pt,
+        &mut z_order,
+        &mut results,
+    );
+    results
+}
+
+/// Recursively walk the element children of a group (`wpg:wgp` or nested
+/// `wpg:grpSp`), composing each nested grpSp's transform into `xform` before
+/// descending. `wps:wsp` children are emitted as ShapeRun using the cumulative
+/// transform; `z_order` increments in document (pre-order) order so the
+/// resulting z-index matches a flat descendant walk.
+#[allow(clippy::too_many_arguments)]
+fn walk_group_children(
+    group: roxmltree::Node,
+    xform: GroupTransform,
+    theme: &ThemeColors,
+    anchor_pos_x: f64,
+    x_from_margin: bool,
+    anchor_pos_y: f64,
+    y_from_para: bool,
+    anchor_meta: &AnchorMeta,
+    group_w_pt: f64,
+    group_h_pt: f64,
+    z_order: &mut u32,
+    results: &mut Vec<ShapeRun>,
+) {
+    for child in group.children().filter(|n| n.is_element()) {
+        match child.tag_name().name() {
+            "wsp" => {
+                let idx = *z_order;
+                *z_order += 1;
+                if let Some(mut shape) = parse_wsp_shape(
+                    child,
+                    theme,
+                    anchor_pos_x,
+                    x_from_margin,
+                    anchor_pos_y,
+                    y_from_para,
+                    anchor_meta,
+                    xform.scale_x,
+                    xform.scale_y,
+                    xform.off_x_emu / 12700.0,
+                    xform.off_y_emu / 12700.0,
+                    idx,
+                ) {
+                    shape.group_width_pt = Some(group_w_pt);
+                    shape.group_height_pt = Some(group_h_pt);
+                    results.push(shape);
+                }
+            }
+            "grpSp" => {
+                // Compose this nested group's transform, then recurse.
+                let child_xform = match group_xfrm(child) {
+                    Some(x) => xform.compose_child(x),
+                    None => xform,
+                };
+                walk_group_children(
+                    child,
+                    child_xform,
+                    theme,
+                    anchor_pos_x,
+                    x_from_margin,
+                    anchor_pos_y,
+                    y_from_para,
+                    anchor_meta,
+                    group_w_pt,
+                    group_h_pt,
+                    z_order,
+                    results,
+                );
+            }
+            _ => {}
         }
     }
-    results
 }
 
 /// Parse a single wps:wsp into ShapeRun. `sx,sy` scale the shape's spPr/xfrm

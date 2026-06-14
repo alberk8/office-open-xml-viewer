@@ -3706,12 +3706,20 @@ function rectsOverlap(
  * "cannot overlap other DrawingML object … shall be repositioned when displayed
  * to prevent this overlap" — i.e. allowOverlap="false" MANDATES repositioning,
  * while allowOverlap="true" only *permits* overlap (it does not require it, nor
- * does it forbid the renderer from avoiding it). Word and LibreOffice keep
- * floats anchored in different paragraphs from overlapping regardless — for
- * allowOverlap="false" that is spec-mandated, and for the common allowOverlap=
- * "true" case (e.g. sample-9 figure 9) it is a spec-permitted layout policy we
- * mirror to match the reference rendering. Single-float wrap geometry and the
- * dist* padding reused below are defined by §20.4.2.17 (wrapSquare).
+ * does it forbid the renderer from avoiding it). The default when the attribute
+ * is omitted is true (§20.4.2.3).
+ *
+ * The blocker set depends on the *moving* float's own allowOverlap:
+ *   - allowOverlap === false → spec-mandated avoidance of ALL other floats
+ *     (every intersecting float blocks, regardless of which paragraph it is
+ *     anchored in).
+ *   - allowOverlap === true → only avoid floats anchored in OTHER paragraphs.
+ *     This is the Word/LibreOffice de-facto behavior we mirror (e.g. sample-9
+ *     figure 9): same-paragraph floats may overlap, cross-paragraph floats are
+ *     kept apart. It is a spec-permitted layout policy, not a requirement.
+ *
+ * Single-float wrap geometry and the dist* padding reused below are defined by
+ * §20.4.2.17 (wrapSquare).
  *
  * We re-seat horizontally to the right of the blocking float(s) first (margins
  * may be used — Word lets a displaced float sit in the page margin), and only
@@ -3722,14 +3730,17 @@ function rectsOverlap(
 function resolveFloatOverlap(
   x: number, y: number, w: number, h: number,
   dl: number, dr: number, dt: number, db: number,
-  paraId: number, state: RenderState,
+  paraId: number, allowOverlap: boolean, state: RenderState,
 ): { x: number; y: number } {
   const pageRight = state.pageWidth * state.scale;
   for (let guard = 0; guard < 16; guard++) {
     const exL = x - dl, exR = x + w + dr, exT = y - dt, exB = y + h + db;
-    // Blocking floats: different paragraph, exclusion rects intersect.
+    // Blocking floats whose exclusion rects intersect ours. When the moving
+    // float forbids overlap (§20.4.2.3 allowOverlap="false") EVERY intersecting
+    // float blocks; otherwise only floats from OTHER paragraphs block (Word
+    // de-facto cross-paragraph avoidance).
     const blockers = state.floats.filter(
-      (f) => f.paraId !== paraId &&
+      (f) => (allowOverlap ? f.paraId !== paraId : true) &&
         rectsOverlap(exL, exR, exT, exB, f.xLeft, f.xRight, f.yTop, f.yBottom),
     );
     if (blockers.length === 0) return { x, y };
@@ -3783,15 +3794,15 @@ function registerAnchorFloats(para: DocParagraph, state: RenderState, paragraphA
     const dr = (img.distRight  ?? 0) * scale;
 
     // Overlap avoidance (ECMA-376 §20.4.2.3 allowOverlap: "false" mandates
-    // repositioning to prevent overlap; "true" only permits it). Word/LibreOffice
-    // keep floats anchored in different paragraphs from overlapping — the later
-    // (document-order) float is displaced. We resolve against already-registered
-    // floats from OTHER paragraphs — first horizontally (re-seat to the right of
-    // the blockers, honoring dist padding), then, if that runs off the page,
-    // vertically. (allowOverlap is not yet surfaced by the parser, so this fires
-    // for every different-paragraph overlap; all current samples are "true".)
+    // repositioning to prevent overlap; "true"/omitted only permits it). The
+    // later (document-order) float is displaced. When allowOverlap is false we
+    // avoid ALL registered floats (spec-mandated); when true we avoid only
+    // floats anchored in OTHER paragraphs (Word de-facto behavior). Resolution
+    // re-seats horizontally first (to the right of the blockers, honoring dist
+    // padding), then vertically if that runs off the page. Default true per spec.
+    const allowOverlap = img.allowOverlap ?? true;
     const resolved = resolveFloatOverlap(
-      pageX, pageY, w, h, dl, dr, dt, db, paraId, state,
+      pageX, pageY, w, h, dl, dr, dt, db, paraId, allowOverlap, state,
     );
     pageX = resolved.x;
     pageY = resolved.y;

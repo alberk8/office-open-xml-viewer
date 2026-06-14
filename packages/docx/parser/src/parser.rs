@@ -2295,101 +2295,269 @@ fn parse_wgp_images(
     y_from_para: bool,
     anchor_meta: &AnchorMeta,
 ) -> Vec<ImageRun> {
+    // Pictures inside a wpg group live in the group's child coordinate space and
+    // must be mapped to page space through the cumulative transform of every
+    // group on the path from the wgp down to the pic (ECMA-376 §20.1.7.5/.6),
+    // exactly like parse_wgp_shapes. The base transform is the outermost wgp's
+    // own grpSpPr/xfrm (chOff/chExt → off/ext); nested wpg:grpSp groups compose
+    // their transforms on top as we descend. (The old code applied only each
+    // pic's own offset, ignoring both the group's scale/offset and any nested
+    // grpSp transform, mis-placing/mis-sizing grouped pictures.)
+    let base = match group_xfrm(wgp) {
+        Some(x) => GroupTransform::IDENTITY.compose_child(x),
+        None => GroupTransform::IDENTITY,
+    };
     let mut results = Vec::new();
-    // Iterate all pic descendants in the wgp (covers both direct children and nested grpSp)
-    for pic in wgp.descendants().filter(|n| n.tag_name().name() == "pic") {
-        // Position and size come from the pic's spPr > a:xfrm
-        let sp_pr = match pic.children().find(|n| n.tag_name().name() == "spPr") {
-            Some(s) => s,
-            None => continue,
-        };
-        let xfrm = match sp_pr.children().find(|n| n.tag_name().name() == "xfrm") {
-            Some(x) => x,
-            None => continue,
-        };
-        let off = match xfrm.children().find(|n| n.tag_name().name() == "off") {
-            Some(o) => o,
-            None => continue,
-        };
-        let ext = match xfrm.children().find(|n| n.tag_name().name() == "ext") {
-            Some(e) => e,
-            None => continue,
-        };
-        let ox = off
-            .attribute("x")
-            .and_then(|v| v.parse::<f64>().ok())
-            .unwrap_or(0.0)
-            / 12700.0;
-        let oy = off
-            .attribute("y")
-            .and_then(|v| v.parse::<f64>().ok())
-            .unwrap_or(0.0)
-            / 12700.0;
-        let cx = ext
-            .attribute("cx")
-            .and_then(|v| v.parse::<f64>().ok())
-            .unwrap_or(0.0)
-            / 12700.0;
-        let cy = ext
-            .attribute("cy")
-            .and_then(|v| v.parse::<f64>().ok())
-            .unwrap_or(0.0)
-            / 12700.0;
-
-        if cx <= 0.0 || cy <= 0.0 {
-            continue;
-        }
-
-        // Find the blip inside this pic
-        let blip = match pic.descendants().find(|n| n.tag_name().name() == "blip") {
-            Some(b) => b,
-            None => continue,
-        };
-        let r_id = match blip
-            .attribute((R_NS, "embed"))
-            .or_else(|| blip.attribute("r:embed"))
-        {
-            Some(r) => r,
-            None => continue,
-        };
-        let data_url = match media_map.get(r_id) {
-            Some(u) => u.clone(),
-            None => continue,
-        };
-
-        // Parse a:clrChange if present — used to make a specific color transparent.
-        // clrFrom specifies the source color; clrTo with alpha=0 means replace with transparent.
-        let color_replace_from = blip
-            .children()
-            .find(|n| n.tag_name().name() == "clrChange")
-            .and_then(|cc| cc.children().find(|n| n.tag_name().name() == "clrFrom"))
-            .and_then(|cf| cf.children().find(|n| n.tag_name().name() == "srgbClr"))
-            .and_then(|clr| clr.attribute("val").map(|v| v.to_uppercase()));
-
-        results.push(ImageRun {
-            data_url,
-            width_pt: cx,
-            height_pt: cy,
-            anchor: true,
-            // Combine the group's anchor offset with this pic's offset within the group
-            anchor_x_pt: anchor_pos_x + ox,
-            anchor_y_pt: anchor_pos_y + oy,
-            anchor_x_from_margin: x_from_margin,
-            anchor_y_from_para: y_from_para,
-            color_replace_from,
-            wrap_mode: anchor_meta.wrap_mode.clone(),
-            dist_top: anchor_meta.dist_top,
-            dist_bottom: anchor_meta.dist_bottom,
-            dist_left: anchor_meta.dist_left,
-            dist_right: anchor_meta.dist_right,
-            wrap_side: anchor_meta.wrap_side.clone(),
-        });
-    }
+    walk_group_images(
+        wgp,
+        base,
+        media_map,
+        anchor_pos_x,
+        x_from_margin,
+        anchor_pos_y,
+        y_from_para,
+        anchor_meta,
+        &mut results,
+    );
     results
 }
 
-/// Expand wps:wsp descendants of a wgp into ShapeRun entries. Applies
-/// wgp grpSpPr transform (chOff/chExt → off/ext scale) to each child shape.
+/// Recursively walk the element children of a group (`wpg:wgp` or nested
+/// `wpg:grpSp`), composing each nested grpSp's transform into `xform` before
+/// descending, and emit an `ImageRun` for every `pic:pic` using the cumulative
+/// transform. Mirror image of `walk_group_children` (shapes); pre-order
+/// preserves document order.
+#[allow(clippy::too_many_arguments)]
+fn walk_group_images(
+    group: roxmltree::Node,
+    xform: GroupTransform,
+    media_map: &HashMap<String, String>,
+    anchor_pos_x: f64,
+    x_from_margin: bool,
+    anchor_pos_y: f64,
+    y_from_para: bool,
+    anchor_meta: &AnchorMeta,
+    results: &mut Vec<ImageRun>,
+) {
+    for child in group.children().filter(|n| n.is_element()) {
+        match child.tag_name().name() {
+            "pic" => {
+                if let Some(img) = parse_group_pic(
+                    child,
+                    xform,
+                    media_map,
+                    anchor_pos_x,
+                    x_from_margin,
+                    anchor_pos_y,
+                    y_from_para,
+                    anchor_meta,
+                ) {
+                    results.push(img);
+                }
+            }
+            "grpSp" => {
+                let child_xform = match group_xfrm(child) {
+                    Some(x) => xform.compose_child(x),
+                    None => xform,
+                };
+                walk_group_images(
+                    child,
+                    child_xform,
+                    media_map,
+                    anchor_pos_x,
+                    x_from_margin,
+                    anchor_pos_y,
+                    y_from_para,
+                    anchor_meta,
+                    results,
+                );
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Build an `ImageRun` for a single `pic:pic` inside a group, mapping its
+/// spPr/xfrm off (position) and ext (size) from the immediate group's child
+/// coordinate space to page space via the cumulative transform `xform`. The
+/// position/size math matches `parse_wsp_shape`:
+///   width_pt    = cx * scale_x / EMU_PER_PT
+///   anchor_x_pt = anchor_pos_x + xform.off_x_pt + ox * scale_x / EMU_PER_PT
+#[allow(clippy::too_many_arguments)]
+fn parse_group_pic(
+    pic: roxmltree::Node,
+    xform: GroupTransform,
+    media_map: &HashMap<String, String>,
+    anchor_pos_x: f64,
+    x_from_margin: bool,
+    anchor_pos_y: f64,
+    y_from_para: bool,
+    anchor_meta: &AnchorMeta,
+) -> Option<ImageRun> {
+    // Position and size come from the pic's spPr > a:xfrm (child-coord EMU).
+    let sp_pr = pic.children().find(|n| n.tag_name().name() == "spPr")?;
+    let xfrm = sp_pr.children().find(|n| n.tag_name().name() == "xfrm")?;
+    let off = xfrm.children().find(|n| n.tag_name().name() == "off")?;
+    let ext = xfrm.children().find(|n| n.tag_name().name() == "ext")?;
+    let ox = off
+        .attribute("x")
+        .and_then(|v| v.parse::<f64>().ok())
+        .unwrap_or(0.0);
+    let oy = off
+        .attribute("y")
+        .and_then(|v| v.parse::<f64>().ok())
+        .unwrap_or(0.0);
+    let cx = ext
+        .attribute("cx")
+        .and_then(|v| v.parse::<f64>().ok())
+        .unwrap_or(0.0);
+    let cy = ext
+        .attribute("cy")
+        .and_then(|v| v.parse::<f64>().ok())
+        .unwrap_or(0.0);
+
+    if cx <= 0.0 || cy <= 0.0 {
+        return None;
+    }
+
+    // Find the blip inside this pic.
+    let blip = pic.descendants().find(|n| n.tag_name().name() == "blip")?;
+    let r_id = blip
+        .attribute((R_NS, "embed"))
+        .or_else(|| blip.attribute("r:embed"))?;
+    let data_url = media_map.get(r_id)?.clone();
+
+    // Parse a:clrChange if present — used to make a specific color transparent.
+    // clrFrom specifies the source color; clrTo with alpha=0 means replace with transparent.
+    let color_replace_from = blip
+        .children()
+        .find(|n| n.tag_name().name() == "clrChange")
+        .and_then(|cc| cc.children().find(|n| n.tag_name().name() == "clrFrom"))
+        .and_then(|cf| cf.children().find(|n| n.tag_name().name() == "srgbClr"))
+        .and_then(|clr| clr.attribute("val").map(|v| v.to_uppercase()));
+
+    Some(ImageRun {
+        data_url,
+        width_pt: cx * xform.scale_x / 12700.0,
+        height_pt: cy * xform.scale_y / 12700.0,
+        anchor: true,
+        // Map the pic offset through the group chain, then add the page-space
+        // anchor offset of the whole group.
+        anchor_x_pt: anchor_pos_x + xform.off_x_emu / 12700.0 + ox * xform.scale_x / 12700.0,
+        anchor_y_pt: anchor_pos_y + xform.off_y_emu / 12700.0 + oy * xform.scale_y / 12700.0,
+        anchor_x_from_margin: x_from_margin,
+        anchor_y_from_para: y_from_para,
+        color_replace_from,
+        wrap_mode: anchor_meta.wrap_mode.clone(),
+        dist_top: anchor_meta.dist_top,
+        dist_bottom: anchor_meta.dist_bottom,
+        dist_left: anchor_meta.dist_left,
+        dist_right: anchor_meta.dist_right,
+        wrap_side: anchor_meta.wrap_side.clone(),
+    })
+}
+
+/// Cumulative child-coord-space → page-space affine transform built up while
+/// descending a `wpg:wgp` / nested `wpg:grpSp` tree. A child point `local`
+/// (EMU, in the immediate group's child coordinate system) maps to page EMU as
+/// `page = off_emu + local * scale` (independent per axis; OOXML group
+/// transforms have no skew). ECMA-376 §20.1.7.5 (`a:grpSpPr` group transform)
+/// and §20.1.7.6 (`a:xfrm` child offset/extent) define this scale/offset, and
+/// nested groups compose their transforms multiplicatively.
+#[derive(Clone, Copy)]
+struct GroupTransform {
+    scale_x: f64,
+    scale_y: f64,
+    off_x_emu: f64,
+    off_y_emu: f64,
+}
+
+impl GroupTransform {
+    const IDENTITY: GroupTransform = GroupTransform {
+        scale_x: 1.0,
+        scale_y: 1.0,
+        off_x_emu: 0.0,
+        off_y_emu: 0.0,
+    };
+
+    /// Compose with the transform of a child group whose own `grpSpPr/xfrm`
+    /// gives off/ext/chOff/chExt. The child group maps grandchild coordinates
+    /// `g` to this group's child space via `mid = g_off - g_chOff*g_scale +
+    /// g*g_scale`; applying `self` (child→page) on top yields the composite
+    /// `page = self.off + self.scale*(mid)`. Expanding gives:
+    ///   new_scale = self.scale * g_scale
+    ///   new_off   = self.off + self.scale * (g_off - g_chOff * g_scale)
+    fn compose_child(self, xfrm: roxmltree::Node) -> GroupTransform {
+        let (off_x, off_y, ext_cx, ext_cy, ch_off_x, ch_off_y, ch_ext_cx, ch_ext_cy) =
+            read_group_xfrm(xfrm);
+        let g_scale_x = if ch_ext_cx > 0.0 && ext_cx > 0.0 {
+            ext_cx / ch_ext_cx
+        } else {
+            1.0
+        };
+        let g_scale_y = if ch_ext_cy > 0.0 && ext_cy > 0.0 {
+            ext_cy / ch_ext_cy
+        } else {
+            1.0
+        };
+        GroupTransform {
+            scale_x: self.scale_x * g_scale_x,
+            scale_y: self.scale_y * g_scale_y,
+            off_x_emu: self.off_x_emu + self.scale_x * (off_x - ch_off_x * g_scale_x),
+            off_y_emu: self.off_y_emu + self.scale_y * (off_y - ch_off_y * g_scale_y),
+        }
+    }
+}
+
+/// Read off/ext/chOff/chExt (EMU) from a group `a:xfrm`. Returns
+/// (off_x, off_y, ext_cx, ext_cy, ch_off_x, ch_off_y, ch_ext_cx, ch_ext_cy).
+fn read_group_xfrm(xfrm: roxmltree::Node) -> (f64, f64, f64, f64, f64, f64, f64, f64) {
+    let attr = |node: Option<roxmltree::Node>, name: &str| {
+        node.and_then(|n| n.attribute(name).and_then(|v| v.parse::<f64>().ok()))
+            .unwrap_or(0.0)
+    };
+    let off = xfrm
+        .children()
+        .find(|n| n.is_element() && n.tag_name().name() == "off");
+    let ext = xfrm
+        .children()
+        .find(|n| n.is_element() && n.tag_name().name() == "ext");
+    let ch_off = xfrm
+        .children()
+        .find(|n| n.is_element() && n.tag_name().name() == "chOff");
+    let ch_ext = xfrm
+        .children()
+        .find(|n| n.is_element() && n.tag_name().name() == "chExt");
+    (
+        attr(off, "x"),
+        attr(off, "y"),
+        attr(ext, "cx"),
+        attr(ext, "cy"),
+        attr(ch_off, "x"),
+        attr(ch_off, "y"),
+        attr(ch_ext, "cx"),
+        attr(ch_ext, "cy"),
+    )
+}
+
+/// Locate a group's `grpSpPr > xfrm` (the group's own transform), if present.
+/// Applies to both `wpg:wgp` and nested `wpg:grpSp`, which carry their
+/// transform in a direct `grpSpPr` child.
+fn group_xfrm<'a, 'i>(group: roxmltree::Node<'a, 'i>) -> Option<roxmltree::Node<'a, 'i>> {
+    group
+        .children()
+        .find(|n| n.is_element() && n.tag_name().name() == "grpSpPr")
+        .and_then(|gsp| {
+            gsp.children()
+                .find(|n| n.is_element() && n.tag_name().name() == "xfrm")
+        })
+}
+
+/// Expand the wps:wsp shapes of a `wpg:wgp` into ShapeRun entries, composing
+/// nested `wpg:grpSp` group transforms recursively (ECMA-376 §20.1.7.5/.6).
+/// Each grpSp scales and offsets its children relative to its parent group, so
+/// the cumulative child→page transform must be the product of every group on
+/// the path from the wgp down to the wsp — not just the outermost grpSpPr.
 fn parse_wgp_shapes(
     wgp: roxmltree::Node,
     theme: &ThemeColors,
@@ -2399,101 +2567,115 @@ fn parse_wgp_shapes(
     y_from_para: bool,
     anchor_meta: &AnchorMeta,
 ) -> Vec<ShapeRun> {
-    // Read group transform: off/ext (page-relative) vs chOff/chExt (child coord space).
-    let grp_xfrm = wgp
-        .descendants()
-        .find(|n| n.is_element() && n.tag_name().name() == "grpSpPr")
-        .and_then(|gsp| {
-            gsp.children()
-                .find(|n| n.is_element() && n.tag_name().name() == "xfrm")
-        });
-    let (off_x, off_y, ext_cx, ext_cy, ch_off_x, ch_off_y, ch_ext_cx, ch_ext_cy) = grp_xfrm
-        .map(|x| {
-            let off = x
-                .children()
-                .find(|n| n.is_element() && n.tag_name().name() == "off");
-            let ext = x
-                .children()
-                .find(|n| n.is_element() && n.tag_name().name() == "ext");
-            let ch_off = x
-                .children()
-                .find(|n| n.is_element() && n.tag_name().name() == "chOff");
-            let ch_ext = x
-                .children()
-                .find(|n| n.is_element() && n.tag_name().name() == "chExt");
+    // Base transform = the outermost wgp grpSpPr/xfrm (chOff/chExt → off/ext).
+    let base = match group_xfrm(wgp) {
+        Some(x) => GroupTransform::IDENTITY.compose_child(x),
+        None => GroupTransform::IDENTITY,
+    };
+
+    // Outer group dimensions in pt — passed to EVERY child (nested or not) so
+    // the renderer resolves align/pctPos against the whole group's bounding
+    // box. Falls back to the child-coord-space ext when the group omits an
+    // outer ext (rare). This is the outermost wgp's box and is invariant to
+    // nesting depth.
+    let (group_w_pt, group_h_pt) = match group_xfrm(wgp) {
+        Some(x) => {
+            let (_, _, ext_cx, ext_cy, _, _, ch_ext_cx, ch_ext_cy) = read_group_xfrm(x);
             (
-                off.and_then(|o| o.attribute("x").and_then(|v| v.parse::<f64>().ok()))
-                    .unwrap_or(0.0),
-                off.and_then(|o| o.attribute("y").and_then(|v| v.parse::<f64>().ok()))
-                    .unwrap_or(0.0),
-                ext.and_then(|e| e.attribute("cx").and_then(|v| v.parse::<f64>().ok()))
-                    .unwrap_or(0.0),
-                ext.and_then(|e| e.attribute("cy").and_then(|v| v.parse::<f64>().ok()))
-                    .unwrap_or(0.0),
-                ch_off
-                    .and_then(|o| o.attribute("x").and_then(|v| v.parse::<f64>().ok()))
-                    .unwrap_or(0.0),
-                ch_off
-                    .and_then(|o| o.attribute("y").and_then(|v| v.parse::<f64>().ok()))
-                    .unwrap_or(0.0),
-                ch_ext
-                    .and_then(|e| e.attribute("cx").and_then(|v| v.parse::<f64>().ok()))
-                    .unwrap_or(0.0),
-                ch_ext
-                    .and_then(|e| e.attribute("cy").and_then(|v| v.parse::<f64>().ok()))
-                    .unwrap_or(0.0),
+                (if ext_cx > 0.0 { ext_cx } else { ch_ext_cx }) / 12700.0,
+                (if ext_cy > 0.0 { ext_cy } else { ch_ext_cy }) / 12700.0,
             )
-        })
-        .unwrap_or((0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0));
-
-    let sx = if ch_ext_cx > 0.0 && ext_cx > 0.0 {
-        ext_cx / ch_ext_cx
-    } else {
-        1.0
+        }
+        None => (0.0, 0.0),
     };
-    let sy = if ch_ext_cy > 0.0 && ext_cy > 0.0 {
-        ext_cy / ch_ext_cy
-    } else {
-        1.0
-    };
-    // Page-relative offset of the group origin, in EMU. ch_off is subtracted
-    // because child coordinates are measured relative to chOff.
-    let group_page_off_x_emu = off_x - ch_off_x * sx;
-    let group_page_off_y_emu = off_y - ch_off_y * sy;
-
-    // Outer group dimensions in pt — passed to each child so the renderer can
-    // resolve align/pctPos against the GROUP's bounding box, then offset each
-    // child within it. Falls back to the child-coord-space ext when the group
-    // omits an outer ext (rare).
-    let group_w_pt = (if ext_cx > 0.0 { ext_cx } else { ch_ext_cx }) / 12700.0;
-    let group_h_pt = (if ext_cy > 0.0 { ext_cy } else { ch_ext_cy }) / 12700.0;
 
     let mut results = Vec::new();
-    for (idx, wsp) in wgp
-        .descendants()
-        .filter(|n| n.is_element() && n.tag_name().name() == "wsp")
-        .enumerate()
-    {
-        if let Some(mut shape) = parse_wsp_shape(
-            wsp,
-            theme,
-            anchor_pos_x,
-            x_from_margin,
-            anchor_pos_y,
-            y_from_para,
-            anchor_meta,
-            sx,
-            sy,
-            group_page_off_x_emu / 12700.0,
-            group_page_off_y_emu / 12700.0,
-            idx as u32,
-        ) {
-            shape.group_width_pt = Some(group_w_pt);
-            shape.group_height_pt = Some(group_h_pt);
-            results.push(shape);
+    let mut z_order: u32 = 0;
+    walk_group_children(
+        wgp,
+        base,
+        theme,
+        anchor_pos_x,
+        x_from_margin,
+        anchor_pos_y,
+        y_from_para,
+        anchor_meta,
+        group_w_pt,
+        group_h_pt,
+        &mut z_order,
+        &mut results,
+    );
+    results
+}
+
+/// Recursively walk the element children of a group (`wpg:wgp` or nested
+/// `wpg:grpSp`), composing each nested grpSp's transform into `xform` before
+/// descending. `wps:wsp` children are emitted as ShapeRun using the cumulative
+/// transform; `z_order` increments in document (pre-order) order so the
+/// resulting z-index matches a flat descendant walk.
+#[allow(clippy::too_many_arguments)]
+fn walk_group_children(
+    group: roxmltree::Node,
+    xform: GroupTransform,
+    theme: &ThemeColors,
+    anchor_pos_x: f64,
+    x_from_margin: bool,
+    anchor_pos_y: f64,
+    y_from_para: bool,
+    anchor_meta: &AnchorMeta,
+    group_w_pt: f64,
+    group_h_pt: f64,
+    z_order: &mut u32,
+    results: &mut Vec<ShapeRun>,
+) {
+    for child in group.children().filter(|n| n.is_element()) {
+        match child.tag_name().name() {
+            "wsp" => {
+                let idx = *z_order;
+                *z_order += 1;
+                if let Some(mut shape) = parse_wsp_shape(
+                    child,
+                    theme,
+                    anchor_pos_x,
+                    x_from_margin,
+                    anchor_pos_y,
+                    y_from_para,
+                    anchor_meta,
+                    xform.scale_x,
+                    xform.scale_y,
+                    xform.off_x_emu / 12700.0,
+                    xform.off_y_emu / 12700.0,
+                    idx,
+                ) {
+                    shape.group_width_pt = Some(group_w_pt);
+                    shape.group_height_pt = Some(group_h_pt);
+                    results.push(shape);
+                }
+            }
+            "grpSp" => {
+                // Compose this nested group's transform, then recurse.
+                let child_xform = match group_xfrm(child) {
+                    Some(x) => xform.compose_child(x),
+                    None => xform,
+                };
+                walk_group_children(
+                    child,
+                    child_xform,
+                    theme,
+                    anchor_pos_x,
+                    x_from_margin,
+                    anchor_pos_y,
+                    y_from_para,
+                    anchor_meta,
+                    group_w_pt,
+                    group_h_pt,
+                    z_order,
+                    results,
+                );
+            }
+            _ => {}
         }
     }
-    results
 }
 
 /// Parse a single wps:wsp into ShapeRun. `sx,sy` scale the shape's spPr/xfrm
@@ -2534,7 +2716,30 @@ fn parse_wsp_shape(
     let oy = off.attribute("y").and_then(|v| v.parse::<f64>().ok())?;
     let cx = ext.attribute("cx").and_then(|v| v.parse::<f64>().ok())?;
     let cy = ext.attribute("cy").and_then(|v| v.parse::<f64>().ok())?;
-    if cx <= 0.0 || cy <= 0.0 {
+
+    // Line/connector presets (ECMA-376 §20.1.9.18 prstGeom; preset geometries
+    // `line`, `straightConnector1`, `bent*Connector*`, `curved*Connector*`)
+    // legitimately have a degenerate bounding box: an axis-aligned connector
+    // has cx==0 (vertical) or cy==0 (horizontal). Such a shape must NOT be
+    // discarded — it is the line itself. A genuine zero-area box on any other
+    // geometry (rect, ellipse, …) has nothing to draw, and a negative extent
+    // is always invalid, so both are still rejected.
+    let prst_lower = sp_pr
+        .children()
+        .find(|n| n.is_element() && n.tag_name().name() == "prstGeom")
+        .and_then(|n| n.attribute("prst"))
+        .map(|p| p.to_ascii_lowercase());
+    let is_line_geom = matches!(
+        prst_lower.as_deref(),
+        Some(p) if p == "line"
+            || p.starts_with("straightconnector")
+            || p.starts_with("bentconnector")
+            || p.starts_with("curvedconnector")
+    );
+    if cx < 0.0 || cy < 0.0 {
+        return None;
+    }
+    if !is_line_geom && (cx == 0.0 || cy == 0.0) {
         return None;
     }
     let rotation = xfrm
@@ -2590,18 +2795,23 @@ fn parse_wsp_shape(
     }
 
     // Direct fills on spPr take priority over wps:style/fillRef. ECMA-376
-    // §20.1.4.1.30: when no direct fill is set, the shape's appearance comes
+    // §20.1.4.1.30: when *no* direct fill is set, the shape's appearance comes
     // from the theme's fillStyleLst / bgFillStyleLst entry referenced by idx,
-    // recolored using the schemeClr embedded in the fillRef.
-    let fill = parse_shape_fill(sp_pr, theme).or_else(|| {
-        wsp.children()
+    // recolored using the schemeClr embedded in the fillRef. But §20.1.8.44:
+    // an explicit `<a:noFill/>` is itself a direct fill property and overrides
+    // the style reference, so only fall back to fillRef when the fill is Absent.
+    let fill = match parse_shape_fill(sp_pr, theme) {
+        FillSpec::Explicit(f) => Some(f),
+        FillSpec::NoFill => None,
+        FillSpec::Absent => wsp
+            .children()
             .find(|n| n.is_element() && n.tag_name().name() == "style")
             .and_then(|st| {
                 st.children()
                     .find(|n| n.is_element() && n.tag_name().name() == "fillRef")
             })
-            .and_then(|fr| resolve_fill_ref(fr, theme))
-    });
+            .and_then(|fr| resolve_fill_ref(fr, theme)),
+    };
     let (stroke, stroke_width) = sp_pr
         .children()
         .find(|n| n.is_element() && n.tag_name().name() == "ln")
@@ -2882,21 +3092,48 @@ fn parse_vml_pict(pict: roxmltree::Node, theme: &ThemeColors) -> Option<ShapeRun
     })
 }
 
-/// Parse a shape's fill (solidFill or gradFill). Returns None for noFill/missing.
-fn parse_shape_fill(sp_pr: roxmltree::Node, theme: &ThemeColors) -> Option<ShapeFill> {
+/// Result of inspecting a shape's spPr for a direct fill.
+///
+/// ECMA-376 §20.1.8.44 (noFill): an explicit `<a:noFill/>` is a direct fill
+/// property and therefore overrides the shape's style reference. We must
+/// distinguish it from "no fill element present" (where the wps:style/fillRef
+/// recipe applies). Collapsing both into `None` makes a no-fill shape pick up
+/// the theme gradient referenced by fillRef, which is wrong.
+enum FillSpec {
+    /// A direct solidFill/gradFill was present and resolved.
+    Explicit(ShapeFill),
+    /// An explicit `<a:noFill/>` — the shape is intentionally unfilled.
+    NoFill,
+    /// No direct fill element at all — defer to wps:style/fillRef.
+    Absent,
+}
+
+/// Parse a shape's direct fill (solidFill / gradFill / noFill), reporting which
+/// of the three states applies so the caller can decide whether to fall back to
+/// the style's fillRef.
+fn parse_shape_fill(sp_pr: roxmltree::Node, theme: &ThemeColors) -> FillSpec {
     for child in sp_pr.children().filter(|n| n.is_element()) {
         match child.tag_name().name() {
             "solidFill" => {
-                return resolve_color_element(child, theme).map(|c| ShapeFill::Solid { color: c });
+                return match resolve_color_element(child, theme) {
+                    Some(c) => FillSpec::Explicit(ShapeFill::Solid { color: c }),
+                    // A solidFill whose color failed to resolve is still an
+                    // explicit, direct fill declaration — do not fall back to
+                    // the style reference.
+                    None => FillSpec::NoFill,
+                };
             }
             "gradFill" => {
-                return parse_grad_fill(child, theme);
+                return match parse_grad_fill(child, theme) {
+                    Some(f) => FillSpec::Explicit(f),
+                    None => FillSpec::NoFill,
+                };
             }
-            "noFill" => return None,
+            "noFill" => return FillSpec::NoFill,
             _ => {}
         }
     }
-    None
+    FillSpec::Absent
 }
 
 /// Resolve a wps:style/a:fillRef into a concrete ShapeFill using the theme's
@@ -3905,6 +4142,85 @@ mod tests {
         );
         assert_eq!(t.width_pt, None);
         assert_eq!(t.width_pct, None);
+    }
+}
+
+#[cfg(test)]
+mod wgp_image_tests {
+    use super::*;
+    use crate::xml_util::R_NS;
+
+    // ECMA-376 §20.1.7.5/.6 — a picture nested inside a wpg:grpSp must be mapped
+    // to page space through the *composed* group transforms (each grpSp's
+    // off/ext/chOff/chExt scales and offsets its children). The old parser
+    // applied only the pic's own offset, ignoring the group's scale/offset and
+    // any nested grpSp transform.
+    #[test]
+    fn nested_group_pic_composes_transform() {
+        // Outer wgp: identity (off 0, ext == chExt). Inner grpSp: offset
+        // (69850, 295275) EMU and 2× scale (ext 2000 over chExt 1000). Pic at
+        // child-coord off (100000, 200000) EMU, ext (127000, 254000).
+        let xml = format!(
+            r#"<wpg:wgp xmlns:wpg="urn:wpg" xmlns:a="urn:a" xmlns:pic="urn:pic" xmlns:r="{r}">
+                 <wpg:grpSpPr><a:xfrm>
+                   <a:off x="0" y="0"/><a:ext cx="1000" cy="1000"/>
+                   <a:chOff x="0" y="0"/><a:chExt cx="1000" cy="1000"/>
+                 </a:xfrm></wpg:grpSpPr>
+                 <wpg:grpSp>
+                   <wpg:grpSpPr><a:xfrm>
+                     <a:off x="69850" y="295275"/><a:ext cx="2000" cy="2000"/>
+                     <a:chOff x="0" y="0"/><a:chExt cx="1000" cy="1000"/>
+                   </a:xfrm></wpg:grpSpPr>
+                   <pic:pic>
+                     <pic:spPr><a:xfrm>
+                       <a:off x="100000" y="200000"/><a:ext cx="127000" cy="254000"/>
+                     </a:xfrm></pic:spPr>
+                     <pic:blipFill><a:blip r:embed="rId1"/></pic:blipFill>
+                   </pic:pic>
+                 </wpg:grpSp>
+               </wpg:wgp>"#,
+            r = R_NS
+        );
+        let doc = roxmltree::Document::parse(&xml).unwrap();
+        let mut media = HashMap::new();
+        media.insert("rId1".to_string(), "data:image/png;base64,AAAA".to_string());
+        let meta = AnchorMeta::default();
+        let imgs = parse_wgp_images(
+            doc.root_element(),
+            &media,
+            0.0,   // anchor_pos_x
+            false, // x_from_margin
+            0.0,   // anchor_pos_y
+            false, // y_from_para
+            &meta,
+        );
+        assert_eq!(imgs.len(), 1);
+        let img = &imgs[0];
+        // size = pic ext × inner scale(2): 127000*2/12700 = 20pt, 254000*2/12700 = 40pt.
+        assert!(
+            (img.width_pt - 20.0).abs() < 1e-6,
+            "width_pt = {}",
+            img.width_pt
+        );
+        assert!(
+            (img.height_pt - 40.0).abs() < 1e-6,
+            "height_pt = {}",
+            img.height_pt
+        );
+        // pos = group off + pic off × scale, all /12700:
+        //   x = (69850 + 100000*2)/12700 = 269850/12700 ≈ 21.2480
+        //   y = (295275 + 200000*2)/12700 = 695275/12700 ≈ 54.7461
+        // Pre-fix (buggy) values were x = 100000/12700 ≈ 7.874, width = 10pt.
+        assert!(
+            (img.anchor_x_pt - 21.248_031).abs() < 1e-3,
+            "anchor_x_pt = {}",
+            img.anchor_x_pt
+        );
+        assert!(
+            (img.anchor_y_pt - 54.746_063).abs() < 1e-3,
+            "anchor_y_pt = {}",
+            img.anchor_y_pt
+        );
     }
 }
 

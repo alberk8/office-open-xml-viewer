@@ -3,11 +3,15 @@ import type {
   DocRun, DocxTextRun, ImageRun, ShapeRun, FieldRun, HeaderFooter, LineSpacing, BorderSpec, TableBorders, CellBorders,
   TabStop, ParagraphBorders, ParaBorderEdge, SectionProps, DocNote,
 } from './types';
+import type { ArrowEnd, Stroke } from '@silurus/ooxml-core';
 import {
   buildCustomPath,
   buildShapePath,
   hexToRgba,
   resolveFill,
+  applyStroke,
+  drawArrowHead,
+  getConnectorAnchors,
   mathToMathML,
   recolorSvg,
   PT_TO_PX,
@@ -3510,6 +3514,15 @@ function resolveAnchorY(
   }
 }
 
+/** Convert a parsed docx LineEnd into core's ArrowEnd. Returns undefined when
+ *  absent so the Stroke field stays unset. */
+function lineEndToArrowEnd(
+  end: ShapeRun['headEnd'],
+): ArrowEnd | undefined {
+  if (!end) return undefined;
+  return { type: end.type, w: end.w, len: end.len };
+}
+
 function renderAnchorShape(shape: ShapeRun, state: RenderState, paragraphTopPx: number): void {
   const { ctx, scale } = state;
   // ECMA-376 §20.4.2.18: when wp14:sizeRelH/sizeRelV is present it overrides
@@ -3603,9 +3616,36 @@ function renderAnchorShape(shape: ShapeRun, state: RenderState, paragraphTopPx: 
     ctx.fill();
   }
   if (shape.stroke && (shape.strokeWidth ?? 0) > 0) {
-    ctx.strokeStyle = hexToRgba(shape.stroke);
-    ctx.lineWidth = Math.max(0.5, (shape.strokeWidth ?? 0) * scale);
+    // Build a core Stroke so dash / line-end handling matches the pptx path.
+    // `width` is in pt and `scale` is px/pt, so `width * scale` is px — the
+    // same convention core's applyStroke / drawArrowHead expect.
+    const coreStroke: Stroke = {
+      color: shape.stroke,
+      width: shape.strokeWidth ?? 0,
+      dashStyle: shape.strokeDash ?? undefined,
+      headEnd: lineEndToArrowEnd(shape.headEnd),
+      tailEnd: lineEndToArrowEnd(shape.tailEnd),
+    };
+    applyStroke(ctx as CanvasRenderingContext2D, coreStroke, scale);
     ctx.stroke();
+    // Line-end decorations (ECMA-376 §20.1.8.3). Only connector/line presets
+    // expose head/tail tips with a well-defined tangent; for those we place the
+    // arrow heads at the path endpoints with the path's outgoing direction.
+    if ((coreStroke.headEnd || coreStroke.tailEnd) && shape.presetGeometry) {
+      const anchors = getConnectorAnchors(
+        shape.presetGeometry, x, y, w, h,
+        shape.adjValues ?? [],
+      );
+      if (anchors) {
+        ctx.setLineDash([]);
+        if (coreStroke.tailEnd) {
+          drawArrowHead(ctx as CanvasRenderingContext2D, anchors.end.x, anchors.end.y, anchors.end.angle, coreStroke.tailEnd, coreStroke, scale);
+        }
+        if (coreStroke.headEnd) {
+          drawArrowHead(ctx as CanvasRenderingContext2D, anchors.start.x, anchors.start.y, anchors.start.angle, coreStroke.headEnd, coreStroke, scale);
+        }
+      }
+    }
   }
   ctx.restore();
 

@@ -136,9 +136,11 @@ interface FloatRect {
   distRight: number;
   distTop: number;
   distBottom: number;
-  /** Identifier of the anchoring paragraph. Floats with the SAME paraId belong
-   *  to one paragraph and never displace each other; different-paragraph floats
-   *  are subject to de-facto overlap avoidance (Word/LibreOffice). */
+  /** Identifier of the anchoring paragraph. Used only by the implementation-
+   *  defined (HEURISTIC) overlap avoidance under allowOverlap=true: floats with
+   *  the SAME paraId never displace each other, different-paragraph floats do.
+   *  ECMA-376 does not define this scoping; it mirrors Word/LibreOffice. See
+   *  resolveFloatOverlap. */
   paraId: number;
   /** true once the image itself has been drawn (drawn after its paragraph lays out). */
   drawn: boolean;
@@ -173,9 +175,9 @@ interface RenderState {
   /** Active anchor-image floats that constrain text layout on the current page. */
   floats: FloatRect[];
   /** Monotonic counter assigning a unique id to each registerAnchorFloats call,
-   *  i.e. one id per paragraph. Used to scope float overlap avoidance to
-   *  DIFFERENT paragraphs (floats from the same paragraph never displace each
-   *  other). */
+   *  i.e. one id per paragraph per page. Used only to scope the implementation-
+   *  defined (HEURISTIC) overlap avoidance to DIFFERENT paragraphs. Reset to 0
+   *  on every page flip so measure and render assign matching paraIds. */
   floatParaSeq: number;
   /** ECMA-376 §17.6.5 docGrid (type + pitch), applied to auto line spacing. */
   docGrid: DocGridCtx;
@@ -1739,18 +1741,24 @@ function renderParagraph(
   const grid = paraGrid(para, state);
 
   // A paragraph with no inline content (literally empty, or anchor-only) still
-  // produces ONE paragraph-mark line box (ECMA-376 §17.3.1.29). That line box
-  // is subject to the same float-wrap rules as text: if it cannot fit beside the
-  // page's active floats it flows below them (§20.4.2.16/.17). Without this an
-  // empty paragraph mark wedges into a sub-em sliver beside a full-width float
-  // band and the following paragraphs (and any wrapNone image those paragraphs
-  // anchor) stay pinned inside the band. We resolve the mark line's flowed top
-  // here and use it for the mark advance, the shading/border rect, and the
+  // produces ONE paragraph-mark line box (ECMA-376 §17.3.1.29 regulates only the
+  // existence of that line; the horizontal wrap geometry around a square float is
+  // §20.4.2.17). The behavior below — firing an automatic "flow the mark line
+  // below the float band when it cannot sit beside it" displacement, and using
+  // ONE EM of the mark font as the width the gap must hold — is NOT specified by
+  // ECMA-376 Part 1. It is an implementation-defined HEURISTIC chosen to match
+  // Word: the only spec-mandated flow of a line onto a float-free region is the
+  // explicit `<w:br w:clear>` of §17.18.3, which is not what fires here. Without
+  // this heuristic an empty paragraph mark wedges into a sub-em sliver beside a
+  // full-width float band and the following paragraphs (and any wrapNone image
+  // they anchor) stay pinned inside the band. We resolve the mark line's flowed
+  // top here and use it for the mark advance, the shading/border rect, and the
   // paragraph-relative base of any wrapNone anchor image drawn below.
   const resolveEmptyMarkTop = (): number => {
     if (state.floats.length === 0) return textAreaTopY;
-    // Required width for an empty mark line: one em of the mark font. A side gap
-    // narrower than this cannot hold the line start, so the line flows below.
+    // Required width for an empty mark line: one em of the mark font (HEURISTIC,
+    // see above — not a spec-defined threshold). A side gap narrower than this is
+    // treated as unable to hold the line start, so the line flows below.
     const markEm = getDefaultFontSize(para) * scale;
     const probeH = 10 * scale;
     const win = resolveLineFloatWindow(
@@ -2814,11 +2822,13 @@ function splitTextForLayout(text: string): string[] {
  *      padding. When several squares cover a row we take the WIDEST free
  *      horizontal gap. If no gap is wide enough for `requiredWidth` the line
  *      cannot sit here at all and flows below the obstruction (advance to the
- *      lowest blocking float bottom and re-evaluate). This is the same "flow
- *      below the obstruction" behaviour used for wrapped text; routing empty /
- *      anchor-only paragraph-mark lines through it makes those lines (and the
- *      paragraphs that follow them) drop below a full-width float band instead
- *      of rendering inside it.
+ *      lowest blocking float bottom and re-evaluate). The square/topAndBottom
+ *      geometry itself is spec-defined; but routing empty / anchor-only
+ *      paragraph-mark lines through this with `requiredWidth` = one em (so they
+ *      drop below a full-width float band) is an implementation-defined
+ *      HEURISTIC (see resolveEmptyMarkTop): ECMA-376 does not require a
+ *      float-free row for a paragraph mark — only `<w:br w:clear>` (§17.18.3)
+ *      mandates flowing onto a float-free region.
  */
 function resolveLineFloatWindow(
   topY: number,
@@ -3758,27 +3768,34 @@ function rectsOverlap(
 }
 
 /**
- * De-facto multi-float collision resolution for a NEW wrap float, against
- * floats already registered on the page that belong to OTHER paragraphs.
+ * Multi-float collision resolution for a NEW wrap float, against floats already
+ * registered on the page.
  *
- * Per ECMA-376 Part 1 §20.4.2.3 (wp:anchor/@allowOverlap): an object that
- * "cannot overlap other DrawingML object … shall be repositioned when displayed
- * to prevent this overlap" — i.e. allowOverlap="false" MANDATES repositioning,
- * while allowOverlap="true" only *permits* overlap (it does not require it, nor
- * does it forbid the renderer from avoiding it). The default when the attribute
- * is omitted is true (§20.4.2.3).
+ * What ECMA-376 actually mandates here is narrow. Part 1 §20.4.2.3
+ * (wp:anchor/@allowOverlap) says an object that "cannot overlap other DrawingML
+ * object … shall be repositioned when displayed to prevent this overlap" — i.e.
+ * allowOverlap="false" REQUIRES repositioning. allowOverlap="true" (the default
+ * when omitted, §20.4.2.3) only *permits* overlap; the spec is silent on whether
+ * a renderer may avoid it. So:
+ *   - allowOverlap === false → spec-mandated avoidance of ALL other floats.
+ *   - allowOverlap === true  → implementation-defined avoidance of floats
+ *     anchored in OTHER paragraphs only.
  *
- * The blocker set depends on the *moving* float's own allowOverlap:
- *   - allowOverlap === false → spec-mandated avoidance of ALL other floats
- *     (every intersecting float blocks, regardless of which paragraph it is
- *     anchored in).
- *   - allowOverlap === true → only avoid floats anchored in OTHER paragraphs.
- *     This is the Word/LibreOffice de-facto behavior we mirror (e.g. sample-9
- *     figure 9): same-paragraph floats may overlap, cross-paragraph floats are
- *     kept apart. It is a spec-permitted layout policy, not a requirement.
+ * EVERYTHING ELSE in this function is implementation-defined — ECMA-376 Part 1
+ * does NOT specify it. This is a HEURISTIC chosen to match Word's observed
+ * layout (e.g. sample-9 figure 9), not a spec requirement:
+ *   - the move DIRECTION (right first, then down),
+ *   - WHICH float moves (the later/document-order float is the "new" one),
+ *   - the "same-paragraph floats never displace each other" gate (the paraId
+ *     scoping under allowOverlap=true above),
+ *   - and the move AMOUNT. Note the dist* padding reused below is, per
+ *     §20.4.2.3/§20.4.2.17, the minimum distance between the float and *text*
+ *     (wrapSquare geometry) — it is NOT spec-defined as a float-to-float gap.
+ *     Using it to seat one float beside another is our own choice.
  *
- * Single-float wrap geometry and the dist* padding reused below are defined by
- * §20.4.2.17 (wrapSquare).
+ * If the §20.4.2.3 "shall be repositioned" requirement is ever satisfiable in
+ * more than one way, the particular re-seating below remains a Word-mimicking
+ * heuristic; keep it as such until a spec-grounded placement rule is found.
  *
  * We re-seat horizontally to the right of the blocking float(s) first (margins
  * may be used — Word lets a displaced float sit in the page margin), and only
@@ -3852,13 +3869,13 @@ function registerAnchorFloats(para: DocParagraph, state: RenderState, paragraphA
     const dl = (img.distLeft   ?? 0) * scale;
     const dr = (img.distRight  ?? 0) * scale;
 
-    // Overlap avoidance (ECMA-376 §20.4.2.3 allowOverlap: "false" mandates
-    // repositioning to prevent overlap; "true"/omitted only permits it). The
-    // later (document-order) float is displaced. When allowOverlap is false we
-    // avoid ALL registered floats (spec-mandated); when true we avoid only
-    // floats anchored in OTHER paragraphs (Word de-facto behavior). Resolution
-    // re-seats horizontally first (to the right of the blockers, honoring dist
-    // padding), then vertically if that runs off the page. Default true per spec.
+    // Overlap avoidance. Spec-mandated part: allowOverlap="false" (ECMA-376
+    // §20.4.2.3) REQUIRES repositioning to prevent overlap; "true"/omitted only
+    // permits overlap. Default true per §20.4.2.3.
+    // Implementation-defined (HEURISTIC, Word-mimicking, no ECMA-376 basis):
+    // displacing the later document-order float, the "other paragraphs only"
+    // gate under allowOverlap=true, and the right-then-down re-seat using dist
+    // padding as the float-to-float gap. See resolveFloatOverlap header.
     const allowOverlap = img.allowOverlap ?? true;
     const resolved = resolveFloatOverlap(
       pageX, pageY, w, h, dl, dr, dt, db, paraId, allowOverlap, state,

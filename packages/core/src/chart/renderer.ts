@@ -61,26 +61,80 @@ export function legendEntryColor(
   return chartColor(entryIndex, series[entryIndex]);
 }
 
+/** Axis-title font size (px). Honors the XML run-prop size (`<c:catAx|valAx>
+ *  <c:title>…@sz`, hundredths of a point) when present — e.g. 18pt titles in
+ *  sample-30 — otherwise keeps the previous proportional default so untitled-
+ *  size charts are unchanged. */
+function axisTitleFontPx(sizeHpt: number | null | undefined, h: number, ptToPx: number): number {
+  if (sizeHpt) return (sizeHpt / 100) * ptToPx;
+  return Math.max(8, Math.min(10, h * 0.045));
+}
+
+/** Draw an axis title at an explicit anchor in the outer gutter band (outside
+ *  the tick labels), at its real font size/bold/color. The cat title is
+ *  centered under the X axis; the val title is rotated -90° centered to the
+ *  left of the Y axis. `anchorX`/`anchorY` are the band center the caller
+ *  reserved via catTitleH/valTitleW, so the title never overlaps tick labels. */
 function drawAxisTitle(
   ctx: CanvasRenderingContext2D,
   text: string,
-  px0: number, py0: number, pw: number, ph: number,
+  anchorX: number, anchorY: number,
   axis: 'cat' | 'val',
-  fontSize: number,
+  fontSizePx: number,
+  bold: boolean,
+  color: string,
 ): void {
   ctx.save();
-  ctx.font = `${fontSize}px sans-serif`;
-  ctx.fillStyle = '#555';
+  ctx.font = `${bold ? 'bold ' : ''}${fontSizePx}px sans-serif`;
+  ctx.fillStyle = color;
   if (axis === 'cat') {
-    ctx.textAlign = 'center'; ctx.textBaseline = 'bottom';
-    ctx.fillText(text.slice(0, 30), px0 + pw / 2, py0 + ph + fontSize + 2);
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(text.slice(0, 60), anchorX, anchorY);
   } else {
-    ctx.translate(px0 - fontSize - 4, py0 + ph / 2);
+    ctx.translate(anchorX, anchorY);
     ctx.rotate(-Math.PI / 2);
     ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-    ctx.fillText(text.slice(0, 30), 0, 0);
+    ctx.fillText(text.slice(0, 60), 0, 0);
   }
   ctx.restore();
+}
+
+/** Resolve the per-axis title color string for `drawAxisTitle`. Returns
+ *  '#rrggbb' when the XML supplied a srgb color, else the legacy '#555'. */
+function axisTitleColor(hex: string | null | undefined): string {
+  return hex ? `#${hex}` : '#555';
+}
+
+/** Draw both axis titles for a cartesian chart (bar/line/area/scatter),
+ *  anchored in the reserved outer gutter bands so they sit OUTSIDE the tick
+ *  labels. `catTitlePx`/`valTitlePx` are the title font sizes the caller used
+ *  to size `catTitleH`/`valTitleW`; the anchor centers each title within its
+ *  band. cat axis = bottom, val axis = left — the orientation each cartesian
+ *  renderer already uses (horizontal bar keeps cat-bottom/val-left too). */
+function drawAxisTitles(
+  ctx: CanvasRenderingContext2D,
+  chart: ChartModel,
+  x: number, y: number, w: number, h: number,
+  px0: number, py0: number, pw: number, ph: number,
+  legLeftW: number, legBottomH: number,
+  catTitlePx: number, valTitlePx: number,
+): void {
+  if (chart.valAxisTitle) {
+    const anchorX = x + legLeftW + valTitlePx / 2 + 2;
+    const anchorY = py0 + ph / 2;
+    drawAxisTitle(
+      ctx, chart.valAxisTitle, anchorX, anchorY, 'val',
+      valTitlePx, !!chart.valAxisTitleFontBold, axisTitleColor(chart.valAxisTitleFontColor),
+    );
+  }
+  if (chart.catAxisTitle) {
+    const anchorX = px0 + pw / 2;
+    const anchorY = y + h - legBottomH - 2 - catTitlePx / 2;
+    drawAxisTitle(
+      ctx, chart.catAxisTitle, anchorX, anchorY, 'cat',
+      catTitlePx, !!chart.catAxisTitleFontBold, axisTitleColor(chart.catAxisTitleFontColor),
+    );
+  }
 }
 
 /** Line-shaped legend swatch styles match Excel's actual chart-type
@@ -432,9 +486,13 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
   const legLeftW   = leg?.side === 'l' ? leg.reserveW : 0;
   const legTopH    = leg?.side === 't' ? leg.reserveH : 0;
   const legBottomH = leg?.side === 'b' ? leg.reserveH : 0;
-  const axisFontSz = Math.max(8, Math.min(10, h * 0.045));
-  const catTitleH  = chart.catAxisTitle ? axisFontSz + 4 : 0;
-  const valTitleW  = chart.valAxisTitle ? axisFontSz + 4 : 0;
+  // Axis-title bands sized from the *actual* title font (honoring XML @sz, e.g.
+  // sample-30's 18pt) plus a small gap, so big titles get a wide enough gutter
+  // and never collide with the tick labels.
+  const catTitlePx = axisTitleFontPx(chart.catAxisTitleFontSizeHpt, h, ptToPx);
+  const valTitlePx = axisTitleFontPx(chart.valAxisTitleFontSizeHpt, h, ptToPx);
+  const catTitleH  = chart.catAxisTitle ? catTitlePx + 6 : 0;
+  const valTitleW  = chart.valAxisTitle ? valTitlePx + 6 : 0;
   const pad = {
     t: titleH + legTopH + h * 0.02,
     r: legRightW + w * 0.03,
@@ -721,8 +779,7 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
     ? { ...chart, series: [...chart.series].reverse() }
     : chart;
   drawLegendForLayout(ctx, legendChart, leg, x, y, w, h, px0, py0, pw, ph, titleH + 2);
-  if (chart.catAxisTitle) drawAxisTitle(ctx, chart.catAxisTitle, px0, py0, pw, ph, 'cat', axisFontSz);
-  if (chart.valAxisTitle) drawAxisTitle(ctx, chart.valAxisTitle, px0, py0, pw, ph, 'val', axisFontSz);
+  drawAxisTitles(ctx, chart, x, y, w, h, px0, py0, pw, ph, legLeftW, legBottomH, catTitlePx, valTitlePx);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -753,9 +810,12 @@ function renderLineChart(
   const legBottomH = leg?.side === 'b' ? leg.reserveH : 0;
   const catAxFontPx = axisLabelPx(chart.catAxisFontSizeHpt, h, ptToPx);
   const valAxFontPx = axisLabelPx(chart.valAxisFontSizeHpt, h, ptToPx);
-  const axisFontSz = Math.max(catAxFontPx, valAxFontPx);
-  const catTitleH  = chart.catAxisTitle ? axisFontSz + 4 : 0;
-  const valTitleW  = chart.valAxisTitle ? axisFontSz + 4 : 0;
+  // Axis-title bands use the real title font (XML @sz when set), independent of
+  // the tick-label sizes above, so 18pt titles get a wide enough gutter.
+  const catTitlePx = axisTitleFontPx(chart.catAxisTitleFontSizeHpt, h, ptToPx);
+  const valTitlePx = axisTitleFontPx(chart.valAxisTitleFontSizeHpt, h, ptToPx);
+  const catTitleH  = chart.catAxisTitle ? catTitlePx + 6 : 0;
+  const valTitleW  = chart.valAxisTitle ? valTitlePx + 6 : 0;
   // Pad based on actual label metrics rather than magic percents so an explicit
   // <c:txPr sz="1000"> (10pt) correctly compresses the plot area.
   const pad = {
@@ -880,8 +940,7 @@ function renderLineChart(
   }
 
   drawLegendForLayout(ctx, chart, leg, x, y, w, h, px0, py0, pw, ph, titleH + 2);
-  if (chart.catAxisTitle) drawAxisTitle(ctx, chart.catAxisTitle, px0, py0, pw, ph, 'cat', axisFontSz);
-  if (chart.valAxisTitle) drawAxisTitle(ctx, chart.valAxisTitle, px0, py0, pw, ph, 'val', axisFontSz);
+  drawAxisTitles(ctx, chart, x, y, w, h, px0, py0, pw, ph, legLeftW, legBottomH, catTitlePx, valTitlePx);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -903,9 +962,10 @@ function renderAreaChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
   const legLeftW   = leg?.side === 'l' ? leg.reserveW : 0;
   const legTopH    = leg?.side === 't' ? leg.reserveH : 0;
   const legBottomH = leg?.side === 'b' ? leg.reserveH : 0;
-  const axisFontSz = Math.max(8, Math.min(10, h * 0.045));
-  const catTitleH  = chart.catAxisTitle ? axisFontSz + 4 : 0;
-  const valTitleW  = chart.valAxisTitle ? axisFontSz + 4 : 0;
+  const catTitlePx = axisTitleFontPx(chart.catAxisTitleFontSizeHpt, h, ptToPx);
+  const valTitlePx = axisTitleFontPx(chart.valAxisTitleFontSizeHpt, h, ptToPx);
+  const catTitleH  = chart.catAxisTitle ? catTitlePx + 6 : 0;
+  const valTitleW  = chart.valAxisTitle ? valTitlePx + 6 : 0;
   const pad = {
     t: titleH + legTopH + h * 0.02,
     r: legRightW + w * 0.05,
@@ -1004,8 +1064,7 @@ function renderAreaChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
   }
 
   drawLegendForLayout(ctx, chart, leg, x, y, w, h, px0, py0, pw, ph, titleH + 2);
-  if (chart.catAxisTitle) drawAxisTitle(ctx, chart.catAxisTitle, px0, py0, pw, ph, 'cat', axisFontSz);
-  if (chart.valAxisTitle) drawAxisTitle(ctx, chart.valAxisTitle, px0, py0, pw, ph, 'val', axisFontSz);
+  drawAxisTitles(ctx, chart, x, y, w, h, px0, py0, pw, ph, legLeftW, legBottomH, catTitlePx, valTitlePx);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1259,9 +1318,10 @@ function renderScatterChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r:
   const legLeftW   = leg?.side === 'l' ? leg.reserveW : 0;
   const legTopH    = leg?.side === 't' ? leg.reserveH : 0;
   const legBottomH = leg?.side === 'b' ? leg.reserveH : 0;
-  const axisFontSz = Math.max(8, Math.min(10, h * 0.045));
-  const catTitleH  = chart.catAxisTitle ? axisFontSz + 4 : 0;
-  const valTitleW  = chart.valAxisTitle ? axisFontSz + 4 : 0;
+  const catTitlePx = axisTitleFontPx(chart.catAxisTitleFontSizeHpt, h, ptToPx);
+  const valTitlePx = axisTitleFontPx(chart.valAxisTitleFontSizeHpt, h, ptToPx);
+  const catTitleH  = chart.catAxisTitle ? catTitlePx + 6 : 0;
+  const valTitleW  = chart.valAxisTitle ? valTitlePx + 6 : 0;
 
   // Title placement — manual layout overrides the auto position.
   if (chart.title) {
@@ -1543,8 +1603,7 @@ function renderScatterChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r:
   }
 
   drawLegendForLayout(ctx, chart, leg, x, y, w, h, px0, py0, pw, ph, titleH + 2);
-  if (chart.catAxisTitle) drawAxisTitle(ctx, chart.catAxisTitle, px0, py0, pw, ph, 'cat', axisFontSz);
-  if (chart.valAxisTitle) drawAxisTitle(ctx, chart.valAxisTitle, px0, py0, pw, ph, 'val', axisFontSz);
+  drawAxisTitles(ctx, chart, x, y, w, h, px0, py0, pw, ph, legLeftW, legBottomH, catTitlePx, valTitlePx);
 }
 
 /** Draw a single ECMA-376 §21.2.2.32 marker shape centered at `(cx, cy)`.
@@ -2057,6 +2116,22 @@ export function renderChart(
   if (chart.chartBg) {
     ctx.fillStyle = `#${chart.chartBg}`;
     ctx.fillRect(x, y, w, h);
+  }
+
+  // Explicit chart border — drawn ONLY when the XML declared a paintable
+  // `<c:chartSpace><c:spPr><a:ln><a:solidFill>` (chartBorderColor is null
+  // otherwise; there is no default Excel-style frame). Width comes from
+  // `<a:ln@w>` (EMU → pt → px); absent width falls back to a 1px hairline.
+  if (chart.chartBorderColor) {
+    ctx.save();
+    ctx.strokeStyle = `#${chart.chartBorderColor}`;
+    ctx.lineWidth = chart.chartBorderWidthEmu
+      ? Math.max(0.5, chart.chartBorderWidthEmu / EMU_PER_PT) * ptToPx
+      : 1;
+    // Inset by half the line width so the full stroke stays inside the rect.
+    const lw = ctx.lineWidth;
+    ctx.strokeRect(x + lw / 2, y + lw / 2, w - lw, h - lw);
+    ctx.restore();
   }
 
   if (chart.series.length === 0) {

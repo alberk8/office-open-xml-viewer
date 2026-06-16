@@ -6297,8 +6297,13 @@ fn parse_media(
     let av = nv_pr
         .children()
         .find(|n| n.is_element() && matches!(n.tag_name().name(), "videoFile" | "audioFile"));
-    let av_kind: Option<&str> =
-        av.map(|n| if n.tag_name().name() == "videoFile" { "video" } else { "audio" });
+    let av_kind: Option<&str> = av.map(|n| {
+        if n.tag_name().name() == "videoFile" {
+            "video"
+        } else {
+            "audio"
+        }
+    });
     let av_embed = av.and_then(|n| attr_r(&n, "embed"));
     let av_link = av.and_then(|n| attr_r(&n, "link"));
 
@@ -6324,24 +6329,22 @@ fn parse_media(
         (av_kind, av_link),
         (None, p14_link),
     ];
-    let (media_kind, media_path, mime) = candidates
-        .into_iter()
-        .find_map(|(kind_hint, rid)| {
-            let rid = rid?;
-            let target = rels.get(&rid)?;
-            if target.is_empty() {
-                return None; // malformed rel with an empty Target (External links carry a non-empty URL)
-            }
-            let path = resolve_path(slide_dir, target);
-            let mime = mime_from_ext(&path);
-            let kind = match kind_hint {
-                Some(k) => k.to_string(),
-                None if mime.starts_with("video/") => "video".to_string(),
-                None if mime.starts_with("audio/") => "audio".to_string(),
-                None => return None, // p14:media with an unknown MIME — try the next ref
-            };
-            Some((kind, path, mime))
-        })?;
+    let (media_kind, media_path, mime) = candidates.into_iter().find_map(|(kind_hint, rid)| {
+        let rid = rid?;
+        let target = rels.get(&rid)?;
+        if target.is_empty() {
+            return None; // malformed rel with an empty Target (External links carry a non-empty URL)
+        }
+        let path = resolve_path(slide_dir, target);
+        let mime = mime_from_ext(&path);
+        let kind = match kind_hint {
+            Some(k) => k.to_string(),
+            None if mime.starts_with("video/") => "video".to_string(),
+            None if mime.starts_with("audio/") => "audio".to_string(),
+            None => return None, // p14:media with an unknown MIME — try the next ref
+        };
+        Some((kind, path, mime))
+    })?;
 
     // Geometry
     let sp_pr = child(pic_node, "spPr")?;

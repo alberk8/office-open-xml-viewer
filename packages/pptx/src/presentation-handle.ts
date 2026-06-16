@@ -76,7 +76,13 @@ export async function createPresentationHandle(
     } catch {
       continue;
     }
-    const typed = new Blob([blob], { type: el.mimeType || blob.type });
+    // getMedia already types the blob in main mode; re-wrapping copies the whole
+    // payload, so only do it when the type is actually missing/wrong (worker mode
+    // returns an untyped blob). This avoids duplicating large media — a 200 MB
+    // embedded video would otherwise be copied just to stamp its MIME type.
+    const desiredType = el.mimeType || blob.type;
+    const typed =
+      blob.type === desiredType ? blob : new Blob([blob], { type: desiredType });
     const url = URL.createObjectURL(typed);
     const media: HTMLVideoElement | HTMLAudioElement = el.mediaKind === 'video'
       ? document.createElement('video')

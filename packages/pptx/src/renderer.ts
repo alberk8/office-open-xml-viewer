@@ -65,6 +65,7 @@ import {
   type LineVisualOrder,
 } from './bidi-line';
 import { fitCjkLine, type MeasuredChar } from './cjk-wrap.js';
+import { justifyLine } from './text-justify';
 
 /** Theme font context threaded through the render call chain. */
 export interface RenderContext {
@@ -1859,6 +1860,7 @@ function renderTextBody(
     textX: number;        // canvas X for text
     textMaxW: number;     // max wrap width
     alignment: string;
+    isLastLine: boolean;
     para: Paragraph;
   }
 
@@ -2032,6 +2034,7 @@ function renderTextBody(
         bulletFont, bulletColor, bulletX,
         textX, textMaxW,
         alignment: para.alignment,
+        isLastLine: isLast,
         para,
       });
       totalHeight += linePx + topGap;
@@ -2147,7 +2150,7 @@ function renderTextBody(
   let entriesInCol = 0;
 
   for (const entry of allLines) {
-    const { line, linePx, lineHeight, topGapPx, textXOffset, bulletLabel, bulletFont, bulletColor, alignment } = entry;
+    const { line, linePx, lineHeight, topGapPx, textXOffset, bulletLabel, bulletFont, bulletColor, alignment, isLastLine } = entry;
     // Balanced column advance: when the current column has reached its share
     // of paragraphs, jump to the next one. PowerPoint never breaks a single
     // line across columns and never spills past the last column — anything
@@ -2222,16 +2225,32 @@ function renderTextBody(
       penX = effectiveTextX;
     }
 
+    // Justified alignment (ECMA-376 §20.1.10.59 ST_TextAlignType): just/justLow
+    // fill the column by widening inter-word + inter-CJK gaps with the
+    // paragraph's last line left natural; dist/thaiDist do the same on every
+    // line. Segments are merged by style in layout, so justifyLine splits each
+    // line inside its text at the gaps and returns draw pieces carrying `jext`
+    // (px to advance after each piece). penX already starts at the left edge
+    // (the `else` above). Disabled under bidi (visual≠logical order).
+    const justifyMode =
+      alignment === 'just' || alignment === 'justLow' ? 'just' as const
+      : alignment === 'dist' || alignment === 'thaiDist' ? 'dist' as const
+      : null;
+    const drawSegs = justifyMode && !paraNeedsBidi
+      ? justifyLine(line.segments, textMaxW - textXOffset, lineWidth, justifyMode, isLastLine)
+      : null;
+    const segs = drawSegs ?? line.segments;
+
     // Visual draw order: under bidi, reorder segments per UAX#9 (rule L2) and
     // draw each with ctx.direction matching its resolved direction. textAlign
     // is already 'left', so penX stays the segment's left edge.
     const visual: LineVisualOrder | null = paraNeedsBidi
       ? computeLineVisualOrder(line.segments, baseRtl)
       : null;
-    const segCount = line.segments.length;
+    const segCount = segs.length;
     for (let vi = 0; vi < segCount; vi++) {
       const li = visual ? visual.order[vi] : vi;
-      const seg = line.segments[li];
+      const seg = segs[li];
       const segRtl = visual ? visual.rtl[li] : false;
       if (paraNeedsBidi) ctx.direction = segRtl ? 'rtl' : 'ltr';
       // ── Equation segment: draw the cached image instead of text ──────────
@@ -2245,6 +2264,7 @@ function renderTextBody(
           ctx.drawImage(img, penX, top, w, h);
         }
         penX += w;
+        penX += (seg as { jext?: number }).jext ?? 0;
         continue;
       }
       ctx.font = seg.font;
@@ -2374,6 +2394,7 @@ function renderTextBody(
       }
 
       penX += segW;
+      penX += (seg as { jext?: number }).jext ?? 0;
     }
     if (paraNeedsBidi) ctx.direction = 'ltr'; // reset before tab-stop / next line
 

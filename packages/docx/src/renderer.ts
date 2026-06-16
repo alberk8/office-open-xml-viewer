@@ -2230,13 +2230,27 @@ function renderParagraph(
     // space, and is only applied when the line is a candidate for justification
     // (jc=both/distribute, not the last line unless distribute).
     let extraPerSpace = 0;
+    // First content segment in reading order. Leading-whitespace segments before
+    // it (a paragraph's 字下げ indent) are NOT stretched by justification — Word
+    // keeps the indent fixed and distributes slack only across the line content
+    // (§17.18.44). Only meaningful for LTR: under bidi the logical-leading
+    // segment is not the visually-leading one, so leave the skip off (0) there.
+    let firstContentSi = 0;
     if (applyJustify) {
+      if (!paraNeedsBidi) {
+        for (let i = 0; i < segCount; i++) {
+          const seg = line.segments[i];
+          if (!('text' in seg) || /\S/.test((seg as LayoutTextSeg).text)) { firstContentSi = i; break; }
+        }
+      }
       let totalTrailingSpaces = 0;
       for (let si = 0; si < segCount; si++) {
         const seg = line.segments[si];
         // Trailing spaces on the visually-final segment don't stretch (they sit
         // at the physical line end) — same domain as the draw-loop skip below.
         if (si === lastDrawnSi) continue;
+        // Leading 字下げ whitespace is not an inter-word gap — don't stretch it.
+        if (si < firstContentSi) continue;
         if ('text' in seg) totalTrailingSpaces += countTrailingSpaces((seg as LayoutTextSeg).text);
       }
       const slack = effAvailW - (x - lineLeft) - lineWidth;
@@ -2368,8 +2382,9 @@ function renderParagraph(
       x += s.measuredWidth;
       // Inter-word justification slack (applied AFTER the segment so the next
       // segment starts at a shifted baseline). Skip on the final segment —
-      // trailing spaces at line end don't participate in stretching.
-      if (extraPerSpace > 0 && !isLastSeg) {
+      // trailing spaces at line end don't participate in stretching — and on the
+      // leading 字下げ whitespace (si < firstContentSi), which stays fixed.
+      if (extraPerSpace > 0 && !isLastSeg && si >= firstContentSi) {
         const trailing = countTrailingSpaces(s.text);
         if (trailing > 0) x += trailing * extraPerSpace;
       }
@@ -2895,6 +2910,45 @@ export function kinsokuAdjustedSplit(
     return splitAt;
   }
   return s;
+}
+
+/**
+ * Cross-run 行頭禁則 (追い出し) helper. `kinsokuAdjustedSplit` only retracts
+ * WITHIN the run being wrapped; when a line-start-forbidden char is the FIRST
+ * code point of its run, the preceding character lives in an earlier segment on
+ * the current line, so the offending char would be orphaned at the next line's
+ * start. Given the current line's last text segment's code points (`lastChars`)
+ * and that the overflowing run begins with a 行頭禁則 char, decide how many
+ * trailing graphemes of `lastChars` to pull down so they lead the next line
+ * ahead of that run.
+ *
+ * Returns the count k (≥1) to retract, or 0 to leave the line as-is (fall back).
+ * Mirrors `kinsokuAdjustedSplit`'s bounded loop and re-validation: the pulled-down
+ * graphemes must (1) start with a non-whitespace char that is itself NOT
+ * line-start-forbidden (else the violation just moves), and (2) leave the
+ * current line ending on a char that is NOT line-end-forbidden. `minKeep` is the
+ * fewest code points that must remain on the current line (0 when other segments
+ * precede this one, 1 when it is the only segment — never empty the line).
+ *
+ * ECMA-376 §17.3.1.16 (kinsoku toggle + default forbidden sets); §17.15.1.58/.59
+ * (`noLineBreaksAfter` / `noLineBreaksBefore` custom sets).
+ */
+export function crossRunKinsokuRetract(
+  lastChars: string[],
+  rules: KinsokuRules,
+  minKeep: number,
+): number {
+  if (!rules.enabled) return 0;
+  const maxRetract = lastChars.length - minKeep;
+  for (let k = 1; k <= maxRetract; k++) {
+    const lead = lastChars[lastChars.length - k]; // becomes the next line's start
+    if (/\s/.test(lead)) continue; // never orphan a whitespace at the line start
+    if (rules.lineStartForbidden.has(lead.codePointAt(0)!)) continue; // still illegal — pull more
+    const end = lastChars[lastChars.length - k - 1]; // new current-line end (may be undefined)
+    if (end && rules.lineEndForbidden.has(end.codePointAt(0)!)) continue; // would dangle an opener
+    return k;
+  }
+  return 0;
 }
 
 /**
@@ -3435,9 +3489,40 @@ function layoutLines(
         const tail = s.text.slice(prefix.length);
         if (tail) queue.unshift({ ...s, text: tail, measuredWidth: 0 });
       } else if (currentLine.length > 0) {
-        // No prefix fits but line has content — flush and retry on a fresh line
+        // No prefix of `s` fits. If `s` would lead the next line with a 行頭禁則
+        // char, kinsokuAdjustedSplit can't fix it from within `s` (the offending
+        // char is its first); pull trailing graphemes of the current line's last
+        // text segment down so they lead the next line ahead of `s` — cross-run
+        // 追い出し (§17.3.1.16). See crossRunKinsokuRetract for the bounded,
+        // re-validating, whitespace-guarded retraction count.
+        let retracted: LayoutTextSeg | null = null;
+        const sFirstCp = s.text.codePointAt(0);
+        const lastSeg = currentLine[currentLine.length - 1];
+        if (sFirstCp !== undefined && kinsoku.lineStartForbidden.has(sFirstCp) && 'text' in lastSeg) {
+          const lastText = lastSeg as LayoutTextSeg;
+          const chars = [...lastText.text];
+          const minKeep = currentLine.length > 1 ? 0 : 1;
+          const k = crossRunKinsokuRetract(chars, kinsoku, minKeep);
+          if (k > 0) {
+            const headText = chars.slice(0, chars.length - k).join('');
+            const tailText = chars.slice(chars.length - k).join('');
+            retracted = { ...lastText, text: tailText, measuredWidth: measureText({ ...lastText, text: tailText }).width };
+            if (headText) {
+              const headW = measureText({ ...lastText, text: headText }).width;
+              currentWidth -= lastText.measuredWidth - headW;
+              currentLine[currentLine.length - 1] = { ...lastText, text: headText, measuredWidth: headW };
+            } else {
+              // Whole last segment moves down. Line metrics (ascent/descent) are
+              // not recomputed; the retracted graphemes share the line's font in
+              // practice, so the flushed box height is unaffected.
+              currentWidth -= lastText.measuredWidth;
+              currentLine.pop();
+            }
+          }
+        }
         flush();
         queue.unshift(s);
+        if (retracted) queue.unshift(retracted);
       } else {
         // Empty line and not even one char fits — force-fit one char to guarantee progress
         const firstChar = [...s.text][0] ?? '';

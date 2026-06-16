@@ -2401,6 +2401,16 @@ function renderTextBody(
 const IMAGE_BITMAP_CACHE_MAX = 256;
 const imageBitmapCache = new Map<string, Promise<ImageBitmap>>();
 
+// Decoded-SVG cache keyed by the `data:image/svg+xml;base64,…` URL. SVG
+// pictures (Microsoft's svgBlip extension) are decoded via an <img> element
+// (createImageBitmap cannot rasterize SVG in every browser), and the same
+// picture is re-drawn on every render. Cache the decoded HTMLImageElement
+// (the Promise, so concurrent first-renders dedupe). Unlike ImageBitmap, an
+// HTMLImageElement holds no GPU resource that must be released, so eviction
+// just drops the entry — there is nothing to `.close()`. Bounded FIFO.
+const SVG_IMAGE_CACHE_MAX = 256;
+const svgImageCache = new Map<string, Promise<HTMLImageElement>>();
+
 /** Local view of the parsed `<a:sp3d>` (1:1 with the Sp3d TS type). */
 interface Sp3dLike {
   extrusionH?: number;
@@ -2719,6 +2729,48 @@ function getCachedBitmap(dataUrl: string): Promise<ImageBitmap> {
   return p;
 }
 
+/**
+ * Decode a `data:image/svg+xml;base64,…` URL to an HTMLImageElement, cached by
+ * URL. Used for pictures that carry Microsoft's svgBlip extension so the vector
+ * original is drawn instead of the rasterized PNG fallback. Rejects (so callers
+ * can fall back to the PNG) if the SVG fails to load. The returned image is
+ * drawable with `ctx.drawImage` exactly like an ImageBitmap; it must NOT be
+ * `.close()`d (only ImageBitmaps own a releasable resource).
+ */
+function getCachedSvgImage(dataUrl: string): Promise<HTMLImageElement> {
+  const existing = svgImageCache.get(dataUrl);
+  if (existing) {
+    // Refresh LRU position.
+    svgImageCache.delete(dataUrl);
+    svgImageCache.set(dataUrl, existing);
+    return existing;
+  }
+  const p = new Promise<HTMLImageElement>((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => {
+      // `decode()` guarantees the bitmap is ready before the first draw, so the
+      // synchronous paint pass never draws an undecoded image. Fall back to the
+      // already-fired load event if decode() is unavailable / rejects.
+      if (typeof img.decode === 'function') {
+        img.decode().then(() => resolve(img)).catch(() => resolve(img));
+      } else {
+        resolve(img);
+      }
+    };
+    img.onerror = () => reject(new Error('SVG image failed to load'));
+    img.src = dataUrl;
+  });
+  // Don't poison the cache on a transient decode failure.
+  p.catch(() => svgImageCache.delete(dataUrl));
+  svgImageCache.set(dataUrl, p);
+  if (svgImageCache.size > SVG_IMAGE_CACHE_MAX) {
+    // HTMLImageElement holds no GPU handle — just drop the oldest entry.
+    const oldestKey = svgImageCache.keys().next().value as string;
+    svgImageCache.delete(oldestKey);
+  }
+  return p;
+}
+
 /** Poster bitmaps decoded once per media element; renderSlide's prefetch pass
  *  warms this so the sequential draw loop never waits on the network. Keyed by
  *  element identity (not posterPath), so the bitmap releases when the slide
@@ -2749,7 +2801,21 @@ async function renderPicture(
   scale: number
 ) {
   try {
-    const bitmap = await getCachedBitmap(el.dataUrl);
+    // Prefer the vector original (Microsoft svgBlip extension); fall back to the
+    // PNG raster on any SVG decode failure. `bitmap` widens to the union of the
+    // two drawable sources — both expose numeric .width/.height (used for the
+    // srcRect crop below) and both are valid `ctx.drawImage` sources, so every
+    // downstream path stays unchanged.
+    let bitmap: ImageBitmap | HTMLImageElement;
+    if (el.svgDataUrl != null) {
+      try {
+        bitmap = await getCachedSvgImage(el.svgDataUrl);
+      } catch {
+        bitmap = await getCachedBitmap(el.dataUrl);
+      }
+    } else {
+      bitmap = await getCachedBitmap(el.dataUrl);
+    }
     ctx.save();
     if (el.alpha != null) ctx.globalAlpha *= el.alpha;
     const x = emuToPx(el.x, scale);

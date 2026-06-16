@@ -187,13 +187,33 @@ export function applySoftEdge(
   // 1. Paint the full shape (fill + stroke) onto the aux canvas.
   paintShape(c);
 
-  // 2. Intersect with a blurred FILLED silhouette to feather the perimeter.
-  //    ECMA gives `rad` as the blur radius directly.
+  // 2. Render the SOLID silhouette onto a separate aux layer (unblurred). The
+  //    mask callback may apply a clip to the shape's own outline; that is fine
+  //    here because the blur is NOT applied during this fill.
+  // 3. Feather by compositing that silhouette through a blur filter via
+  //    drawImage. Blurring a whole layer lets the kernel sample the transparent
+  //    surround, producing a real edge falloff. (Blurring a *clipped filtered
+  //    fill* instead — the previous approach — produces no feather at all: the
+  //    clip limits the filter's sample region to the solid fill, so there is
+  //    nothing transparent to blur toward.)
+  const maskAux = createAuxCanvas(deviceW, deviceH);
+  const mc = maskAux ? get2d(maskAux) : null;
   c.save();
   c.globalCompositeOperation = 'destination-in';
   c.filter = `blur(${radius}px)`;
-  c.fillStyle = '#000';
-  mask(c);
+  if (maskAux && mc) {
+    mc.fillStyle = '#000';
+    mask(mc);
+    // maskAux already holds the silhouette in device-pixel space (mask applies
+    // the live transform itself), so composite it 1:1 — reset c's transform,
+    // which paintShape left set to the live matrix.
+    c.setTransform(1, 0, 0, 1, 0, 0);
+    c.drawImage(maskAux as CanvasImageSource, 0, 0);
+  } else {
+    // Fallback when a second aux canvas is unavailable: blur the fill in place.
+    c.fillStyle = '#000';
+    mask(c);
+  }
   c.restore();
 
   // 3. Blit the feathered shape back to the live context.

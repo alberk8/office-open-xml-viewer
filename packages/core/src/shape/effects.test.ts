@@ -23,6 +23,7 @@ class RecordingCtx {
   restore() { this.ops.push({ op: 'restore' }); }
   translate(x: number, y: number) { this.ops.push({ op: 'translate', args: [x, y] }); }
   scale(x: number, y: number) { this.ops.push({ op: 'scale', args: [x, y] }); }
+  setTransform(...a: number[]) { this.ops.push({ op: 'setTransform', args: a }); }
   fillRect(...a: number[]) { this.ops.push({ op: 'fillRect', args: a }); }
   drawImage(...a: unknown[]) { this.ops.push({ op: 'drawImage', args: a }); }
   createLinearGradient() {
@@ -131,15 +132,24 @@ describe('applySoftEdge (ECMA-376 §20.1.8.53)', () => {
     expect(live.ops.some(o => o.op === 'drawImage')).toBe(false);
   });
 
-  it('feathers via a blurred destination-in mask then blits once', () => {
+  it('feathers by blurring a separate silhouette layer, then blits once', () => {
     const live = new RecordingCtx();
     const paint = vi.fn((c: unknown) => { (c as RecordingCtx).ops.push({ op: 'paintShape' }); });
     const se: SoftEdge = { radius: 28575 }; // 3 px
     applySoftEdge(live as never, paint as never, BBOX, se, SCALE, DEVICE_W, DEVICE_H);
-    expect(fake.auxCtxs).toHaveLength(1);
-    const aux = fake.auxCtxs[0];
-    // Two silhouette paints on aux: full shape, then blurred mask.
-    expect(aux.ops.filter(o => o.op === 'paintShape')).toHaveLength(2);
+    // Two aux canvases: the shape layer and the silhouette mask layer. The mask
+    // is rendered solid (unblurred) on its own layer, then composited through
+    // the blur via drawImage so the kernel samples the transparent surround —
+    // a clipped filtered fill on the shape layer would feather nothing.
+    expect(fake.auxCtxs).toHaveLength(2);
+    const [shapeAux, maskAux] = fake.auxCtxs;
+    // Shape layer: one full-shape paint. Mask layer: one silhouette paint.
+    expect(shapeAux.ops.filter(o => o.op === 'paintShape')).toHaveLength(1);
+    expect(maskAux.ops.filter(o => o.op === 'paintShape')).toHaveLength(1);
+    // Shape layer composites the blurred silhouette in via destination-in 1:1
+    // (transform reset), then the feathered result blits once onto live.
+    expect(shapeAux.ops.some(o => o.op === 'setTransform')).toBe(true);
+    expect(shapeAux.ops.filter(o => o.op === 'drawImage')).toHaveLength(1);
     expect(live.ops.filter(o => o.op === 'drawImage')).toHaveLength(1);
   });
 });

@@ -292,6 +292,37 @@ pub(crate) fn parse_chart_xml(
         }
         resolved
     });
+    // Explicit chart border from `<c:chartSpace><c:spPr><a:ln>` (ECMA-376
+    // §21.2.2.5 / DrawingML §20.1.2.2.24). Per the locked policy we draw a
+    // border ONLY when the XML explicitly declares a paintable line:
+    //   - no `<a:ln>` → None (no default Excel-style border);
+    //   - `<a:ln><a:noFill/>` → border explicitly off → color None;
+    //   - `<a:ln><a:solidFill><a:srgbClr val=…>` → Some(hex).
+    // schemeClr is intentionally left unresolved here (the workbook theme is
+    // not wired through to chart border parsing yet — a known limitation).
+    let chart_ln = chart_sp_pr.and_then(|sp| {
+        sp.children()
+            .find(|n| n.tag_name().name() == "ln" && n.tag_name().namespace() == Some(a_ns))
+    });
+    let chart_border_width_emu =
+        chart_ln.and_then(|ln| ln.attribute("w").and_then(|v| v.parse::<u32>().ok()));
+    let chart_border_color = chart_ln.and_then(|ln| {
+        // An explicit `<a:noFill/>` turns the border off → no color.
+        if ln
+            .children()
+            .any(|n| n.is_element() && n.tag_name().name() == "noFill")
+        {
+            return None;
+        }
+        // Only srgbClr inside a direct `<a:solidFill>` is honored.
+        let fill = ln
+            .children()
+            .find(|n| n.is_element() && n.tag_name().name() == "solidFill")?;
+        let srgb = fill
+            .children()
+            .find(|n| n.is_element() && n.tag_name().name() == "srgbClr")?;
+        srgb.attribute("val").map(|s| s.to_string())
+    });
 
     // `<c:title><c:layout><c:manualLayout>` (ECMA-376 §21.2.2.27).
     let title_manual_layout = chart_root
@@ -325,6 +356,15 @@ pub(crate) fn parse_chart_xml(
     let mut show_data_labels = false;
     let mut cat_axis_title: Option<String> = None;
     let mut val_axis_title: Option<String> = None;
+    // Axis-title run properties (sz/b/color). Only populated when the axis has a
+    // `<c:title>` — the same helpers used for the chart title work unchanged on
+    // an axis node because they scope to the node's direct-child `<c:title>`.
+    let mut cat_axis_title_size: Option<i32> = None;
+    let mut cat_axis_title_bold: Option<bool> = None;
+    let mut cat_axis_title_color: Option<String> = None;
+    let mut val_axis_title_size: Option<i32> = None;
+    let mut val_axis_title_bold: Option<bool> = None;
+    let mut val_axis_title_color: Option<String> = None;
     let mut cat_axis_font_size_hpt: Option<i32> = None;
     let mut val_axis_font_size_hpt: Option<i32> = None;
     let mut val_axis_format_code: Option<String> = None;
@@ -393,7 +433,13 @@ pub(crate) fn parse_chart_xml(
         match elem_name {
             "catAx" => {
                 if cat_axis_title.is_none() {
-                    cat_axis_title = extract_chart_title(&child, c_ns, a_ns);
+                    let (t, sz, b, c) = extract_axis_title_with_props(&child, c_ns, a_ns);
+                    if t.is_some() {
+                        cat_axis_title = t;
+                        cat_axis_title_size = sz;
+                        cat_axis_title_bold = b;
+                        cat_axis_title_color = c;
+                    }
                 }
                 if cat_axis_font_size_hpt.is_none() {
                     cat_axis_font_size_hpt = extract_axis_tick_label_size(&child, c_ns, a_ns);
@@ -458,6 +504,19 @@ pub(crate) fn parse_chart_xml(
                     .unwrap_or("");
                 let is_x_axis = matches!(ax_pos, "b" | "t");
                 if is_x_axis {
+                    // A scatter chart's bottom `<c:valAx>` is the horizontal axis,
+                    // so its title is the cat-axis (X) title. Without this the
+                    // X-axis title of every scatter chart was dropped (the catAx
+                    // branch above never runs for scatter — there is no catAx).
+                    if cat_axis_title.is_none() {
+                        let (t, sz, b, c) = extract_axis_title_with_props(&child, c_ns, a_ns);
+                        if t.is_some() {
+                            cat_axis_title = t;
+                            cat_axis_title_size = sz;
+                            cat_axis_title_bold = b;
+                            cat_axis_title_color = c;
+                        }
+                    }
                     if cat_axis_format_code.is_none() {
                         cat_axis_format_code = extract_axis_format_code(&child, c_ns);
                     }
@@ -507,7 +566,13 @@ pub(crate) fn parse_chart_xml(
                     }
                 } else {
                     if val_axis_title.is_none() {
-                        val_axis_title = extract_chart_title(&child, c_ns, a_ns);
+                        let (t, sz, b, c) = extract_axis_title_with_props(&child, c_ns, a_ns);
+                        if t.is_some() {
+                            val_axis_title = t;
+                            val_axis_title_size = sz;
+                            val_axis_title_bold = b;
+                            val_axis_title_color = c;
+                        }
                     }
                     if val_axis_font_size_hpt.is_none() {
                         val_axis_font_size_hpt = extract_axis_tick_label_size(&child, c_ns, a_ns);
@@ -771,6 +836,14 @@ pub(crate) fn parse_chart_xml(
         title_manual_layout,
         plot_area_manual_layout,
         radar_style,
+        cat_axis_title_size,
+        cat_axis_title_bold,
+        cat_axis_title_color,
+        val_axis_title_size,
+        val_axis_title_bold,
+        val_axis_title_color,
+        chart_border_color,
+        chart_border_width_emu,
     })
 }
 
@@ -1109,6 +1182,26 @@ pub(crate) fn extract_chart_title(
         None
     } else {
         Some(text)
+    }
+}
+
+/// Extract an axis title's text + run props from a `<c:catAx>`/`<c:valAx>` node.
+/// Reuses the chart-title helpers (which scope to the node's direct-child
+/// `<c:title>`); run props are resolved only when title text is present.
+/// Returns (text, size_hpt, bold, color_hex).
+fn extract_axis_title_with_props(
+    axis_node: &roxmltree::Node,
+    c_ns: &str,
+    a_ns: &str,
+) -> (Option<String>, Option<i32>, Option<bool>, Option<String>) {
+    match extract_chart_title(axis_node, c_ns, a_ns) {
+        None => (None, None, None, None),
+        Some(text) => (
+            Some(text),
+            extract_chart_title_size(axis_node, c_ns, a_ns),
+            extract_chart_title_bold(axis_node, c_ns, a_ns),
+            extract_chart_title_color(axis_node, c_ns, a_ns),
+        ),
     }
 }
 
@@ -2248,5 +2341,198 @@ mod label_color_tests {
         let doc = Document::parse(&xml).unwrap();
         let s = parse_chart_series(&doc.root_element(), C_NS, "bar", false, &theme());
         assert_eq!(s.label_color, None);
+    }
+}
+
+#[cfg(test)]
+mod axis_title_and_border_tests {
+    use super::*;
+
+    const C_NS: &str = "http://schemas.openxmlformats.org/drawingml/2006/chart";
+    const A_NS: &str = "http://schemas.openxmlformats.org/drawingml/2006/main";
+
+    fn theme() -> Vec<String> {
+        vec!["111111".into(); 12]
+    }
+
+    /// A bar chartSpace whose axis titles + optional chartSpace spPr are
+    /// supplied verbatim. `cat_title` / `val_title` are full `<c:title>…`
+    /// fragments (or empty), `sp_pr` is a full `<c:spPr>…` fragment (or empty).
+    fn bar_chart_xml(cat_title: &str, val_title: &str, sp_pr: &str) -> String {
+        format!(
+            r#"<c:chartSpace xmlns:c="{c}" xmlns:a="{a}">
+  {sp}
+  <c:chart>
+    <c:plotArea>
+      <c:layout/>
+      <c:barChart>
+        <c:barDir val="col"/>
+        <c:grouping val="clustered"/>
+        <c:ser>
+          <c:idx val="0"/><c:order val="0"/>
+          <c:cat><c:strRef><c:strCache>
+            <c:pt idx="0"><c:v>A</c:v></c:pt>
+            <c:pt idx="1"><c:v>B</c:v></c:pt>
+          </c:strCache></c:strRef></c:cat>
+          <c:val><c:numRef><c:numCache>
+            <c:pt idx="0"><c:v>3</c:v></c:pt>
+            <c:pt idx="1"><c:v>5</c:v></c:pt>
+          </c:numCache></c:numRef></c:val>
+        </c:ser>
+      </c:barChart>
+      <c:catAx>
+        <c:axPos val="b"/>
+        {cat}
+      </c:catAx>
+      <c:valAx>
+        <c:axPos val="l"/>
+        {val}
+      </c:valAx>
+    </c:plotArea>
+  </c:chart>
+</c:chartSpace>"#,
+            c = C_NS,
+            a = A_NS,
+            sp = sp_pr,
+            cat = cat_title,
+            val = val_title,
+        )
+    }
+
+    /// Fixture A — a `valAx` title with `sz="1800" b="1"` → size Some(1800),
+    /// bold Some(true). The cat axis has no title.
+    #[test]
+    fn fixture_a_val_axis_title_size_and_bold() {
+        let val_title = r#"<c:title><c:tx><c:rich><a:p><a:pPr>
+            <a:defRPr sz="1800" b="1"/>
+          </a:pPr><a:r><a:rPr sz="1800" b="1"/><a:t>Revenue</a:t></a:r></a:p></c:rich></c:tx></c:title>"#;
+        let xml = bar_chart_xml("", val_title, "");
+        let chart = parse_chart_xml(&xml, C_NS, A_NS, &theme()).expect("chart parses");
+        assert_eq!(chart.val_axis_title.as_deref(), Some("Revenue"));
+        assert_eq!(chart.val_axis_title_size, Some(1800));
+        assert_eq!(chart.val_axis_title_bold, Some(true));
+    }
+
+    /// Fixture B — axis title with `sz="1800"` only (no `b`) → bold None.
+    #[test]
+    fn fixture_b_size_only_leaves_bold_none() {
+        let val_title = r#"<c:title><c:tx><c:rich><a:p>
+            <a:r><a:rPr sz="1800"/><a:t>Units</a:t></a:r></a:p></c:rich></c:tx></c:title>"#;
+        let xml = bar_chart_xml("", val_title, "");
+        let chart = parse_chart_xml(&xml, C_NS, A_NS, &theme()).expect("chart parses");
+        assert_eq!(chart.val_axis_title_size, Some(1800));
+        assert_eq!(chart.val_axis_title_bold, None);
+    }
+
+    /// Fixture A/cat — confirm the cat-axis path populates its own fields too
+    /// (the renderer fix touches both axes uniformly).
+    #[test]
+    fn cat_axis_title_size_and_color() {
+        let cat_title = r#"<c:title><c:tx><c:rich><a:p>
+            <a:r><a:rPr sz="1800"><a:solidFill><a:srgbClr val="ff0000"/></a:solidFill></a:rPr><a:t>Month</a:t></a:r></a:p></c:rich></c:tx></c:title>"#;
+        let xml = bar_chart_xml(cat_title, "", "");
+        let chart = parse_chart_xml(&xml, C_NS, A_NS, &theme()).expect("chart parses");
+        assert_eq!(chart.cat_axis_title.as_deref(), Some("Month"));
+        assert_eq!(chart.cat_axis_title_size, Some(1800));
+        assert_eq!(chart.cat_axis_title_color.as_deref(), Some("ff0000"));
+    }
+
+    /// Fixture C — `<c:chartSpace>` with no spPr → no border, no spPr flag.
+    #[test]
+    fn fixture_c_no_sp_pr_no_border() {
+        let xml = bar_chart_xml("", "", "");
+        let chart = parse_chart_xml(&xml, C_NS, A_NS, &theme()).expect("chart parses");
+        assert!(!chart.has_chart_sp_pr);
+        assert_eq!(chart.chart_border_color, None);
+        assert_eq!(chart.chart_border_width_emu, None);
+    }
+
+    /// Fixture D — `<a:ln w="9525"><a:solidFill><a:srgbClr val="808080"/>` →
+    /// color Some("808080"), width Some(9525).
+    #[test]
+    fn fixture_d_explicit_ln_solid_fill_border() {
+        let sp_pr = r#"<c:spPr><a:ln w="9525"><a:solidFill><a:srgbClr val="808080"/></a:solidFill></a:ln></c:spPr>"#;
+        let xml = bar_chart_xml("", "", sp_pr);
+        let chart = parse_chart_xml(&xml, C_NS, A_NS, &theme()).expect("chart parses");
+        assert!(chart.has_chart_sp_pr);
+        assert_eq!(chart.chart_border_color.as_deref(), Some("808080"));
+        assert_eq!(chart.chart_border_width_emu, Some(9525));
+    }
+
+    /// Fixture E — `<a:ln><a:noFill/>` → border explicitly off → color None.
+    #[test]
+    fn fixture_e_ln_nofill_no_border() {
+        let sp_pr = r#"<c:spPr><a:ln w="12700"><a:noFill/></a:ln></c:spPr>"#;
+        let xml = bar_chart_xml("", "", sp_pr);
+        let chart = parse_chart_xml(&xml, C_NS, A_NS, &theme()).expect("chart parses");
+        assert!(chart.has_chart_sp_pr);
+        assert_eq!(chart.chart_border_color, None);
+    }
+
+    /// A scatter chartSpace: two `<c:valAx>` (no `<c:catAx>`); the bottom one
+    /// (`axPos="b"`) is the horizontal/X axis. `x_title`/`y_title` are full
+    /// `<c:title>…` fragments (or empty).
+    fn scatter_chart_xml(x_title: &str, y_title: &str) -> String {
+        format!(
+            r#"<c:chartSpace xmlns:c="{c}" xmlns:a="{a}">
+  <c:chart>
+    <c:plotArea>
+      <c:layout/>
+      <c:scatterChart>
+        <c:scatterStyle val="lineMarker"/>
+        <c:ser>
+          <c:idx val="0"/><c:order val="0"/>
+          <c:xVal><c:numRef><c:numCache>
+            <c:pt idx="0"><c:v>1</c:v></c:pt>
+            <c:pt idx="1"><c:v>2</c:v></c:pt>
+          </c:numCache></c:numRef></c:xVal>
+          <c:yVal><c:numRef><c:numCache>
+            <c:pt idx="0"><c:v>3</c:v></c:pt>
+            <c:pt idx="1"><c:v>5</c:v></c:pt>
+          </c:numCache></c:numRef></c:yVal>
+        </c:ser>
+        <c:axId val="1"/><c:axId val="2"/>
+      </c:scatterChart>
+      <c:valAx>
+        <c:axId val="1"/>
+        <c:axPos val="b"/>
+        {x}
+      </c:valAx>
+      <c:valAx>
+        <c:axId val="2"/>
+        <c:axPos val="l"/>
+        {y}
+      </c:valAx>
+    </c:plotArea>
+  </c:chart>
+</c:chartSpace>"#,
+            c = C_NS,
+            a = A_NS,
+            x = x_title,
+            y = y_title,
+        )
+    }
+
+    /// Regression (sample-30) — a scatter chart's bottom (`axPos="b"`) `<c:valAx>`
+    /// title must map to the cat-axis (horizontal) title with its run props.
+    /// Before the fix the `is_x_axis` branch never called `extract_chart_title`,
+    /// so the X-axis title of every scatter chart silently vanished while the
+    /// Y-axis title rendered fine.
+    #[test]
+    fn scatter_bottom_valax_title_maps_to_cat_axis() {
+        let x_title = r#"<c:title><c:tx><c:rich><a:p>
+            <a:r><a:rPr sz="1800" b="1"/><a:t>Acid/Bromate</a:t></a:r></a:p></c:rich></c:tx></c:title>"#;
+        let y_title = r#"<c:title><c:tx><c:rich><a:p>
+            <a:r><a:rPr sz="1800"/><a:t>Period</a:t></a:r></a:p></c:rich></c:tx></c:title>"#;
+        let xml = scatter_chart_xml(x_title, y_title);
+        let chart = parse_chart_xml(&xml, C_NS, A_NS, &theme()).expect("scatter parses");
+        // Bottom (X) valAx → cat-axis title, bold 18pt.
+        assert_eq!(chart.cat_axis_title.as_deref(), Some("Acid/Bromate"));
+        assert_eq!(chart.cat_axis_title_size, Some(1800));
+        assert_eq!(chart.cat_axis_title_bold, Some(true));
+        // Left (Y) valAx → val-axis title, 18pt not bold.
+        assert_eq!(chart.val_axis_title.as_deref(), Some("Period"));
+        assert_eq!(chart.val_axis_title_size, Some(1800));
+        assert_eq!(chart.val_axis_title_bold, None);
     }
 }

@@ -896,22 +896,37 @@ function layoutParagraph(
       const hasCJK = CJK_RE.test(token);
       if (hasCJK) {
         // Measure each grapheme with its per-char font (latin/ea boundary stays
-        // clean, e.g. "EC市場で…"), then place chars line-by-line with kinsoku
-        // (ECMA-376 §17.15.1.58–.60) so 、。」 never start a line and 「（ never
-        // end one. fitCjkLine reuses core's kinsokuAdjustedSplit.
+        // clean), then place chars according to a:pPr@eaLnBrk (ECMA-376
+        // §21.1.2.2.7, "East Asian Line Break"):
+        //   • eaLnBrk=true (default) → East Asian text MAY break at character
+        //     boundaries, so we wrap char-by-char with kinsoku (§17.15.1.58–.60):
+        //     forbidden leaders never start a line and forbidden followers never
+        //     end one. fitCjkLine reuses core's kinsokuAdjustedSplit.
+        //   • eaLnBrk=false → an East Asian word must NOT be split mid-character.
+        //     The whole token moves to a fresh line if it doesn't fit, but is
+        //     never torn; when wider than the line it overflows and the shape's
+        //     existing clipping handles it.
         //
         // DEFAULT_KINSOKU_RULES is correct for pptx: PresentationML has no custom
         // forbidden-set element (w:noLineBreaksBefore/After are WordprocessingML-only).
-        // Deferred (tracked): a:pPr@eaLnBrk (§21.1.2.2 "East Asian Line Break",
-        // default true) is not yet parsed; eaLnBrk="0" means an East-Asian word must
-        // not be broken at all — a separate feature from the forbidden-set rules.
         // docx's analogous CJK path (renderer.ts, fitCJKPrefix) is intentionally
-        // separate: substring binary-search fit + cross-run 追い出し. Do not unify them.
+        // separate: substring binary-search fit + cross-run carry-over. Do not unify them.
         const measured: (MeasuredChar & { font: string })[] = [];
         for (const ch of token) {
           const chFont = CJK_RE.test(ch) ? fontEa : font;
           ctx.font = chFont;
           measured.push({ ch, w: ctx.measureText(ch).width, font: chFont });
+        }
+        if (para.eaLnBrk === false) {
+          // Keep the East Asian word whole. If the current line already has
+          // content and the token would overflow, wrap once before placing it;
+          // never break mid-token (an over-wide token simply overflows).
+          const tokenW = measured.reduce((acc, m) => acc + m.w, 0);
+          if (lineW > 0 && lineW + tokenW > maxWidthPx) newLine();
+          for (const m of measured) {
+            push(m.ch, m.font, sizePx, color, segUnderline, run.strikethrough, run.baseline ?? undefined, segExtras);
+          }
+          continue;
         }
         let rest = measured;
         while (rest.length > 0) {

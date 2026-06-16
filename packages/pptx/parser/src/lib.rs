@@ -5431,8 +5431,7 @@ fn parse_legacy_chart(xml: &str, theme: &HashMap<String, String>) -> Option<Char
     let mut val_axis_title_bold: Option<bool> = None;
     let mut val_axis_title_color: Option<String> = None;
     for ax in plot_area.children().filter(|n| {
-        n.is_element()
-            && (n.tag_name().name() == "catAx" || n.tag_name().name() == "valAx")
+        n.is_element() && (n.tag_name().name() == "catAx" || n.tag_name().name() == "valAx")
     }) {
         let is_cat = if ax.tag_name().name() == "catAx" {
             true

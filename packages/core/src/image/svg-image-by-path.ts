@@ -1,6 +1,6 @@
-// Path-keyed companion to `svg-image.ts` for the lazy, byte-on-demand image
-// pipeline. Where `getCachedSvgImage` keys its cache on a self-contained
-// `data:image/svg+xml;base64,…` URL, this variant keys on the embedded zip path
+// Decoder for embedded SVG images (Microsoft's `asvg:svgBlip` extension,
+// MS-ODRAWXML) used by the docx, pptx and xlsx renderers, for the lazy,
+// byte-on-demand image pipeline. The cache keys on the embedded zip path
 // (e.g. "word/media/image1.svg") and pulls the bytes lazily via a caller-
 // supplied `fetchImage(path, mimeType)` — mirroring the pptx audio/video
 // extraction pattern. The fetched bytes are wrapped in an object URL that this

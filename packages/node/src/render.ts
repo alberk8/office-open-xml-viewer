@@ -15,7 +15,6 @@
  */
 
 import type { Presentation } from '@silurus/ooxml-pptx';
-import { extractImage } from './pptx.ts';
 
 /** A subset of the Node-canvas API that the renderers actually need. The
  *  `skia-canvas` `Canvas` (and `@napi-rs/canvas`'s `Canvas`) both satisfy
@@ -136,6 +135,11 @@ export function makeSourceBufferFetchImage(
   maxZipEntryBytes?: number,
 ): (path: string, mimeType: string) => Promise<Blob> {
   return async (path: string, mimeType: string): Promise<Blob> => {
+    // Dynamic import keeps the WASM parser binding out of this module's static
+    // import graph: render.ts must load under Node without the git-ignored,
+    // build-on-demand WASM artifacts present (CI runs `pnpm test` before
+    // `pnpm build:wasm`). Mirrors the dynamic renderer import in renderSlideNode.
+    const { extractImage } = await import('./pptx.ts');
     const bytes = extractImage(sourceBuffer, path, maxZipEntryBytes);
     // `.slice()` detaches from the WASM linear memory so the Blob owns a stable
     // copy (the WASM heap can be reused by the next call).

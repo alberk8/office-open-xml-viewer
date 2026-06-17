@@ -96,7 +96,21 @@ function makeZipWithEntry(name: string, data: Uint8Array): Uint8Array {
   return out;
 }
 
-describe('makeSourceBufferFetchImage', () => {
+// The WASM parser bindings are git-ignored build output; in CI `pnpm test` runs
+// BEFORE `pnpm build:wasm`, so they may be absent here. Probe once via the
+// dynamic extract_image path and skip these byte-level assertions when the wasm
+// is unavailable (they run locally after a wasm build), mirroring the `skia` gate.
+const wasmReady = await (async () => {
+  try {
+    const probe = makeZipWithEntry('probe.bin', new Uint8Array([7]));
+    const blob = await makeSourceBufferFetchImage(probe)('probe.bin', 'application/octet-stream');
+    return blob.size === 1;
+  } catch {
+    return false;
+  }
+})();
+
+describe.skipIf(!wasmReady)('makeSourceBufferFetchImage', () => {
   it('returns the real entry bytes from the source buffer (not an empty Blob)', async () => {
     const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3, 4]);
     const zip = makeZipWithEntry('ppt/media/image1.png', png);

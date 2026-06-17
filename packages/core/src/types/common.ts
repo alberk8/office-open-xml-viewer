@@ -404,6 +404,13 @@ export interface RenderOptions {
    */
   fetchMedia?: (path: string) => Promise<Blob>;
   /**
+   * Lazily resolve an embedded image (by zip path + MIME) to a Blob. Twin of
+   * {@link RenderOptions.fetchMedia} for pictures and blip fills: the renderer
+   * fetches raster/SVG bytes on demand and decodes them (`createImageBitmap` /
+   * path-keyed `<img>`), so the parse output carries only paths, never base64.
+   */
+  fetchImage?: (path: string, mimeType: string) => Promise<Blob>;
+  /**
    * When true, renderMedia draws only the poster frame — play/pause badges
    * and progress bars are left to the caller. Set by the pptx presentSlide
    * API so its interactive handle can own all control chrome without

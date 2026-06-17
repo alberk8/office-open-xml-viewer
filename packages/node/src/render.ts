@@ -144,7 +144,20 @@ export async function renderSlideNode(
   canvas: NodeCanvasLike,
   presentation: Presentation,
   slideIndex: number,
-  opts: { width?: number; dpr?: number; factory?: NodeCanvasFactory } = {},
+  opts: {
+    width?: number;
+    dpr?: number;
+    factory?: NodeCanvasFactory;
+    /**
+     * Lazily resolve an embedded image (by zip path + MIME) to a Blob. Pictures
+     * and blip fills carry only zip paths now (no inlined base64), so callers
+     * that want images painted must supply this — e.g.
+     * `(path, mime) => new Blob([extract_image(sourceBuffer, path)], { type: mime })`.
+     * Defaults to an empty-Blob fetcher (images decode to nothing), matching the
+     * media placeholder; Stage 5 wires the real source-buffer reader.
+     */
+    fetchImage?: (path: string, mimeType: string) => Promise<Blob>;
+  } = {},
 ): Promise<void> {
   // Direct import of the pure renderer module — avoids `presentation.ts`
   // and `viewer.ts`, both of which pull Vite-specific worker / asset
@@ -182,9 +195,12 @@ export async function renderSlideNode(
         minorFont: presentation.minorFont,
         hlinkColor: presentation.hlinkColor ?? null,
         // Node-side renderers don't run media playback, so an empty fetcher
-        // is fine — picture elements with `dataUrl` are handled by the
-        // existing path through createImageBitmap.
+        // is fine for posters.
         fetchMedia: async () => new Blob([]),
+        // Pictures/blip fills now carry zip paths; the caller supplies the byte
+        // source. Default to empty so a caller that doesn't need images still
+        // renders text/shapes (the picture simply draws nothing).
+        fetchImage: opts.fetchImage ?? (async () => new Blob([])),
         skipMediaControls: true,
       },
     );

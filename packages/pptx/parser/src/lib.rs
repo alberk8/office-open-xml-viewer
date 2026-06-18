@@ -3144,20 +3144,28 @@ impl LayoutPlaceholders {
     }
 
     /// Look up inherited paragraph alignment for this placeholder.
-    /// idx match (same layout/master placeholder slot) wins over type-keyed
-    /// fallbacks so a body placeholder never borrows an unrelated typeless
-    /// placeholder's alignment (ECMA-376 §19.3.1.x).
+    ///
+    /// A placeholder identified by `idx` resolves through its own slot
+    /// (`by_idx_alignment`), which `parse_layout_placeholders` pre-seeds with the
+    /// master per-type default. Unlike `lookup_fill`, falling through to the
+    /// type map on an idx miss is intentional and safe (the seed already encodes
+    /// the master tier) — but the `""` (typeless) fallback is gated to
+    /// `ph_idx.is_none()` so an idx/typed placeholder never borrows an unrelated
+    /// typeless sibling's alignment (ECMA-376 §19.3.1.36 idx matching).
     fn lookup_alignment(&self, ph_type: &str, ph_idx: Option<u32>) -> Option<String> {
         if let Some(i) = ph_idx {
             if let Some(a) = self.by_idx_alignment.get(&i) {
                 return Some(a.clone());
             }
         }
+        // The `""` fallback represents a typeless (idx-less, body-category)
+        // placeholder; only a placeholder that is itself typeless may use it.
+        let allow_empty = ph_idx.is_none() && ph_type == "body";
         self.by_type_alignment
             .get(ph_type)
             .cloned()
             .or_else(|| {
-                if ph_type == "body" {
+                if allow_empty {
                     self.by_type_alignment.get("").cloned()
                 } else {
                     None
@@ -3165,7 +3173,7 @@ impl LayoutPlaceholders {
             })
             .or_else(|| self.by_type_master_alignment.get(ph_type).cloned())
             .or_else(|| {
-                if ph_type == "body" {
+                if allow_empty {
                     self.by_type_master_alignment.get("").cloned()
                 } else {
                     None
@@ -3530,7 +3538,8 @@ fn parse_master_alignments(master_xml: &str) -> HashMap<String, String> {
             }
         }
     }
-    // Fallback: master <p:txStyles> paragraph alignment (ECMA-376 §19.3.1.49-51).
+    // Fallback: master <p:txStyles> paragraph alignment (ECMA-376 §19.3.1.52
+    // txStyles → titleStyle §19.3.1.49 / bodyStyle §19.3.1.5 / otherStyle §19.3.1.35).
     // Per-shape lstStyle (scanned above) wins via or_insert; this fills types
     // whose master placeholder shape carried no explicit algn (the common case —
     // PowerPoint stores title/body alignment in txStyles, not the shape lstStyle).
@@ -9032,7 +9041,10 @@ mod tests {
     // Synthetic deck for placeholder alignment-inheritance regression
     // (real reproducer files can't be committed). slide_sp / layout_extra_sp are
     // injected into the slide spTree / layout spTree.
-    fn build_align_pptx(slide_sp: &str, layout_extra_sp: &str) -> Vec<u8> {
+    // Default master txStyles: titleStyle centred, bodyStyle left, otherStyle right.
+    const DEFAULT_TXSTYLES: &str = r#"<p:txStyles><p:titleStyle><a:lvl1pPr algn="ctr"><a:defRPr sz="4400"/></a:lvl1pPr></p:titleStyle><p:bodyStyle><a:lvl1pPr algn="l"><a:defRPr sz="2800"/></a:lvl1pPr></p:bodyStyle><p:otherStyle><a:lvl1pPr algn="r"><a:defRPr sz="1800"/></a:lvl1pPr></p:otherStyle></p:txStyles>"#;
+
+    fn build_align_pptx(slide_sp: &str, layout_extra_sp: &str, master_txstyles: &str) -> Vec<u8> {
         use std::io::{Cursor, Write};
         let layout = format!(
             r#"<p:sldLayout xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
@@ -9043,6 +9055,9 @@ mod tests {
               </p:spTree></p:cSld>
             </p:sldLayout>"#
         );
+        let master = format!(
+            r#"<p:sldMaster xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><p:cSld><p:spTree><p:sp><p:nvSpPr><p:cNvPr id="2" name="Body"/><p:cNvSpPr/><p:nvPr><p:ph type="body" idx="1"/></p:nvPr></p:nvSpPr><p:spPr/><p:txBody><a:bodyPr/><a:lstStyle/><a:p/></p:txBody></p:sp></p:spTree></p:cSld>{master_txstyles}</p:sldMaster>"#
+        );
         let entries: &[(&str, String)] = &[
             ("ppt/presentation.xml", r#"<p:presentation xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><p:sldMasterIdLst><p:sldMasterId id="2147483648" r:id="rId2"/></p:sldMasterIdLst><p:sldIdLst><p:sldId id="256" r:id="rId1"/></p:sldIdLst><p:sldSz cx="12192000" cy="6858000"/></p:presentation>"#.to_owned()),
             ("ppt/_rels/presentation.xml.rels", r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideMaster" Target="slideMasters/slideMaster1.xml"/><Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme" Target="theme/theme1.xml"/></Relationships>"#.to_owned()),
@@ -9050,7 +9065,7 @@ mod tests {
             ("ppt/slides/_rels/slide1.xml.rels", r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout" Target="../slideLayouts/slideLayout1.xml"/></Relationships>"#.to_owned()),
             ("ppt/slideLayouts/slideLayout1.xml", layout),
             ("ppt/slideLayouts/_rels/slideLayout1.xml.rels", r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideMaster" Target="../slideMasters/slideMaster1.xml"/></Relationships>"#.to_owned()),
-            ("ppt/slideMasters/slideMaster1.xml", r#"<p:sldMaster xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><p:cSld><p:spTree><p:sp><p:nvSpPr><p:cNvPr id="2" name="Body"/><p:cNvSpPr/><p:nvPr><p:ph type="body" idx="1"/></p:nvPr></p:nvSpPr><p:spPr/><p:txBody><a:bodyPr/><a:lstStyle/><a:p/></p:txBody></p:sp></p:spTree></p:cSld><p:txStyles><p:titleStyle><a:lvl1pPr algn="ctr"><a:defRPr sz="4400"/></a:lvl1pPr></p:titleStyle><p:bodyStyle><a:lvl1pPr algn="l"><a:defRPr sz="2800"/></a:lvl1pPr></p:bodyStyle><p:otherStyle><a:lvl1pPr algn="r"><a:defRPr sz="1800"/></a:lvl1pPr></p:otherStyle></p:txStyles></p:sldMaster>"#.to_owned()),
+            ("ppt/slideMasters/slideMaster1.xml", master),
             ("ppt/slideMasters/_rels/slideMaster1.xml.rels", r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme" Target="../theme/theme1.xml"/></Relationships>"#.to_owned()),
             ("ppt/theme/theme1.xml", r#"<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" name="t"><a:themeElements><a:clrScheme name="c"><a:dk1><a:srgbClr val="000000"/></a:dk1><a:lt1><a:srgbClr val="FFFFFF"/></a:lt1><a:dk2><a:srgbClr val="000000"/></a:dk2><a:lt2><a:srgbClr val="FFFFFF"/></a:lt2><a:accent1><a:srgbClr val="000000"/></a:accent1><a:accent2><a:srgbClr val="000000"/></a:accent2><a:accent3><a:srgbClr val="000000"/></a:accent3><a:accent4><a:srgbClr val="000000"/></a:accent4><a:accent5><a:srgbClr val="000000"/></a:accent5><a:accent6><a:srgbClr val="000000"/></a:accent6><a:hlink><a:srgbClr val="000000"/></a:hlink><a:folHlink><a:srgbClr val="000000"/></a:folHlink></a:clrScheme><a:fontScheme name="f"><a:majorFont><a:latin typeface="Arial"/></a:majorFont><a:minorFont><a:latin typeface="Arial"/></a:minorFont></a:fontScheme><a:fmtScheme name="s"><a:fillStyleLst/><a:lnStyleLst/><a:effectStyleLst/><a:bgFillStyleLst/></a:fmtScheme></a:themeElements></a:theme>"#.to_owned()),
         ];
@@ -9079,25 +9094,64 @@ mod tests {
     // body placeholder (idx=1) with no explicit algn anywhere except master bodyStyle="l".
     const BODY_SP: &str = r#"<p:sp><p:nvSpPr><p:cNvPr id="5" name="Text Placeholder 5"/><p:cNvSpPr/><p:nvPr><p:ph type="body" idx="1"/></p:nvPr></p:nvSpPr><p:spPr/><p:txBody><a:bodyPr/><a:p><a:r><a:t>x</a:t></a:r></a:p></p:txBody></p:sp>"#;
 
+    // An unrelated centred typeless placeholder (idx=10) in the layout — the leak source.
+    const TYPELESS_CTR_SP: &str = r#"<p:sp><p:nvSpPr><p:cNvPr id="9" name="Centered obj"/><p:cNvSpPr/><p:nvPr><p:ph idx="10"/></p:nvPr></p:nvSpPr><p:spPr/><p:txBody><a:bodyPr/><a:lstStyle><a:lvl1pPr algn="ctr"/></a:lstStyle><a:p/></p:txBody></p:sp>"#;
+
     #[test]
     fn align_inherit_body_no_layout_algn_is_left() {
         // Master bodyStyle="l", nothing in slide/layout → must resolve to left.
-        assert_eq!(first_para_alignment(&build_align_pptx(BODY_SP, "")), "l");
+        assert_eq!(
+            first_para_alignment(&build_align_pptx(BODY_SP, "", DEFAULT_TXSTYLES)),
+            "l"
+        );
     }
 
     #[test]
     fn align_inherit_body_ignores_unrelated_typeless_center() {
         // Layout has an unrelated centred typeless placeholder (idx=10). The body
         // placeholder (idx=1) must NOT borrow it; resolves to master bodyStyle "l".
-        let leak = r#"<p:sp><p:nvSpPr><p:cNvPr id="9" name="Centered obj"/><p:cNvSpPr/><p:nvPr><p:ph idx="10"/></p:nvPr></p:nvSpPr><p:spPr/><p:txBody><a:bodyPr/><a:lstStyle><a:lvl1pPr algn="ctr"/></a:lstStyle><a:p/></p:txBody></p:sp>"#;
-        assert_eq!(first_para_alignment(&build_align_pptx(BODY_SP, leak)), "l");
+        assert_eq!(
+            first_para_alignment(&build_align_pptx(
+                BODY_SP,
+                TYPELESS_CTR_SP,
+                DEFAULT_TXSTYLES
+            )),
+            "l"
+        );
+    }
+
+    #[test]
+    fn align_inherit_body_idx_no_master_default_ignores_typeless_leak() {
+        // Residual-leak guard: master has NO bodyStyle algn (so by_idx_alignment is
+        // not seeded for the body slot) AND the layout has an unrelated centred
+        // typeless placeholder. The idx-bearing body must still fall to the spec
+        // default "l", never the typeless sibling's "ctr".
+        let no_body_algn = r#"<p:txStyles><p:titleStyle><a:lvl1pPr><a:defRPr sz="4400"/></a:lvl1pPr></p:titleStyle><p:bodyStyle><a:lvl1pPr><a:defRPr sz="2800"/></a:lvl1pPr></p:bodyStyle></p:txStyles>"#;
+        assert_eq!(
+            first_para_alignment(&build_align_pptx(BODY_SP, TYPELESS_CTR_SP, no_body_algn)),
+            "l"
+        );
     }
 
     #[test]
     fn align_inherit_title_from_master_txstyles_center() {
         // Master titleStyle="ctr", no algn in slide/layout title → resolves to ctr.
         let title_sp = r#"<p:sp><p:nvSpPr><p:cNvPr id="6" name="Title 1"/><p:cNvSpPr/><p:nvPr><p:ph type="title"/></p:nvPr></p:nvSpPr><p:spPr/><p:txBody><a:bodyPr/><a:p><a:r><a:t>T</a:t></a:r></a:p></p:txBody></p:sp>"#;
-        assert_eq!(first_para_alignment(&build_align_pptx(title_sp, "")), "ctr");
+        assert_eq!(
+            first_para_alignment(&build_align_pptx(title_sp, "", DEFAULT_TXSTYLES)),
+            "ctr"
+        );
+    }
+
+    #[test]
+    fn align_inherit_subtitle_from_master_bodystyle() {
+        // subTitle (idx=2, no matching layout slot) routes through the bodyStyle
+        // txStyles row via the type path → inherits "l".
+        let sub_sp = r#"<p:sp><p:nvSpPr><p:cNvPr id="7" name="Subtitle 1"/><p:cNvSpPr/><p:nvPr><p:ph type="subTitle" idx="2"/></p:nvPr></p:nvSpPr><p:spPr/><p:txBody><a:bodyPr/><a:p><a:r><a:t>S</a:t></a:r></a:p></p:txBody></p:sp>"#;
+        assert_eq!(
+            first_para_alignment(&build_align_pptx(sub_sp, "", DEFAULT_TXSTYLES)),
+            "l"
+        );
     }
 
     #[test]

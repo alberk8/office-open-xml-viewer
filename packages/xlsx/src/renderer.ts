@@ -1330,7 +1330,7 @@ function renderQuadrant(
       fillDataBar(ctx, cf.dataBar.color, aCx + bInset, aCy + bInset, bW, cH - bInset * 2, cf.dataBar.gradient);
     }
     const mergedBorder = resolveMergeBorder(border, aRow, aCol, info.right, info.bottom, rc.cellMap, styles);
-    renderBorder(ctx, mergeBorders(mergedBorder, cf.border), aCx, aCy, cW, cH);
+    renderBorder(ctx, mergeBorders(mergedBorder, cf.border), aCx, aCy, cW, cH, false, false, dpr);
 
     if (!cell) continue;
     const text = formatCellValue(cell, styles, cf.numFmt);
@@ -1666,7 +1666,7 @@ function renderQuadrant(
           invertedLeft = picked === leftRight && before !== leftRight;
         }
       }
-      renderBorder(ctx, mergedBorder, cx, cy, cellW, cellH, invertedTop, invertedLeft);
+      renderBorder(ctx, mergedBorder, cx, cy, cellW, cellH, invertedTop, invertedLeft, dpr);
 
       // Excel Table style overlay (ECMA-376 §18.8.83). Custom styles draw only
       // their dxf-defined borders; built-in style names fall back to a
@@ -1677,7 +1677,7 @@ function renderQuadrant(
       if (tableStyle) {
         const overlay = tableOverlayBorder(tableStyle, tsDxfWhole, tsDxfHeader, colIndex);
         if (overlay.kind === 'dxf') {
-          renderBorder(ctx, overlay.border, cx, cy, cellW, cellH);
+          renderBorder(ctx, overlay.border, cx, cy, cellW, cellH, false, false, dpr);
         } else if (overlay.kind === 'accent') {
           const hp = 0.5 / dpr;
           ctx.strokeStyle = overlay.color;
@@ -3403,7 +3403,12 @@ function renderBorder(
    *  Same idea for `invertedLeft` (inherited from the left cell's right). */
   invertedTop = false,
   invertedLeft = false,
+  dpr = 1,
 ): void {
+  // Half-device-pixel offset: aligns the stroke center to a device-pixel row
+  // so that lineWidth=1/dpr renders as a crisp single device pixel rather than
+  // bleeding across two rows at 50 % alpha. Same technique as grid lines.
+  const hp = 0.5 / dpr;
   type EdgeRef = {
     edge: BorderEdge | null | undefined;
     x1: number; y1: number; x2: number; y2: number;
@@ -3435,13 +3440,13 @@ function renderBorder(
       // direction. Excel renders <diagonal style="double"/> the same way it
       // does horizontal/vertical doubles — two thin lines with a small gap.
       ctx.strokeStyle = color;
-      ctx.lineWidth = 1;
+      ctx.lineWidth = 1 / dpr;
       ctx.setLineDash([]);
       const dx = x2 - x1;
       const dy = y2 - y1;
       const len = Math.hypot(dx, dy);
-      // Perpendicular unit vector. ±off shifts the line ~1px to either side.
-      const off = 1;
+      // Perpendicular unit vector. ±off shifts the line ~1 device px to either side.
+      const off = 1 / dpr;
       const px = (-dy / len) * off;
       const py = (dx / len) * off;
       ctx.beginPath();
@@ -3452,9 +3457,9 @@ function renderBorder(
     }
     if (edge.style === 'double' && kind !== 'd') {
       ctx.strokeStyle = color;
-      ctx.lineWidth = 1;
+      ctx.lineWidth = 1 / dpr;
       ctx.setLineDash([]);
-      const off = 1;
+      const off = 1 / dpr;
       ctx.beginPath();
       if (kind === 'h') {
         const isTop = y1 === y;
@@ -3464,15 +3469,15 @@ function renderBorder(
         // (which our fill erased and which we are restoring). Swap which
         // side gets the extension so the restored line is the extended one.
         const swap = isTop && invertedTop;
-        const outerY = isTop ? (swap ? y + off : y - off) : y + h + off;
-        const innerY = isTop ? (swap ? y - off : y + off) : y + h - off;
+        const outerY = (isTop ? (swap ? y + off : y - off) : y + h + off) + hp;
+        const innerY = (isTop ? (swap ? y - off : y + off) : y + h - off) + hp;
         ctx.moveTo(x - off, outerY);   ctx.lineTo(x + w + off, outerY);
         ctx.moveTo(x + off, innerY);   ctx.lineTo(x + w - off, innerY);
       } else {
         const isLeft = x1 === x;
         const swap = isLeft && invertedLeft;
-        const outerX = isLeft ? (swap ? x + off : x - off) : x + w + off;
-        const innerX = isLeft ? (swap ? x - off : x + off) : x + w - off;
+        const outerX = (isLeft ? (swap ? x + off : x - off) : x + w + off) + hp;
+        const innerX = (isLeft ? (swap ? x - off : x + off) : x + w - off) + hp;
         ctx.moveTo(outerX, y - off);   ctx.lineTo(outerX, y + h + off);
         ctx.moveTo(innerX, y + off);   ctx.lineTo(innerX, y + h - off);
       }
@@ -3481,11 +3486,16 @@ function renderBorder(
     }
     ctx.beginPath();
     ctx.strokeStyle = color;
-    ctx.lineWidth = borderStyleWidth(edge.style);
+    ctx.lineWidth = borderStyleWidth(edge.style) / dpr;
     const dash = borderStyleDash(edge.style);
     ctx.setLineDash(dash);
-    ctx.moveTo(x1, y1);
-    ctx.lineTo(x2, y2);
+    // Half-pixel offset aligns horizontal lines to a device-pixel row (y offset)
+    // and vertical lines to a device-pixel column (x offset). Diagonals are
+    // inherently anti-aliased so no offset is applied (dpx=dpy=0 for kind 'd').
+    const dpx = kind === 'v' ? hp : 0;
+    const dpy = kind === 'h' ? hp : 0;
+    ctx.moveTo(x1 + dpx, y1 + dpy);
+    ctx.lineTo(x2 + dpx, y2 + dpy);
     ctx.stroke();
     ctx.setLineDash([]);
   }

@@ -3405,9 +3405,11 @@ function renderBorder(
   invertedLeft = false,
   dpr = 1,
 ): void {
-  // Half-device-pixel offset: aligns the stroke center to a device-pixel row
-  // so that lineWidth=1/dpr renders as a crisp single device pixel rather than
-  // bleeding across two rows at 50 % alpha. Same technique as grid lines.
+  // Half-device-pixel offset used to center odd-device-width strokes on a pixel
+  // midpoint so they render crisp instead of bleeding across two rows. Border
+  // widths themselves stay in *logical* px (NOT divided by dpr): ctx.scale(dpr,
+  // dpr) scales them to device px so a thin border reads as 2 device px at
+  // dpr=2, matching Excel's measured weight. Same offset technique as grid lines.
   const hp = 0.5 / dpr;
   type EdgeRef = {
     edge: BorderEdge | null | undefined;
@@ -3440,13 +3442,13 @@ function renderBorder(
       // direction. Excel renders <diagonal style="double"/> the same way it
       // does horizontal/vertical doubles — two thin lines with a small gap.
       ctx.strokeStyle = color;
-      ctx.lineWidth = 1 / dpr;
+      ctx.lineWidth = 1;
       ctx.setLineDash([]);
       const dx = x2 - x1;
       const dy = y2 - y1;
       const len = Math.hypot(dx, dy);
-      // Perpendicular unit vector. ±off shifts the line ~1 device px to either side.
-      const off = 1 / dpr;
+      // Perpendicular unit vector. ±off shifts the line ~1 logical px to either side.
+      const off = 1;
       const px = (-dy / len) * off;
       const py = (dx / len) * off;
       ctx.beginPath();
@@ -3457,9 +3459,9 @@ function renderBorder(
     }
     if (edge.style === 'double' && kind !== 'd') {
       ctx.strokeStyle = color;
-      ctx.lineWidth = 1 / dpr;
+      ctx.lineWidth = 1;
       ctx.setLineDash([]);
-      const off = 1 / dpr;
+      const off = 1;
       ctx.beginPath();
       if (kind === 'h') {
         const isTop = y1 === y;
@@ -3469,15 +3471,15 @@ function renderBorder(
         // (which our fill erased and which we are restoring). Swap which
         // side gets the extension so the restored line is the extended one.
         const swap = isTop && invertedTop;
-        const outerY = (isTop ? (swap ? y + off : y - off) : y + h + off) + hp;
-        const innerY = (isTop ? (swap ? y - off : y + off) : y + h - off) + hp;
+        const outerY = isTop ? (swap ? y + off : y - off) : y + h + off;
+        const innerY = isTop ? (swap ? y - off : y + off) : y + h - off;
         ctx.moveTo(x - off, outerY);   ctx.lineTo(x + w + off, outerY);
         ctx.moveTo(x + off, innerY);   ctx.lineTo(x + w - off, innerY);
       } else {
         const isLeft = x1 === x;
         const swap = isLeft && invertedLeft;
-        const outerX = (isLeft ? (swap ? x + off : x - off) : x + w + off) + hp;
-        const innerX = (isLeft ? (swap ? x - off : x + off) : x + w - off) + hp;
+        const outerX = isLeft ? (swap ? x + off : x - off) : x + w + off;
+        const innerX = isLeft ? (swap ? x - off : x + off) : x + w - off;
         ctx.moveTo(outerX, y - off);   ctx.lineTo(outerX, y + h + off);
         ctx.moveTo(innerX, y + off);   ctx.lineTo(innerX, y + h - off);
       }
@@ -3486,17 +3488,19 @@ function renderBorder(
     }
     ctx.beginPath();
     ctx.strokeStyle = color;
-    const deviceW = borderStyleWidth(edge.style);
-    ctx.lineWidth = deviceW / dpr;
+    // Logical-px width (thin=1, medium=2, thick=3). ctx.scale(dpr,dpr) scales it
+    // to device px, so a thin border is 2 device px at dpr=2 — matching Excel's
+    // measured on-screen weight. Do NOT divide by dpr (that halved it to 1 px).
+    ctx.lineWidth = borderStyleWidth(edge.style);
     const dash = borderStyleDash(edge.style);
     ctx.setLineDash(dash);
-    // Half-pixel offset only helps ODD device-pixel widths. Cell edges sit on
-    // integer device coordinates (cx/cy are integer CSS px), so a 1- or
-    // 3-device-px line is crisp when its center is nudged to a pixel midpoint
-    // (+hp). An even width (medium = 2 device px) is already crisp centered on
-    // the integer edge — adding hp would straddle three rows and blur it.
-    // Diagonals can't be pixel-aligned, so they take no offset.
-    const off = kind !== 'd' && Math.round(deviceW) % 2 === 1 ? hp : 0;
+    // Crispness nudge: only a stroke whose *device* width is odd (thin/thick at
+    // dpr=1) needs centering on a pixel midpoint; cell edges sit on integer
+    // device coords so add hp=0.5/dpr. Even device widths (thin → 2 px at dpr=2)
+    // are already crisp on the integer edge and must NOT be nudged, or they
+    // straddle and blur. Diagonals can't be pixel-aligned, so no offset.
+    const deviceW = Math.round(borderStyleWidth(edge.style) * dpr);
+    const off = kind !== 'd' && deviceW % 2 === 1 ? hp : 0;
     const dpx = kind === 'v' ? off : 0;
     const dpy = kind === 'h' ? off : 0;
     ctx.moveTo(x1 + dpx, y1 + dpy);

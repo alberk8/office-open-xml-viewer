@@ -1,6 +1,6 @@
 import type {
   DocxDocumentModel, BodyElement, PaginatedBodyElement, DocParagraph, DocTable, DocTableRow, DocTableCell, CellElement,
-  DocRun, DocxTextRun, ImageRun, ShapeRun, FieldRun, HeaderFooter, LineSpacing, BorderSpec, TableBorders, CellBorders,
+  DocRun, DocxTextRun, ImageRun, ShapeRun, ShapeTextRun, FieldRun, HeaderFooter, LineSpacing, BorderSpec, TableBorders, CellBorders,
   TabStop, ParagraphBorders, ParaBorderEdge, SectionProps, DocNote,
 } from './types';
 import type { ArrowEnd, Stroke } from '@silurus/ooxml-core';
@@ -4355,25 +4355,27 @@ function renderAnchorShape(shape: ShapeRun, state: RenderState, paragraphTopPx: 
  *  inter-word spaces). `ctx.font` must already be the block's font. A single
  *  token wider than `maxWidth` is left to overflow its own line (no
  *  hyphenation). Always returns at least one line. */
-function wrapShapeText(
-  ctx: CanvasRenderingContext2D,
-  text: string,
-  maxWidth: number,
-): string[] {
-  if (!text) return [''];
-  if (maxWidth <= 0) return [text];
-  const isCjk = (cp: number): boolean =>
+/** Ideographic / CJK code points that may break between any two characters
+ *  (they carry no inter-word spaces). Shared by the shape-text tokenizers. */
+function isCjkCp(cp: number): boolean {
+  return (
     (cp >= 0x3000 && cp <= 0x9fff) ||
     (cp >= 0xf900 && cp <= 0xfaff) ||
     (cp >= 0xff00 && cp <= 0xffef) ||
-    (cp >= 0x20000 && cp <= 0x2fa1f);
-  // Tokenize into atomic wrap units: each CJK char alone, or a run of non-CJK
-  // characters up to and including a trailing space.
+    (cp >= 0x20000 && cp <= 0x2fa1f)
+  );
+}
+
+/** Split a string into atomic wrap units: each CJK char alone, or a run of
+ *  non-CJK characters up to and including a trailing space. Shared by the
+ *  single-format ({@link wrapShapeText}) and rich ({@link wrapShapeRuns})
+ *  text-box layout paths so they tokenize identically. */
+function tokenizeShapeText(text: string): string[] {
   const tokens: string[] = [];
   let buf = '';
   for (const ch of text) {
     const cp = ch.codePointAt(0) ?? 0;
-    if (isCjk(cp)) {
+    if (isCjkCp(cp)) {
       if (buf) {
         tokens.push(buf);
         buf = '';
@@ -4388,6 +4390,17 @@ function wrapShapeText(
     }
   }
   if (buf) tokens.push(buf);
+  return tokens;
+}
+
+function wrapShapeText(
+  ctx: CanvasRenderingContext2D,
+  text: string,
+  maxWidth: number,
+): string[] {
+  if (!text) return [''];
+  if (maxWidth <= 0) return [text];
+  const tokens = tokenizeShapeText(text);
 
   const lines: string[] = [];
   let cur = '';
@@ -4401,6 +4414,64 @@ function wrapShapeText(
   }
   if (cur !== '') lines.push(cur.replace(/\s+$/, ''));
   return lines.length ? lines : [text];
+}
+
+/** A single wrap unit tagged with the run it came from. `text` is a Latin word
+ *  (incl. trailing space) or one CJK character (see {@link tokenizeShapeText}).
+ *  `width` is its measured advance in px under the run's font (filled during
+ *  greedy line-fill). */
+interface RichToken {
+  text: string;
+  run: ShapeTextRun;
+  width: number;
+}
+
+/** Greedy line-wrap for a rich (mixed-format) text-box paragraph. Builds one
+ *  flat token stream across all `runs` (each token carrying its run's format),
+ *  measures every token under its own font, and fills lines to `maxWidth` px —
+ *  the same wrap rule {@link wrapShapeText} uses, but per-token-font-aware.
+ *  A leading space is dropped when a line wraps (a wrapped line never starts
+ *  with a space); a token wider than `maxWidth` stays on its own line. Mutates
+ *  `ctx.font` while measuring. Always returns at least one (possibly empty)
+ *  line. */
+function wrapShapeRuns(
+  ctx: CanvasRenderingContext2D,
+  runs: ShapeTextRun[],
+  maxWidth: number,
+  scale: number,
+  fontFamilyClasses: Record<string, string>,
+): RichToken[][] {
+  const tokens: RichToken[] = [];
+  for (const run of runs) {
+    const fontPx = run.fontSizePt * scale;
+    ctx.font = buildFont(run.bold ?? false, run.italic ?? false, fontPx, run.fontFamily ?? null, fontFamilyClasses);
+    for (const text of tokenizeShapeText(run.text)) {
+      tokens.push({ text, run, width: ctx.measureText(text).width });
+    }
+  }
+  if (tokens.length === 0) return [[]];
+
+  const lines: RichToken[][] = [];
+  let cur: RichToken[] = [];
+  let curW = 0;
+  for (const tok of tokens) {
+    if (cur.length > 0 && curW + tok.width > maxWidth) {
+      lines.push(cur);
+      // A wrapped line never starts with a space — drop a leading space token.
+      if (tok.text.trim() === '') {
+        cur = [];
+        curW = 0;
+        continue;
+      }
+      cur = [tok];
+      curW = tok.width;
+    } else {
+      cur.push(tok);
+      curW += tok.width;
+    }
+  }
+  if (cur.length > 0) lines.push(cur);
+  return lines.length ? lines : [[]];
 }
 
 function fitShapeImage(
@@ -4457,20 +4528,34 @@ export function renderShapeText(
   // anchoring (totalH) and the draw pass (no re-wrapping).
   type BlockLayout =
     | { kind: 'image'; fitW: number; fitH: number }
-    | { kind: 'text'; lines: string[]; lineH: number };
+    | { kind: 'text'; lines: string[]; lineH: number }
+    | { kind: 'rich'; lines: RichToken[][]; lineHeights: number[] };
   const layouts: BlockLayout[] = blocks.map((b) => {
     if (b.imagePath) {
       const { w: fitW, h: fitH } = fitShapeImage(b.imageWidthPt ?? 0, b.imageHeightPt ?? 0, innerW, scale);
       return { kind: 'image', fitW, fitH };
     }
+    // Rich path: a paragraph with explicit per-run formatting lays out as mixed
+    // fonts. Each line's height is the tallest run on it × 1.2 (ECMA-376 line
+    // box ≈ largest font on the line).
+    if (b.runs && b.runs.length > 0) {
+      const lines = wrapShapeRuns(ctx, b.runs, innerW, scale, fontFamilyClasses);
+      const lineHeights = lines.map((toks) => {
+        const maxPt = toks.reduce((m, t) => Math.max(m, t.run.fontSizePt), 0);
+        return (maxPt > 0 ? maxPt : b.fontSizePt) * scale * 1.2;
+      });
+      return { kind: 'rich', lines, lineHeights };
+    }
     const fontPx = b.fontSizePt * scale;
     ctx.font = buildFont(b.bold ?? false, b.italic ?? false, fontPx, b.fontFamily ?? null, fontFamilyClasses);
     return { kind: 'text', lines: wrapShapeText(ctx, b.text, innerW), lineH: fontPx * 1.2 };
   });
-  const totalH = layouts.reduce(
-    (s, l) => s + (l.kind === 'image' ? l.fitH : l.lines.length * l.lineH),
-    0,
-  );
+  const blockHeight = (l: BlockLayout): number => {
+    if (l.kind === 'image') return l.fitH;
+    if (l.kind === 'rich') return l.lineHeights.reduce((s, h) => s + h, 0);
+    return l.lines.length * l.lineH;
+  };
+  const totalH = layouts.reduce((s, l) => s + blockHeight(l), 0);
 
   const anchor = shape.textAnchor ?? 't';
   let cursorY: number;
@@ -4503,6 +4588,44 @@ export function renderShapeText(
         ctx.drawImage(bmp, drawX, cursorY, fitW, fitH);
       }
       cursorY += fitH;
+      continue;
+    }
+
+    if (layout.kind === 'rich') {
+      // Mixed-format paragraph: each token carries its own run's font/color.
+      // 'distribute' stays centered (no inter-word stretch in shape text), like
+      // the single-format path.
+      const edgeFor = (rtl: boolean) =>
+        block.alignment === 'distribute' ? 'center' : resolveAlignEdge(block.alignment, rtl);
+      ctx.textAlign = 'left';
+      for (let li = 0; li < layout.lines.length; li++) {
+        const lineToks = layout.lines[li];
+        const lineH = layout.lineHeights[li];
+        const lineW = lineToks.reduce((s, t) => s + t.width, 0);
+        // Base direction (first-strong) from the line's own text, matching the
+        // single-format path's per-block resolution but resolved per line.
+        const lineText = lineToks.map((t) => t.text).join('');
+        const baseRtl = resolveBaseDirection(undefined, lineText) === 'rtl';
+        ctx.direction = baseRtl ? 'rtl' : 'ltr';
+        const edge = edgeFor(baseRtl);
+        let tx = innerX;
+        if (edge === 'center') {
+          tx = innerX + Math.max(0, (innerW - lineW) / 2);
+        } else if (edge === 'right') {
+          tx = innerX + Math.max(0, innerW - lineW);
+        }
+        // Baseline uses the tallest font on the line (lineH / 1.2 × 0.85).
+        const lineMaxFontPx = lineH / 1.2;
+        const baseline = cursorY + lineMaxFontPx * 0.85;
+        for (const tok of lineToks) {
+          const fontPx = tok.run.fontSizePt * scale;
+          ctx.font = buildFont(tok.run.bold ?? false, tok.run.italic ?? false, fontPx, tok.run.fontFamily ?? null, fontFamilyClasses);
+          ctx.fillStyle = tok.run.color ? `#${tok.run.color}` : '#000000';
+          ctx.fillText(tok.text, tx, baseline);
+          tx += tok.width;
+        }
+        cursorY += lineH;
+      }
       continue;
     }
 

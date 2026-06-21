@@ -411,6 +411,19 @@ export interface LineEnd {
   len: string;
 }
 
+/** One formatting run (`<w:r>`) inside a shape-text paragraph. Mirrors the
+ *  character-formatting fields of {@link ShapeText}; the renderer lays a
+ *  paragraph's {@link ShapeText.runs} out as rich text so mixed bold/non-bold
+ *  runs each keep their own font. */
+export interface ShapeTextRun {
+  text: string;
+  fontSizePt: number;
+  color?: string | null;
+  fontFamily?: string | null;
+  bold?: boolean;
+  italic?: boolean;
+}
+
 export interface ShapeText {
   text: string;
   fontSizePt: number;
@@ -418,6 +431,12 @@ export interface ShapeText {
   fontFamily?: string | null;
   bold?: boolean;
   italic?: boolean;
+  /** Per-run formatting for this paragraph (one entry per `<w:r>` with text).
+   *  When non-empty the renderer draws the block as rich text (each run's
+   *  font); otherwise it uses the single block-level format fields above
+   *  (image blocks / legacy single-format paragraphs). Absent for image-only
+   *  paragraphs. */
+  runs?: ShapeTextRun[];
   alignment: string;
   /** Zip path of an inline image inside this text-box paragraph
    *  (`<w:drawing><wp:inline><a:blip r:embed>`), e.g. `word/media/image1.emf`.

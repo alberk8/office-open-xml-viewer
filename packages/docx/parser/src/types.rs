@@ -808,10 +808,33 @@ pub struct RubyAnnotation {
     pub font_size_pt: f64,
 }
 
+/// One formatting run (`<w:r>`) inside a shape-text paragraph. Mirrors the
+/// fields of {@link ShapeText} that carry character formatting, resolved
+/// through the SAME chain (`parse_run_fmt` + docDefaults font fallback). The
+/// renderer lays a paragraph's `runs` out as rich text (per-run font), so a
+/// bold label followed by non-bold body text keeps each run's formatting
+/// instead of collapsing to the first run's.
+#[derive(Serialize, Debug, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ShapeTextRun {
+    pub text: String,
+    pub font_size_pt: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_family: Option<String>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub bold: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub italic: bool,
+}
+
 /// One paragraph of text rendered inside a shape (`<wps:txbx><w:txbxContent>`).
-/// Reduced to a single combined string + the first run's effective formatting
-/// — the shape-text layouts in our current sample corpus carry one run per
-/// paragraph, so we don't yet support mixed runs / full inline layout here.
+/// The single `text`/format fields carry the concatenated paragraph string and
+/// the FIRST run's effective formatting (kept for backward compatibility with
+/// existing consumers and the image-block path); `runs` additionally preserves
+/// PER-RUN formatting so the renderer can draw mixed bold/non-bold runs as rich
+/// text (ECMA-376 §17.3.2 — each `<w:r>` resolves its own rPr).
 #[derive(Serialize, Debug, Clone, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct ShapeText {
@@ -825,6 +848,12 @@ pub struct ShapeText {
     pub bold: bool,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub italic: bool,
+    /// Per-run formatting for this paragraph (one entry per `<w:r>` that carries
+    /// text). Empty for an image-only paragraph (the image path is unchanged).
+    /// The renderer prefers `runs` (rich layout) over the single format fields
+    /// when non-empty.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub runs: Vec<ShapeTextRun>,
     /// Paragraph alignment ("left" | "center" | "right" | "both").
     pub alignment: String,
     /// Embedded zip path of an inline image living inside this text-box

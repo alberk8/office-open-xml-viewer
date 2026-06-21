@@ -3238,23 +3238,55 @@ fn extract_simple_paragraph_text(
     theme: &ThemeColors,
     media_map: &HashMap<String, String>,
 ) -> Option<ShapeText> {
+    // Resolve a run's effective font through the SAME default chain the body
+    // uses (ECMA-376 §17.7.2 docDefaults). A text-box run with `<w:rFonts
+    // w:hint="eastAsia"/>` and no explicit ascii/eastAsia would otherwise resolve
+    // to None and the renderer would fall back to sans-serif; instead inherit the
+    // document default ascii (Latin-first text, e.g. an English title/abstract) /
+    // eastAsia typeface. Order: run-ascii → run-eastAsia → default-ascii →
+    // default-eastAsia (an explicit eastAsia run still wins over the default
+    // ascii, while a font-less run lands on the default ascii — Century in
+    // sample-10, a serif).
+    let resolve_font_with_default = |fmt: &RunFmt| -> Option<String> {
+        theme
+            .resolve_font_ref(fmt.font_family_ascii.clone())
+            .or_else(|| theme.resolve_font_ref(fmt.font_family_east_asia.clone()))
+            .or_else(|| theme.default_ascii_font_ref())
+            .or_else(|| theme.default_east_asia_font_ref())
+    };
+
     let mut text = String::new();
-    let mut first_rpr: Option<roxmltree::Node> = None;
+    // Per-run formatting (one entry per `<w:r>` carrying text). Preserves mixed
+    // bold/non-bold runs so the renderer can lay the paragraph out as rich text;
+    // the single block-level fields below still come from the first text run for
+    // backward compatibility.
+    let mut runs: Vec<ShapeTextRun> = Vec::new();
     for r in p
         .descendants()
         .filter(|n| n.is_element() && n.tag_name().name() == "r")
     {
-        if first_rpr.is_none() {
-            first_rpr = child_w(r, "rPr");
-        }
+        let mut run_text = String::new();
         for t in r
             .descendants()
             .filter(|n| n.is_element() && n.tag_name().name() == "t")
         {
             if let Some(text_node) = t.text() {
-                text.push_str(text_node);
+                run_text.push_str(text_node);
             }
         }
+        if run_text.is_empty() {
+            continue;
+        }
+        text.push_str(&run_text);
+        let fmt = child_w(r, "rPr").map(parse_run_fmt).unwrap_or_default();
+        runs.push(ShapeTextRun {
+            text: run_text,
+            font_size_pt: fmt.font_size.unwrap_or(DEFAULT_FONT_SIZE),
+            color: fmt.color.clone(),
+            font_family: resolve_font_with_default(&fmt),
+            bold: fmt.bold.unwrap_or(false),
+            italic: fmt.italic.unwrap_or(false),
+        });
     }
 
     // Inline image inside the text-box paragraph. Use the SAME blip resolution
@@ -3298,34 +3330,19 @@ fn extract_simple_paragraph_text(
         .and_then(|jc| attr_w(jc, "val"))
         .unwrap_or_else(|| "left".to_string());
 
-    // Resolve the run's font through the SAME default chain the body uses
-    // (ECMA-376 §17.7.2 docDefaults). A text-box run with `<w:rFonts
-    // w:hint="eastAsia"/>` and no explicit ascii/eastAsia would otherwise resolve
-    // to None and the renderer would fall back to sans-serif; instead inherit the
-    // document default ascii (Latin-first text, e.g. an English title/abstract) /
-    // eastAsia typeface. Order: run-ascii → run-eastAsia → default-ascii →
-    // default-eastAsia (an explicit eastAsia run still wins over the default
-    // ascii, while a font-less run lands on the default ascii — Century in
-    // sample-10, a serif).
-    let resolve_font_with_default = |fmt: &RunFmt| -> Option<String> {
-        theme
-            .resolve_font_ref(fmt.font_family_ascii.clone())
-            .or_else(|| theme.resolve_font_ref(fmt.font_family_east_asia.clone()))
-            .or_else(|| theme.default_ascii_font_ref())
-            .or_else(|| theme.default_east_asia_font_ref())
-    };
-    let (font_size_pt, color, font_family, bold, italic) = if let Some(rpr) = first_rpr {
-        let fmt = parse_run_fmt(rpr);
-        (
-            fmt.font_size.unwrap_or(DEFAULT_FONT_SIZE),
-            fmt.color.clone(),
-            resolve_font_with_default(&fmt),
-            fmt.bold.unwrap_or(false),
-            fmt.italic.unwrap_or(false),
-        )
-    } else {
-        // No run properties at all — still inherit the document default font.
-        (
+    // Single block-level format fields come from the FIRST text run (kept for
+    // backward compatibility with existing consumers and the image-block path).
+    // For an image-only paragraph (no text run) fall back to the document
+    // default font — the same result the previous no-rPr branch produced.
+    let (font_size_pt, color, font_family, bold, italic) = match runs.first() {
+        Some(first) => (
+            first.font_size_pt,
+            first.color.clone(),
+            first.font_family.clone(),
+            first.bold,
+            first.italic,
+        ),
+        None => (
             DEFAULT_FONT_SIZE,
             None,
             theme
@@ -3333,7 +3350,7 @@ fn extract_simple_paragraph_text(
                 .or_else(|| theme.default_east_asia_font_ref()),
             false,
             false,
-        )
+        ),
     };
 
     Some(ShapeText {
@@ -3343,6 +3360,7 @@ fn extract_simple_paragraph_text(
         font_family,
         bold,
         italic,
+        runs,
         alignment: normalize_align(&alignment).to_string(),
         image_path,
         mime_type,
@@ -6225,6 +6243,61 @@ mod txbx_inline_image_tests {
         )
         .expect("text paragraph yields a block");
         assert_eq!(block.font_family, None);
+    }
+
+    /// ECMA-376 §17.3.2 — a text-box paragraph with a BOLD label run followed by
+    /// a NON-bold body run must preserve each run's formatting in `runs` (the
+    /// sample-10 Abstract: "Abstract－ " bold, the body not). The single
+    /// block-level fields still come from the first run (bold) for backward
+    /// compat, while `runs` carries the per-run bold flags.
+    #[test]
+    fn extract_simple_paragraph_text_preserves_per_run_bold() {
+        let xml = r#"<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+              <w:r><w:rPr><w:b/></w:rPr><w:t xml:space="preserve">Abstract－ </w:t></w:r>
+              <w:r><w:t>This document describes.</w:t></w:r>
+            </w:p>"#;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let block = extract_simple_paragraph_text(
+            doc.root_element(),
+            &ThemeColors::default(),
+            &HashMap::new(),
+        )
+        .expect("text paragraph yields a block");
+        // Concatenated text unchanged.
+        assert_eq!(block.text, "Abstract－ This document describes.");
+        // Single fields from the first (bold) run — backward compat.
+        assert!(block.bold);
+        // Two runs, each with its own bold flag.
+        assert_eq!(block.runs.len(), 2);
+        assert_eq!(block.runs[0].text, "Abstract－ ");
+        assert!(block.runs[0].bold);
+        assert_eq!(block.runs[1].text, "This document describes.");
+        assert!(!block.runs[1].bold);
+    }
+
+    /// A run carrying no text (e.g. a `<w:r>` holding only a `<w:tab/>`) is not
+    /// emitted as a run, so an image-only paragraph keeps `runs` empty and the
+    /// image path / single-field fallback is unchanged.
+    #[test]
+    fn extract_simple_paragraph_text_image_only_has_empty_runs() {
+        let xml = r#"<w:p
+              xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+              xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
+              xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+              xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+              <w:r><w:drawing><wp:inline>
+                <wp:extent cx="1270000" cy="635000"/>
+                <a:graphic><a:graphicData><a:blip r:embed="rIdImg"/></a:graphicData></a:graphic>
+              </wp:inline></w:drawing></w:r>
+            </w:p>"#;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let mut media = HashMap::new();
+        media.insert("rIdImg".to_string(), "word/media/image1.emf".to_string());
+        let block =
+            extract_simple_paragraph_text(doc.root_element(), &ThemeColors::default(), &media)
+                .expect("image-only paragraph must still yield a block");
+        assert!(block.runs.is_empty());
+        assert_eq!(block.image_path.as_deref(), Some("word/media/image1.emf"));
     }
 
     /// A paragraph with neither text nor an image still yields None (unchanged).

@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { preloadImages, renderShapeText } from './renderer';
-import type { DocxDocumentModel, ShapeRun, ShapeText } from './types';
+import type { DocxDocumentModel, ShapeRun, ShapeText, ShapeTextRun } from './types';
 
 /**
  * Inline images living INSIDE a DOCX text box (`<wps:txbx>`) ride on the
@@ -25,15 +25,18 @@ interface DrawImageCall {
 function makeRecordingCtx(): {
   ctx: CanvasRenderingContext2D;
   drawImageCalls: DrawImageCall[];
-  fillTextCalls: { text: string; x: number; y: number }[];
+  fillTextCalls: { text: string; x: number; y: number; font: string; fillStyle: string }[];
 } {
   let font = '10px serif';
+  let fillStyle = '#000';
   const px = () => parseFloat(/(\d+(?:\.\d+)?)px/.exec(font)?.[1] ?? '10');
   const drawImageCalls: DrawImageCall[] = [];
-  const fillTextCalls: { text: string; x: number; y: number }[] = [];
+  const fillTextCalls: { text: string; x: number; y: number; font: string; fillStyle: string }[] = [];
   const ctx = {
     get font() { return font; },
     set font(v: string) { font = v; },
+    get fillStyle() { return fillStyle; },
+    set fillStyle(v: string) { fillStyle = v; },
     measureText: (s: string) => {
       const p = px();
       return {
@@ -46,15 +49,36 @@ function makeRecordingCtx(): {
     },
     save() {}, restore() {}, beginPath() {},
     moveTo() {}, lineTo() {}, stroke() {}, fillRect() {},
-    fillText(text: string, x: number, y: number) { fillTextCalls.push({ text, x, y }); },
+    fillText(text: string, x: number, y: number) {
+      fillTextCalls.push({ text, x, y, font, fillStyle });
+    },
     strokeText() {},
     drawImage(bmp: unknown, x: number, y: number, w: number, h: number) {
       drawImageCalls.push({ bmp, x, y, w, h });
     },
-    fillStyle: '#000', strokeStyle: '#000', lineWidth: 1,
+    strokeStyle: '#000', lineWidth: 1,
     textAlign: 'left' as CanvasTextAlign, direction: 'ltr' as CanvasDirection,
   };
   return { ctx: ctx as unknown as CanvasRenderingContext2D, drawImageCalls, fillTextCalls };
+}
+
+/** Build a shape (ShapeRun) carrying a single rich-text block whose `runs`
+ *  describe per-run formatting. Insets default to 0 so layout math is easy; the
+ *  box width is supplied by the renderShapeText `w` argument at each call. */
+function richTextbox(runs: ShapeTextRun[], alignment = 'left'): ShapeRun {
+  const block: ShapeText = {
+    text: runs.map((r) => r.text).join(''),
+    // Single block-level fields come from the first run (parser backward compat).
+    fontSizePt: runs[0]?.fontSizePt ?? 10,
+    bold: runs[0]?.bold,
+    alignment,
+    runs,
+  };
+  return {
+    type: 'shape', zOrder: 0, subpaths: [], presetGeometry: 'rect', fill: null, stroke: null,
+    textBlocks: [block], textAnchor: 't',
+    textInsetL: 0, textInsetT: 0, textInsetR: 0, textInsetB: 0,
+  } as unknown as ShapeRun;
 }
 
 /** A text box (ShapeRun) whose first text block is an inline image and whose
@@ -195,6 +219,87 @@ describe('textbox inline images — rendering', () => {
     // All ink preserved (only wrap-point spaces dropped).
     const ink = fillTextCalls.map((c) => c.text).join('').replace(/\s/g, '');
     expect(ink).toBe('aaaabbbbccccddddeeee');
+  });
+});
+
+describe('textbox rich text — per-run formatting', () => {
+  /** Tokens belonging to a substring, with the font each was drawn with. */
+  function tokensFor(
+    calls: { text: string; font: string }[],
+    needle: string,
+  ): { text: string; font: string }[] {
+    // The renderer draws one fillText per token (Latin word incl. trailing
+    // space, or a single CJK char). A token "belongs" to `needle` when it is a
+    // non-empty substring of it.
+    const probe = needle.replace(/\s/g, '');
+    return calls.filter((c) => {
+      const t = c.text.replace(/\s/g, '');
+      return t.length > 0 && probe.includes(t);
+    });
+  }
+  const isBoldFont = (f: string) => /\bbold\b|\b700\b/i.test(f);
+
+  it('draws the bold label run bold and the non-bold body run non-bold', () => {
+    const { ctx, fillTextCalls } = makeRecordingCtx();
+    // sample-10 Abstract: "Abstract－ " bold, body NOT bold. Wide box ⇒ 1 line.
+    const shape = richTextbox([
+      { text: 'Abstract－ ', fontSizePt: 10, bold: true },
+      { text: 'This document.', fontSizePt: 10, bold: false },
+    ]);
+    renderShapeText(shape, 0, 0, 2000, 400, ctx, 1, {}, new Map());
+
+    // All ink preserved (wrap-point spaces aside).
+    const ink = fillTextCalls.map((c) => c.text).join('').replace(/\s/g, '');
+    expect(ink).toBe('Abstract－Thisdocument.');
+
+    // The "Abstract" tokens are bold; the body tokens are not.
+    const labelToks = tokensFor(fillTextCalls, 'Abstract－');
+    const bodyToks = tokensFor(fillTextCalls, 'Thisdocument.');
+    expect(labelToks.length).toBeGreaterThan(0);
+    expect(bodyToks.length).toBeGreaterThan(0);
+    for (const t of labelToks) expect(isBoldFont(t.font)).toBe(true);
+    for (const t of bodyToks) expect(isBoldFont(t.font)).toBe(false);
+  });
+
+  it('keeps each run its own font when mixed-run text wraps across lines', () => {
+    const { ctx, fillTextCalls } = makeRecordingCtx();
+    // 10px/char mock advance, 100px box ⇒ ~10 chars/line ⇒ forces a wrap.
+    // First run bold, second run non-bold; the wrap falls inside the body run.
+    const shape = richTextbox([
+      { text: 'aaaa ', fontSizePt: 10, bold: true },
+      { text: 'bbbb cccc dddd eeee', fontSizePt: 10, bold: false },
+    ]);
+    renderShapeText(shape, 0, 0, 100, 400, ctx, 1, {}, new Map());
+
+    // It wrapped.
+    expect(fillTextCalls.length).toBeGreaterThan(1);
+    // Bold run token "aaaa" is bold; every body token is non-bold — regardless
+    // of which line it landed on.
+    const boldToks = tokensFor(fillTextCalls, 'aaaa');
+    expect(boldToks.length).toBeGreaterThan(0);
+    for (const t of boldToks) expect(isBoldFont(t.font)).toBe(true);
+    for (const t of tokensFor(fillTextCalls, 'bbbbccccddddeeee')) {
+      expect(isBoldFont(t.font)).toBe(false);
+    }
+    // All ink preserved.
+    const ink = fillTextCalls.map((c) => c.text).join('').replace(/\s/g, '');
+    expect(ink).toBe('aaaabbbbccccddddeeee');
+  });
+
+  it('applies each run its own color', () => {
+    const { ctx, fillTextCalls } = makeRecordingCtx();
+    const shape = richTextbox([
+      { text: 'red ', fontSizePt: 10, color: 'ff0000' },
+      { text: 'plain.', fontSizePt: 10 },
+    ]);
+    renderShapeText(shape, 0, 0, 2000, 400, ctx, 1, {}, new Map());
+
+    const redToks = fillTextCalls.filter((c) => c.text.replace(/\s/g, '') === 'red');
+    const plainToks = fillTextCalls.filter((c) => c.text.replace(/\s/g, '') === 'plain.');
+    expect(redToks.length).toBeGreaterThan(0);
+    expect(plainToks.length).toBeGreaterThan(0);
+    for (const t of redToks) expect(t.fillStyle.toLowerCase()).toBe('#ff0000');
+    for (const t of plainToks) expect(t.fillStyle.toLowerCase()).toBe('#000000');
   });
 });
 

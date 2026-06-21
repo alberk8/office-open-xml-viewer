@@ -1135,6 +1135,40 @@ pub enum BreakType {
 
 // ===== Table =====
 
+/// ECMA-376 §17.4.57 `<w:tblpPr>` — floating-table positioning. Its mere
+/// presence in `<w:tblPr>` makes the table FLOAT (out of the main text flow,
+/// absolutely positioned by its top-left corner). All attributes are optional.
+#[derive(Serialize, Debug, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct TblpPr {
+    /// §17.4.57 leftFromText/rightFromText/topFromText/bottomFromText
+    /// (ST_TwipsMeasure): minimum distance to wrapping text (dist padding), pt.
+    /// Default 0.
+    pub left_from_text: f64,
+    pub right_from_text: f64,
+    pub top_from_text: f64,
+    pub bottom_from_text: f64,
+    /// §17.4.57 horzAnchor (ST_HAnchor {text,margin,page}). Default "page".
+    pub horz_anchor: String,
+    /// §17.4.57 vertAnchor (ST_VAnchor {text,margin,page}). Default "page".
+    pub vert_anchor: String,
+    /// §17.4.57 tblpX/tblpY (ST_SignedTwipsMeasure): absolute signed offset from
+    /// the horz/vert anchor edge, pt. Default 0. Ignored when the corresponding
+    /// `*Spec` is present.
+    pub tblp_x: f64,
+    pub tblp_y: f64,
+    /// §17.4.57 tblpXSpec (ST_XAlign {left,center,right,inside,outside}).
+    /// Supersedes tblpX when present. None ⇒ use the absolute offset tblpX.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tblp_x_spec: Option<String>,
+    /// §17.4.57 tblpYSpec (ST_YAlign {inline,top,center,bottom,inside,outside}).
+    /// Supersedes tblpY when present, UNLESS vertAnchor="text" (relative vertical
+    /// positioning is not allowed there ⇒ tblpYSpec is ignored, fall back to
+    /// tblpY). None ⇒ use the absolute offset tblpY.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tblp_y_spec: Option<String>,
+}
+
 #[derive(Serialize, Debug, Clone, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct DocTable {
@@ -1171,6 +1205,17 @@ pub struct DocTable {
     /// left/right borders accordingly.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bidi_visual: Option<bool>,
+    /// ECMA-376 §17.4.57 `<w:tblpPr>` — when present the table is FLOATING
+    /// (absolutely positioned, out of the main text flow). None ⇒ an ordinary
+    /// block table.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tblp_pr: Option<TblpPr>,
+    /// ECMA-376 §17.4.56 `<w:tblOverlap w:val>` (ST_TblOverlap {never,overlap}).
+    /// "never" ⇒ the floating table must be repositioned to avoid overlapping
+    /// other floats. Default "overlap" (omitted ⇒ overlap allowed). Ignored when
+    /// the table is not floating (no `tblp_pr`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub overlap: Option<String>,
 }
 
 #[derive(Serialize, Debug, Clone, Default)]

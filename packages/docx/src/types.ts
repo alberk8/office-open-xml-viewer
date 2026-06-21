@@ -763,6 +763,33 @@ export interface ImageRun {
 
 // ===== Table =====
 
+/**
+ * ECMA-376 §17.4.57 `<w:tblpPr>` — floating-table positioning. Present in
+ * `<w:tblPr>` ⇒ the table FLOATS (out of the main text flow, absolutely
+ * positioned by its top-left corner). All fields are optional in the source.
+ */
+export interface TblpPr {
+  /** §17.4.57 minimum distance to wrapping text (dist padding), pt. Default 0. */
+  leftFromText: number;
+  rightFromText: number;
+  topFromText: number;
+  bottomFromText: number;
+  /** §17.4.57 ST_HAnchor {text,margin,page}. Default 'page'. */
+  horzAnchor: 'text' | 'margin' | 'page' | string;
+  /** §17.4.57 ST_VAnchor {text,margin,page}. Default 'page'. */
+  vertAnchor: 'text' | 'margin' | 'page' | string;
+  /** §17.4.57 absolute signed offset from the horz/vert anchor edge, pt.
+   *  Default 0. Ignored when the matching `*Spec` is present. */
+  tblpX: number;
+  tblpY: number;
+  /** §17.4.57 ST_XAlign {left,center,right,inside,outside}. Supersedes tblpX. */
+  tblpXSpec?: 'left' | 'center' | 'right' | 'inside' | 'outside' | string;
+  /** §17.4.57 ST_YAlign {inline,top,center,bottom,inside,outside}. Supersedes
+   *  tblpY, UNLESS vertAnchor='text' (relative vertical positioning is not
+   *  allowed there ⇒ tblpYSpec is ignored, fall back to tblpY). */
+  tblpYSpec?: 'inline' | 'top' | 'center' | 'bottom' | 'inside' | 'outside' | string;
+}
+
 export interface DocTable {
   colWidths: number[];  // pt
   rows: DocTableRow[];
@@ -789,6 +816,13 @@ export interface DocTable {
    * is placed rightmost, and flips per-cell left/right borders accordingly.
    */
   bidiVisual?: boolean;
+  /** ECMA-376 §17.4.57 `<w:tblpPr>` — when present the table is FLOATING
+   *  (absolutely positioned, out of the main text flow). Absent ⇒ block table. */
+  tblpPr?: TblpPr;
+  /** ECMA-376 §17.4.56 `<w:tblOverlap w:val>` — 'never' | 'overlap'. 'never' ⇒
+   *  the floating table must be repositioned to avoid overlapping other floats.
+   *  Default 'overlap' (omitted ⇒ overlap allowed). Ignored when not floating. */
+  overlap?: string;
 }
 
 export interface TableBorders {

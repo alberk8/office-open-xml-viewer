@@ -4163,6 +4163,37 @@ fn parse_table(
     // per-cell left/right borders when this is set.
     let bidi_visual = tbl_pr.and_then(|p| bool_prop(p, "bidiVisual"));
 
+    // ECMA-376 §17.4.57 `<w:tblpPr>` — floating-table position. Its presence
+    // makes the table float (out of flow). twips_to_pt accepts a leading '-'
+    // (Rust f64 parsing handles signed strings), so tblpX/tblpY (signed twips)
+    // round-trip correctly.
+    let tblp_pr = tbl_pr.and_then(|p| child_w(p, "tblpPr")).map(|n| TblpPr {
+        left_from_text: attr_w(n, "leftFromText")
+            .map(|v| twips_to_pt(&v))
+            .unwrap_or(0.0),
+        right_from_text: attr_w(n, "rightFromText")
+            .map(|v| twips_to_pt(&v))
+            .unwrap_or(0.0),
+        top_from_text: attr_w(n, "topFromText")
+            .map(|v| twips_to_pt(&v))
+            .unwrap_or(0.0),
+        bottom_from_text: attr_w(n, "bottomFromText")
+            .map(|v| twips_to_pt(&v))
+            .unwrap_or(0.0),
+        horz_anchor: attr_w(n, "horzAnchor").unwrap_or_else(|| "page".to_string()),
+        vert_anchor: attr_w(n, "vertAnchor").unwrap_or_else(|| "page".to_string()),
+        tblp_x: attr_w(n, "tblpX").map(|v| twips_to_pt(&v)).unwrap_or(0.0),
+        tblp_y: attr_w(n, "tblpY").map(|v| twips_to_pt(&v)).unwrap_or(0.0),
+        tblp_x_spec: attr_w(n, "tblpXSpec"),
+        tblp_y_spec: attr_w(n, "tblpYSpec"),
+    });
+
+    // ECMA-376 §17.4.56 `<w:tblOverlap w:val>` — "never" | "overlap" (default
+    // "overlap"). Only meaningful when the table is floating.
+    let overlap = tbl_pr
+        .and_then(|p| child_w(p, "tblOverlap"))
+        .and_then(|n| attr_w(n, "val"));
+
     DocTable {
         col_widths,
         rows,
@@ -4176,6 +4207,8 @@ fn parse_table(
         width_pt: tbl_w_pt,
         width_pct: tbl_w_pct,
         bidi_visual,
+        tblp_pr,
+        overlap,
     }
 }
 

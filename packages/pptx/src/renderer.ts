@@ -2021,7 +2021,11 @@ export function renderTextBody(
     // the bullet's x and renders ON TOP of the picture (cf. the char-bullet em-
     // dash overlap noted below, and docx PR #476).
     const hasBullet =
-      para.bullet.type === 'char' || para.bullet.type === 'autoNum' || para.bullet.type === 'blip';
+      para.bullet.type === 'char' ||
+      para.bullet.type === 'autoNum' ||
+      // `blip` exists only on the PPTX-widened Bullet (the shared core type omits
+      // it), so narrow via asBullet rather than comparing the raw union member.
+      asBullet(para.bullet).type === 'blip';
 
     // Per ECMA-376 §21.1.2.4.13: when no buSz* is declared, the bullet takes
     // the first run's font size. Using paraDefaultFontSizePx here (the layout

@@ -193,7 +193,7 @@ describe('render-orchestrator image decode (lazy bytes)', () => {
     expect(cib).not.toHaveBeenCalled(); // EMF branch never touches createImageBitmap
   });
 
-  it('prefetchImages leaves an EMF-only image uncached (renderer skips a missing source)', async () => {
+  it('prefetchImages caches an EMF decode as null (sniffed once) — renderer skips a null source', async () => {
     vi.stubGlobal('createImageBitmap', vi.fn(async () => ({ width: 1, height: 1, close() {} }) as unknown as ImageBitmap));
     const ws = worksheetWithImages();
     // Point the top-level image at an EMF; the group leaf stays a PNG.
@@ -204,13 +204,22 @@ describe('render-orchestrator image decode (lazy bytes)', () => {
         ? new Blob([buildEmfHeader() as BlobPart], { type: mime })
         : new Blob([new TextEncoder().encode(path)], { type: mime }),
     );
-    const cache = new Map<string, CanvasImageSource>();
+    const cache = new Map<string, CanvasImageSource | null>();
 
     await prefetchImages(ws, cache, fetchImage);
 
-    // EMF decoded to null → not cached; the PNG group leaf is cached.
-    expect(cache.has('xl/media/image1.emf')).toBe(false);
+    // EMF decodes to null but is CACHED as null (matching pptx's getCachedBitmap):
+    // has() short-circuits the per-render prefetch so it isn't re-fetched every
+    // frame, and the renderer skips a null (falsy) source.
+    expect(cache.has('xl/media/image1.emf')).toBe(true);
+    expect(cache.get('xl/media/image1.emf')).toBeNull();
     expect(cache.has('xl/media/image2.png')).toBe(true);
-    expect(cache.size).toBe(1);
+    expect(cache.size).toBe(2);
+
+    // A second prefetch must NOT re-fetch the now-cached (null) EMF — the whole
+    // point of caching the null: the unsupported blip is sniffed exactly once.
+    const callsAfterFirst = fetchImage.mock.calls.length;
+    await prefetchImages(ws, cache, fetchImage);
+    expect(fetchImage.mock.calls.length).toBe(callsAfterFirst);
   });
 });

@@ -83,7 +83,7 @@ export async function decodeImageSource(
  *  swallowed so one broken picture doesn't sink the grid. */
 export async function prefetchImages(
   ws: Worksheet,
-  imageCache: Map<string, CanvasImageSource>,
+  imageCache: Map<string, CanvasImageSource | null>,
   fetchImage: ((path: string, mime: string) => Promise<Blob>) | undefined,
 ): Promise<void> {
   if (!fetchImage) return;
@@ -131,9 +131,13 @@ export async function prefetchImages(
           ref.widthPt,
           ref.heightPt,
         );
-        // An unsupported metafile (e.g. true EMF) decodes to null — leave the
-        // path uncached so the renderer skips a missing source, like a failure.
-        if (src) imageCache.set(ref.imagePath, src);
+        // Cache the decode result keyed by path — INCLUDING a null for an
+        // unsupported metafile (true EMF / geometry-less WMF). Storing the null
+        // (matching pptx's getCachedBitmap) makes `imageCache.has(path)` short-
+        // circuit the per-render prefetch, so the blip is sniffed ONCE instead of
+        // re-fetched + re-sniffed every viewport frame. The renderer already
+        // skips a falsy source, so a cached null draws nothing.
+        imageCache.set(ref.imagePath, src);
       } catch {
         /* leave uncached; renderer skips a missing source */
       }
@@ -145,7 +149,7 @@ export interface RenderDeps {
   ws: Worksheet;
   styles: ParsedWorkbook['styles'];
   /** Shared decoded-image cache, owned by the caller (workbook or worker). */
-  imageCache: Map<string, CanvasImageSource>;
+  imageCache: Map<string, CanvasImageSource | null>;
   math?: MathRenderer;
 }
 

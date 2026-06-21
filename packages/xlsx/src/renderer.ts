@@ -2771,7 +2771,7 @@ function sheetYForRow(
 function renderImages(
   ctx: CanvasRenderingContext2D,
   ws: Worksheet,
-  loadedImages: Map<string, CanvasImageSource>,
+  loadedImages: Map<string, CanvasImageSource | null>,
   cs: number,
   startRow: number,
   startCol: number,
@@ -2855,7 +2855,7 @@ function renderShapeGroups(
   scrollAreaY: number,
   scrollAreaW: number,
   scrollAreaH: number,
-  loadedImages?: Map<string, CanvasImageSource>,
+  loadedImages?: Map<string, CanvasImageSource | null>,
 ): void {
   if (scrollAreaW <= 0 || scrollAreaH <= 0) return;
   const anchors = ws.shapeGroups;
@@ -2917,7 +2917,7 @@ function drawShape(
   shape: ShapeInfo,
   sx: number, sy: number, sw: number, sh: number,
   cs: number,
-  loadedImages?: Map<string, CanvasImageSource>,
+  loadedImages?: Map<string, CanvasImageSource | null>,
 ): void {
   ctx.save();
   if (shape.rot !== 0) {
@@ -3072,7 +3072,7 @@ interface MathRender {
   ascentEm: number;
   descentEm: number;
   /** Per-colour tinted copies (the black `img` recoloured via source-in). */
-  tinted: Map<string, CanvasImageSource>;
+  tinted: Map<string, CanvasImageSource | null>;
 }
 const mathRenders = new WeakMap<MathNode[], MathRender>();
 

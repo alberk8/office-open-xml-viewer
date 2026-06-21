@@ -127,6 +127,20 @@ describe('classifyFontGeneric — font name → CSS generic class', () => {
   it('regression guard: Century is serif (was misclassified as sans)', () => {
     expect(classifyFontGeneric('Century')).toBe('serif');
   });
+
+  it('disambiguates substring collisions: Century Gothic / Source Sans are SANS', () => {
+    // "Century Gothic" is a geometric SANS face that shares the "century" token
+    // with the serif Century family — it must NOT be classified serif.
+    expect(classifyFontGeneric('Century Gothic')).toBe('sans');
+    expect(classifyFontGeneric('CenturyGothic')).toBe('sans');
+    // …but the rest of the Century family stays serif.
+    expect(classifyFontGeneric('Century Schoolbook')).toBe('serif');
+    expect(classifyFontGeneric('New Century Schoolbook')).toBe('serif');
+    // "Source Serif" leads with the explicit "source serif" token, so the sans
+    // sibling does not leak into serif.
+    expect(classifyFontGeneric('Source Sans Pro')).toBe('sans');
+    expect(classifyFontGeneric('Source Serif Pro')).toBe('serif');
+  });
 });
 
 describe('cjkFallbackChain — language-specific Noto CJK ordering', () => {

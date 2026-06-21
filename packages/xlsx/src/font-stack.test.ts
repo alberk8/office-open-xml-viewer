@@ -85,6 +85,10 @@ describe('cssTailFor / fontStackFor — Latin serif & mono (bug fix)', () => {
     expect(cssTailFor('Arial').endsWith('sans-serif')).toBe(true);
     expect(fontStackFor(null).endsWith('sans-serif')).toBe(true);
     expect(fontStackFor('Arial').startsWith('"Arial", "Calibri", "Carlito"')).toBe(true);
+    // "Century Gothic" is SANS despite the "century" token — must not regress to
+    // the serif default just because the serif Century family does.
+    expect(cssTailFor('Century Gothic').endsWith('sans-serif')).toBe(true);
+    expect(cssTailFor('Century Gothic')).toBe(fontStackFor(null));
   });
 
   it('regression: CJK serif/sans ordering unchanged', () => {

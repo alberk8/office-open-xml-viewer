@@ -130,8 +130,13 @@ export function classifyFontGeneric(family: string | null | undefined): FontGene
   if (!family) return 'sans';
   const l = family.toLowerCase();
   if (/mono|courier|consolas|等幅|gothic_m/.test(l)) return 'mono';
+  // `century(?!\s*gothic)` keeps the serif Century family (Century, Century
+  // Schoolbook, …) but excludes the geometric SANS "Century Gothic" — the one
+  // union token where a serif name collides with a real sans face. (The
+  // authoritative split is the §17.8.3.10 <w:family> class the caller checks
+  // first; this only refines the name-pattern fallback.)
   if (
-    /roman|times|cambria|caladea|georgia|garamond|century|palatino|didot|bodoni|playfair|source serif|noto serif|min\s*cho|明朝体|明朝|song|sung|simsun|nsimsun|batang|gungsuh|ming\s*liu|mingliu|pmingliu|fang\s*song|fangsong|kai\s*ti|kaiti|simkai|simfang|stsong|stkaiti|stfangsong|stzhongsong|新細明|細明|宋体|楷体|楷體|仿宋|標楷|游明朝|ＭＳ 明朝|ms mincho|yu mincho|hiragino mincho|ヒラギノ明朝/.test(
+    /roman|times|cambria|caladea|georgia|garamond|century(?!\s*gothic)|palatino|didot|bodoni|playfair|source serif|noto serif|min\s*cho|明朝体|明朝|song|sung|simsun|nsimsun|batang|gungsuh|ming\s*liu|mingliu|pmingliu|fang\s*song|fangsong|kai\s*ti|kaiti|simkai|simfang|stsong|stkaiti|stfangsong|stzhongsong|新細明|細明|宋体|楷体|楷體|仿宋|標楷|游明朝|ＭＳ 明朝|ms mincho|yu mincho|hiragino mincho|ヒラギノ明朝/.test(
       l,
     ) ||
     /新細明體|細明體|宋体|明朝|楷体|楷體|仿宋|標楷體|游明朝|ＭＳ 明朝/.test(family)

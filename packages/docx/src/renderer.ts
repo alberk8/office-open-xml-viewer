@@ -34,6 +34,7 @@ import {
 } from '@silurus/ooxml-core';
 import type { MathNode, MathRenderer, KinsokuRules } from '@silurus/ooxml-core';
 import { intendedSingleLinePx, correctLineMetrics } from './font-metrics.js';
+import { isWmf, isEmf, renderWmfToBitmap } from './wmf.js';
 import {
   segmentsHaveRtl,
   computeLineVisualOrder,
@@ -280,6 +281,15 @@ interface ImagePair {
    */
   svgImagePath?: string;
   colorReplaceFrom?: string;
+  /**
+   * Largest intended draw size (pt) over every reference to this key. Only used
+   * to pick a raster target resolution for vector metafiles (WMF/EMF), which
+   * have no intrinsic pixel size — the player must rasterize at a chosen size.
+   * Raster (PNG/JPEG) and SVG paths ignore it (they carry/scale their own
+   * resolution). Defaults to 0 when no size is known.
+   */
+  widthPt: number;
+  heightPt: number;
 }
 
 /** Returns a stable map key for an (imagePath, colorReplaceFrom) pair. */
@@ -318,13 +328,23 @@ function collectImagePairs(doc: DocxDocumentModel): ImagePair[] {
       if (run.type === 'image') {
         const img = run as unknown as ImageRun;
         const key = imageKey(img.imagePath, img.colorReplaceFrom);
-        if (!seen.has(key))
+        const existing = seen.get(key);
+        if (!existing) {
           seen.set(key, {
             imagePath: img.imagePath,
             mimeType: img.mimeType,
             svgImagePath: img.svgImagePath,
             colorReplaceFrom: img.colorReplaceFrom,
+            widthPt: img.widthPt ?? 0,
+            heightPt: img.heightPt ?? 0,
           });
+        } else {
+          // Same key reused (possibly at a larger size). Track the max intended
+          // draw size so a vector metafile is rasterized sharply enough for its
+          // largest occurrence.
+          existing.widthPt = Math.max(existing.widthPt, img.widthPt ?? 0);
+          existing.heightPt = Math.max(existing.heightPt, img.heightPt ?? 0);
+        }
       }
     }
   };
@@ -378,12 +398,38 @@ async function applyColorReplacement(bmp: ImageBitmap, colorHex: string): Promis
   return createImageBitmap(offscreen);
 }
 
+/** Upper bound for a metafile raster dimension (px). Keeps memory bounded for
+ *  large intended draw sizes while staying sharp at typical chart sizes. */
+const WMF_RASTER_MAX_PX = 2000;
+/** Supersampling factor for metafile rasterization (≈retina). The draw site
+ *  scales the bitmap to the resolved box via `drawImage`, so a higher intrinsic
+ *  resolution just buys sharper vector edges. */
+const WMF_RASTER_SCALE = 2;
+
+/** Pick a raster target size (px) for a vector metafile from its intended draw
+ *  size (pt), supersampled and capped. Falls back to a sane square when the
+ *  intended size is unknown (0). */
+function wmfRasterTarget(widthPt: number, heightPt: number): { w: number; h: number } {
+  const fallbackPt = 300; // ~4 inch — only used when no size is surfaced
+  const wPt = widthPt > 0 ? widthPt : fallbackPt;
+  const hPt = heightPt > 0 ? heightPt : fallbackPt;
+  const clamp = (n: number) => Math.max(1, Math.min(WMF_RASTER_MAX_PX, Math.round(n)));
+  return { w: clamp(wPt * WMF_RASTER_SCALE), h: clamp(hPt * WMF_RASTER_SCALE) };
+}
+
 /**
  * Decode a raster blip to an `ImageBitmap`, pulling the bytes lazily by zip path
  * via `fetchImage(imagePath, mimeType)` (twin of pptx's `fetchImage`) rather
  * than `fetch`-ing an inlined data URL. Applies an `a:clrChange`
  * (`colorReplaceFrom`) make-transparent pass when requested — unchanged
  * post-decode behavior.
+ *
+ * Browsers can't decode WMF/EMF via `createImageBitmap`, so the bytes are
+ * content-sniffed first (extension/MIME are unreliable — sample-10's chart is a
+ * standard WMF mislabeled `.emf`). A WMF is rasterized by our minimal player
+ * ({@link renderWmfToBitmap}) at a size derived from `widthPt`/`heightPt`. A
+ * true EMF is detected but not yet interpreted; it throws so `preloadImages`
+ * drops it (the existing "missing image" behavior, no crash).
  *
  * Exported for unit testing of the lazy-bytes contract.
  */
@@ -392,8 +438,24 @@ export async function decodeRaster(
   mimeType: string,
   colorReplaceFrom: string | undefined,
   fetchImage: (path: string, mime: string) => Promise<Blob>,
+  widthPt = 0,
+  heightPt = 0,
 ): Promise<ImageBitmap> {
   const blob = await fetchImage(imagePath, mimeType);
+  const bytes = new Uint8Array(await blob.arrayBuffer());
+
+  if (isWmf(bytes)) {
+    const { w, h } = wmfRasterTarget(widthPt, heightPt);
+    const wmfBmp = await renderWmfToBitmap(bytes, w, h);
+    if (!wmfBmp) throw new Error(`WMF ${imagePath} produced no drawable output`);
+    return colorReplaceFrom ? applyColorReplacement(wmfBmp, colorReplaceFrom) : wmfBmp;
+  }
+  if (isEmf(bytes)) {
+    // TODO: EMF is a separate, larger format than WMF — follow-up. For now,
+    // skip gracefully (drop → current "missing image" behavior).
+    throw new Error(`EMF ${imagePath} is not yet supported`);
+  }
+
   let bmp = await createImageBitmap(blob);
   if (colorReplaceFrom) {
     bmp = await applyColorReplacement(bmp, colorReplaceFrom);
@@ -434,7 +496,7 @@ export async function preloadImages(
           } catch {
             img = dataIsSvg
               ? await getCachedSvgImageByPath(pair.imagePath, fetch)
-              : await decodeRaster(pair.imagePath, pair.mimeType, pair.colorReplaceFrom, fetch);
+              : await decodeRaster(pair.imagePath, pair.mimeType, pair.colorReplaceFrom, fetch, pair.widthPt, pair.heightPt);
           }
         } else if (dataIsSvg) {
           // svg-only picture (no svgImagePath surfaced — e.g. a non-svgBlip
@@ -442,7 +504,7 @@ export async function preloadImages(
           // through the path-keyed <img>-based SVG path.
           img = await getCachedSvgImageByPath(pair.imagePath, fetch);
         } else {
-          img = await decodeRaster(pair.imagePath, pair.mimeType, pair.colorReplaceFrom, fetch);
+          img = await decodeRaster(pair.imagePath, pair.mimeType, pair.colorReplaceFrom, fetch, pair.widthPt, pair.heightPt);
         }
         return [imageKey(pair.imagePath, pair.colorReplaceFrom), img];
       } catch {

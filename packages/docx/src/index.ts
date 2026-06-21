@@ -40,6 +40,7 @@ export type {
   DocxRunBorder,
   // Table model (reachable via BodyElement table variant).
   DocTable,
+  TblpPr,
   DocTableRow,
   DocTableCell,
   CellElement,

@@ -1,7 +1,7 @@
 import type {
   DocxDocumentModel, BodyElement, PaginatedBodyElement, DocParagraph, DocTable, DocTableRow, DocTableCell, CellElement,
   DocRun, DocxTextRun, ImageRun, ShapeRun, ShapeTextRun, FieldRun, HeaderFooter, LineSpacing, BorderSpec, TableBorders, CellBorders,
-  TabStop, ParagraphBorders, ParaBorderEdge, DocxRunBorder, SectionProps, DocNote, NumberingInfo, ColumnGeom, FramePr,
+  TabStop, ParagraphBorders, ParaBorderEdge, DocxRunBorder, SectionProps, DocNote, NumberingInfo, ColumnGeom, FramePr, TblpPr,
 } from './types';
 import type { ArrowEnd, Stroke } from '@silurus/ooxml-core';
 import {
@@ -1430,6 +1430,40 @@ export function computePages(
       prevSpaceAfter = para.spaceAfter;
     } else if (el.type === 'table') {
       const tbl = el as unknown as DocTable;
+
+      // ECMA-376 §17.4.57 `<w:tblpPr>`: a floating table is positioned OUT OF
+      // FLOW (like a frame paragraph, §17.3.1.11). It does NOT advance the page
+      // cursor and is not split. Register its wrap float on the measureState so
+      // following paragraphs estimate around it, then emit it onto the current
+      // page (the renderer draws it absolutely). prevPara/spaceAfter are left
+      // untouched so the following paragraph spaces against the paragraph BEFORE
+      // the table.
+      //
+      // ヒューリスティック、§17.4.57 TODO: floating table page-fit is Word runtime
+      // behavior, not spec-defined. Minimal: keep on current page (no break /
+      // relocation across pages here; only the in-page wrap band is modeled).
+      if (tbl.tblpPr) {
+        // KNOWN LIMITATION (#513): measureState.contentX/contentW stay at the
+        // full content band here (they are not re-pointed per newspaper column
+        // the way renderBodyElements does for the paint pass). So for a
+        // horzAnchor="text" floating table inside a MULTI-COLUMN section the
+        // paginator estimates its wrap band against the full band while the
+        // renderer paints it in the owning column — measure and paint diverge.
+        // Harmless for single-column / page|margin-anchored tables (the common
+        // case, incl. sample-11). Threading per-column geometry into the measure
+        // pass (shared with the frame branch) is tracked as a follow-up.
+        // measureState.scale is 1, so colW() (pt) equals the px content width
+        // computeTableLayout expects (it re-divides by scale internally).
+        const cW = colW() * measureState.scale;
+        const layout = computeTableLayout(tbl, cW, measureState);
+        const tableH = layout.rowHeights.reduce((s, x) => s + x, 0);
+        const box = computeFloatTableBox(tbl.tblpPr, measureState, measureState.y, layout.tableW, tableH);
+        const side = floatTableWrapSide(box, measureState);
+        registerTableFloat(box, tbl.tblpPr, measureState, side, tbl.overlap !== 'never');
+        pushTagged(el as PaginatedBodyElement);
+        continue;
+      }
+
       // Tables in a multi-column section are sized to the column width, not the
       // full content band.
       const rowHs = computeTableRowHeights(measureState, tbl, colW());
@@ -2392,9 +2426,17 @@ function renderBodyElements(
       prevPara = para;
       prevSpaceAfter = para.spaceAfter;
     } else if (el.type === 'table') {
-      renderTable(el as unknown as DocTable, state);
-      prevPara = null;
-      prevSpaceAfter = 0;
+      const tbl = el as unknown as DocTable;
+      // A floating table (ECMA-376 §17.4.57 `<w:tblpPr>`) is out of flow: it is
+      // drawn absolutely by renderFloatTable and adds no flow height, so leave
+      // prevPara/spaceAfter untouched (the following content spaces against the
+      // paragraph BEFORE the table, exactly like a frame paragraph). A block
+      // table resets them (it ends the previous spacing context).
+      renderTable(tbl, state);
+      if (!tbl.tblpPr) {
+        prevPara = null;
+        prevSpaceAfter = 0;
+      }
     }
   }
 }
@@ -2556,6 +2598,16 @@ export interface FrameBox {
   exRight: number;
   exTop: number;
   exBottom: number;
+}
+
+/** Resolved top-left placement (canvas px) of a floating table (`<w:tblpPr>`,
+ *  ECMA-376 §17.4.57). `w`/`h` are the rendered table extent (sum of column
+ *  widths × row heights). Exported for unit tests only — not package API. */
+export interface FloatTableBox {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
 }
 
 /**
@@ -2840,6 +2892,171 @@ export function registerFrameFloat(box: FrameBox, fp: FramePr, state: RenderStat
     drawn: true, // painted by renderFrameParagraph; deferred path must skip it.
   };
   state.floats.push(rect);
+}
+
+// ===== Floating tables (ECMA-376 §17.4.57 w:tblpPr / §17.4.56 w:tblOverlap) =====
+
+/**
+ * Resolve a floating table's top-left placement (canvas px) from its
+ * `<w:tblpPr>` (ECMA-376 §17.4.57). `tableW`/`tableH` are the already-laid-out
+ * table extent in px. The anchor / alignment semantics line up 1:1 with a
+ * `<w:framePr>` text frame (horzAnchor↔hAnchor, vertAnchor↔vAnchor,
+ * tblpXSpec↔xAlign, tblpYSpec↔yAlign, tblpX/tblpY↔x/y), so this mirrors
+ * {@link computeFrameBox}'s placement math exactly — `frameXContainer` /
+ * `frameYContainer` give the same per-anchor bands (text→column band,
+ * margin→page content margin, page→physical edges), which is the #513
+ * column-integrity guarantee.
+ *
+ * Exported for unit tests only (the float-table-geometry table) — not package API.
+ */
+export function computeFloatTableBox(
+  tp: TblpPr,
+  state: RenderState,
+  paraTop: number,
+  tableW: number,
+  tableH: number,
+): FloatTableBox {
+  const sc = state.scale;
+  const hx = frameXContainer(tp.horzAnchor, state);
+  const vy = frameYContainer(tp.vertAnchor, paraTop, state);
+
+  // Horizontal: tblpXSpec (ST_XAlign) supersedes the absolute tblpX offset
+  // (§17.4.57). Mirrors computeFrameBox's xAlign handling.
+  let x: number;
+  if (tp.tblpXSpec) {
+    switch (tp.tblpXSpec) {
+      case 'center':
+        x = hx.left + (hx.right - hx.left - tableW) / 2;
+        break;
+      case 'right':
+      case 'outside':
+        x = hx.right - tableW;
+        break;
+      case 'left':
+      case 'inside':
+      default:
+        x = hx.left;
+        break;
+    }
+  } else {
+    // §17.4.57 tblpX: absolute signed offset from the horzAnchor left edge.
+    x = hx.left + tp.tblpX * sc;
+  }
+
+  // Vertical: tblpYSpec (ST_YAlign) supersedes the absolute tblpY offset
+  // (§17.4.57) — EXCEPT when vertAnchor="text", where relative vertical
+  // positioning is not allowed and tblpYSpec is ignored (fall back to tblpY).
+  // Mirrors computeFrameBox's yAlign handling (ignored when vAnchor="text").
+  let y: number;
+  if (tp.tblpYSpec && tp.vertAnchor !== 'text') {
+    switch (tp.tblpYSpec) {
+      case 'center':
+        y = vy + (state.pageH - tableH) / 2 - state.marginTop * sc;
+        break;
+      case 'bottom':
+      case 'outside':
+        y = (state.pageH - state.marginBottom * sc) - tableH;
+        break;
+      case 'top':
+      case 'inside':
+      case 'inline':
+      default:
+        y = vy;
+        break;
+    }
+  } else {
+    y = vy + tp.tblpY * sc;
+  }
+
+  return { x, y, w: tableW, h: tableH };
+}
+
+/**
+ * Push the wrap-exclusion FloatRect for a resolved floating-table box onto
+ * `state.floats` so following body text flows around the table (§17.4.57). The
+ * exclusion is the table box padded by the *FromText dist values. Overlap
+ * avoidance (§17.4.56) runs FIRST (mirroring registerShapeFloat: resolve x/y,
+ * THEN build the exclusion from the resolved x/y) with allowOverlap =
+ * `table.overlap !== 'never'` (default true ⇒ overlap permitted).
+ *
+ * `side` (which side text wraps on) is computed by the caller from the resolved
+ * box vs the column band: the table sits to one side and text fills the other
+ * (§17.4.57). The x-range is built from the box (which for horzAnchor="text" is
+ * column-relative via frameXContainer), so resolveLineFloatWindow only
+ * constrains the matching column (#513), consistent with registerFrameFloat.
+ *
+ * Exported for unit tests only (the float-table-geometry table) — not package API.
+ */
+export function registerTableFloat(
+  box: FloatTableBox,
+  tp: TblpPr,
+  state: RenderState,
+  side: string,
+  allowOverlap: boolean,
+): void {
+  if (box.w <= 0 || box.h <= 0) return;
+  const sc = state.scale;
+  const dl = tp.leftFromText * sc;
+  const dr = tp.rightFromText * sc;
+  const dt = tp.topFromText * sc;
+  const db = tp.bottomFromText * sc;
+  const paraId = state.floatParaSeq++;
+
+  // §17.4.56: resolve overlap against already-registered page floats before
+  // fixing the exclusion rect. allowOverlap=false (tblOverlap="never") forces
+  // avoidance of ALL floats; allowOverlap=true only avoids OTHER paragraphs'
+  // floats (the implementation-defined scope documented on resolveFloatOverlap).
+  const resolved = resolveFloatOverlap(
+    box.x, box.y, box.w, box.h, dl, dr, dt, db, paraId, allowOverlap,
+    state.pageWidth * state.scale, state.floats,
+  );
+  const px = resolved.x;
+  const py = resolved.y;
+
+  const rect: FloatRect = {
+    mode: 'square',
+    imageKey: '', // non-image float: the table is painted by renderFloatTable.
+    imageX: px,
+    imageY: py,
+    imageW: box.w,
+    imageH: box.h,
+    xLeft: px - dl,
+    xRight: px + box.w + dr,
+    yTop: py - dt,
+    yBottom: py + box.h + db,
+    side,
+    distLeft: dl,
+    distRight: dr,
+    distTop: dt,
+    distBottom: db,
+    paraId,
+    drawn: true, // painted by renderFloatTable; deferred image path must skip it.
+  };
+  state.floats.push(rect);
+}
+
+/**
+ * §17.4.57 — which side the body text wraps on, from the resolved float box vs
+ * the current COLUMN band [contentX, contentX+contentW]. A floating table sits
+ * to ONE side of the column and text fills the OTHER:
+ *   - float's right edge at/left-of the column centre ⇒ float on the LEFT ⇒
+ *     text wraps on the RIGHT (side='right').
+ *   - float's left edge at/right-of the column centre ⇒ float on the RIGHT ⇒
+ *     text wraps on the LEFT (side='left').
+ *   - otherwise the float straddles the centre ⇒ 'bothSides' (resolveLineFloat-
+ *     Window then takes the widest free gap on either flank).
+ * Coordinates are page-absolute px; the comparison is against the column band so
+ * a per-column floating table wraps within its own column (#513).
+ *
+ * Exported for unit tests only (the float-table-geometry table) — not package API.
+ */
+export function floatTableWrapSide(box: FloatTableBox, state: RenderState): string {
+  const colLeft = state.contentX;
+  const colRight = state.contentX + state.contentW;
+  const center = (colLeft + colRight) / 2;
+  if (box.x + box.w <= center) return 'right';
+  if (box.x >= center) return 'left';
+  return 'bothSides';
 }
 
 /**
@@ -5556,26 +5773,24 @@ function registerShapeFloat(
 
 // ===== Table rendering =====
 
-function renderTable(table: DocTable, state: RenderState): void {
-  const { ctx, scale, contentX, contentW, dryRun } = state;
-
+/** Per-column widths (px), total table width (px), and per-row heights (px,
+ *  with the §17.4.85 vMerge-span extension applied) for a table laid out in a
+ *  content band `contentWPx` wide. Shared by the block ({@link renderTable}) and
+ *  floating ({@link renderFloatTable}) paths so both size the table identically. */
+function computeTableLayout(
+  table: DocTable,
+  contentWPx: number,
+  state: RenderState,
+): { colWidths: number[]; tableW: number; rowHeights: number[] } {
+  const { scale } = state;
   // Resolve column widths in pt (autofit by preferred widths, or fixed grid),
   // already scaled to fit the available content width, then convert to px.
-  const colWidths = resolveColumnWidths(table, contentW / scale, state).map((w) => w * scale);
-
-  // Horizontal table alignment on the page (w:tblPr/w:jc).
+  const colWidths = resolveColumnWidths(table, contentWPx / scale, state).map((w) => w * scale);
   const tableW = colWidths.reduce((s, w) => s + w, 0);
-  const tableX =
-    table.jc === 'center'
-      ? contentX + Math.max(0, (contentW - tableW) / 2)
-      : table.jc === 'right'
-        ? contentX + Math.max(0, contentW - tableW)
-        : contentX;
 
   const rowHeights: number[] = [];
   for (const row of table.rows) {
-    const rowH = calculateRowHeight(row, table, colWidths, scale, state);
-    rowHeights.push(rowH);
+    rowHeights.push(calculateRowHeight(row, table, colWidths, scale, state));
   }
 
   // ECMA-376 §17.4.85: extend each vMerge span's last row when the restart
@@ -5600,6 +5815,24 @@ function renderTable(table: DocTable, state: RenderState): void {
     }
   }
 
+  return { colWidths, tableW, rowHeights };
+}
+
+/** Draw all rows of a table whose grid origin is `tableX` (px) and whose top is
+ *  `startY` (px), returning the Y just past the last row. Shared by the block
+ *  and floating paths. Honors bidiVisual, vMerge span heights, and exact-row
+ *  clipping exactly as the original inline loop did. In dryRun, measures cell
+ *  content instead of drawing. */
+function drawTableRows(
+  table: DocTable,
+  colWidths: number[],
+  tableW: number,
+  rowHeights: number[],
+  tableX: number,
+  startY: number,
+  state: RenderState,
+): number {
+  const { scale, dryRun } = state;
   // ECMA-376 §17.4.1 `<w:bidiVisual>`: lay the grid columns right-to-left, so
   // logical column 0 sits at the table's RIGHT edge and indices advance
   // leftward. We mirror by POSITION arithmetic (not canvas transform): a cell
@@ -5610,7 +5843,7 @@ function renderTable(table: DocTable, state: RenderState): void {
   // from logical column offset to a physical x flips.
   const mirror = table.bidiVisual === true;
 
-  let y = state.y;
+  let y = startY;
   for (let ri = 0; ri < table.rows.length; ri++) {
     const row = table.rows[ri];
     const rowH = rowHeights[ri];
@@ -5653,6 +5886,74 @@ function renderTable(table: DocTable, state: RenderState): void {
 
     y += rowH;
   }
+  return y;
+}
+
+/**
+ * Render a FLOATING table (ECMA-376 §17.4.57 `<w:tblpPr>`). Like a `<w:framePr>`
+ * frame, it is OUT OF FLOW: drawn at an absolute (anchor-relative) position and
+ * consuming ZERO flow height, so the following content begins where the table's
+ * anchor paragraph sat. A wrap-exclusion FloatRect is registered (§17.4.57
+ * *FromText padding, §17.4.56 overlap) so the body text flows around it.
+ *
+ * Mirrors {@link renderFrameParagraph}: save contentX/contentW/y, redirect the
+ * flow geometry to the resolved box, draw the rows, then RESTORE the in-flow
+ * state.y (the float adds no flow height). In dryRun the rows are not drawn but
+ * the float is still registered so wrap estimates see the band.
+ */
+function renderFloatTable(table: DocTable, state: RenderState): void {
+  const tp = table.tblpPr!;
+  const inFlowY = state.y;
+  const savedX = state.contentX;
+  const savedW = state.contentW;
+
+  // Lay the table out in its anchor column's content band, then place its box.
+  // tableW is the ACTUAL rendered width (sum of column widths), so the FloatRect
+  // exclusion matches the painted table exactly (#513 column integrity: for
+  // horzAnchor="text" the box.x derives from the column band via
+  // frameXContainer, so the wrap stays inside this column).
+  const { colWidths, tableW, rowHeights } = computeTableLayout(table, state.contentW, state);
+  const tableH = rowHeights.reduce((s, h) => s + h, 0);
+  const box = computeFloatTableBox(tp, state, inFlowY, tableW, tableH);
+  const side = floatTableWrapSide(box, state);
+
+  // Redirect the flow geometry to the float box and draw the rows there. The
+  // table is positioned absolutely; its grid origin is box.x (no jc — a floating
+  // table's position is dictated entirely by tblpPr, §17.4.57).
+  state.contentX = box.x;
+  state.contentW = tableW;
+  drawTableRows(table, colWidths, tableW, rowHeights, box.x, box.y, state);
+  state.contentX = savedX;
+  state.contentW = savedW;
+
+  // Restore the in-flow cursor: a floating table consumes NO body flow height
+  // (§17.4.57 — out of flow), so the following content spaces as if it weren't
+  // here. (renderFrameParagraph does the same for a frame.)
+  state.y = inFlowY;
+
+  registerTableFloat(box, tp, state, side, table.overlap !== 'never');
+}
+
+function renderTable(table: DocTable, state: RenderState): void {
+  // ECMA-376 §17.4.57: a `<w:tblpPr>` table floats — divert to the out-of-flow
+  // path before the normal block layout (which would advance state.y).
+  if (table.tblpPr) {
+    renderFloatTable(table, state);
+    return;
+  }
+
+  const { contentX, contentW } = state;
+  const { colWidths, tableW, rowHeights } = computeTableLayout(table, contentW, state);
+
+  // Horizontal table alignment on the page (w:tblPr/w:jc).
+  const tableX =
+    table.jc === 'center'
+      ? contentX + Math.max(0, (contentW - tableW) / 2)
+      : table.jc === 'right'
+        ? contentX + Math.max(0, contentW - tableW)
+        : contentX;
+
+  const y = drawTableRows(table, colWidths, tableW, rowHeights, tableX, state.y, state);
 
   state.y = y;
 }

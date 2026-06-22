@@ -5922,15 +5922,35 @@ function drawBorderLine(
   const lw = Math.max(0.5, spec.width * scale);
 
   if (spec.style === 'double') {
-    // ECMA-376 §17.18.2 ST_Border "double": a double line around the object.
-    // The standard does not normatively define the rail/gap geometry, so this
-    // matches Word's rendering — three equal bands across the nominal width
-    // (line / gap / line), each rail = sz/3, gap = sz/3, the pair centered on
-    // the edge. (Word's own UI labels `sz` as the total double-border width.)
-    const railW = Math.max(0.5, lw / 3);
-    const offset = (lw - railW) / 2; // rail centers sit ±offset from the edge
-    strokeCrispSegment(ctx, x1, y1, x2, y2, railW, dpr, -offset);
-    strokeCrispSegment(ctx, x1, y1, x2, y2, railW, dpr, offset);
+    // ECMA-376 §17.18.2 ST_Border "double": two parallel lines. The standard
+    // leaves the rail/gap PIXEL geometry to the implementation, so this matches
+    // Word — three bands across the nominal width (line / gap / line, each
+    // ≈ lw/3) — but with each band FLOORED at one device pixel so a thin double
+    // (e.g. sz6 ≈ 0.75px) never collapses into a single line. This is a
+    // rendering-legibility floor, NOT a content heuristic; for thick borders it
+    // reduces to the equal line/gap/line thirds.
+    //
+    // Drawn as device-pixel-aligned FILLS rather than two independently
+    // crisp-snapped strokes: `crispOffset` snaps each thin rail to the nearest
+    // device row on its own, which would pull two rails only ~1px apart back on
+    // top of each other and re-collapse the gap. Computing both rails from a
+    // single rounded band origin in device space keeps the rail/gap/rail bands
+    // whole device pixels, so the gap survives at any sz/scale/dpr.
+    const railDev = Math.max(1, Math.round((lw * dpr) / 3));
+    const gapDev = Math.max(1, Math.round((lw * dpr) / 3));
+    const spanDev = 2 * railDev + gapDev;
+    ctx.fillStyle = ctx.strokeStyle;
+    const horizontal = y1 === y2;
+    if (horizontal) {
+      // Centre the band on the edge, snapped to a whole device row.
+      const startDev = Math.round(y1 * dpr - spanDev / 2);
+      ctx.fillRect(x1, startDev / dpr, x2 - x1, railDev / dpr);
+      ctx.fillRect(x1, (startDev + railDev + gapDev) / dpr, x2 - x1, railDev / dpr);
+    } else {
+      const startDev = Math.round(x1 * dpr - spanDev / 2);
+      ctx.fillRect(startDev / dpr, y1, railDev / dpr, y2 - y1);
+      ctx.fillRect((startDev + railDev + gapDev) / dpr, y1, railDev / dpr, y2 - y1);
+    }
     ctx.restore();
     return;
   }

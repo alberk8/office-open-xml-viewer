@@ -2020,8 +2020,12 @@ function computeTableRowHeights(state: RenderState, table: DocTable, contentWPt:
     // suppressSpaceBefore flag is for page-break continuations, not intra-cell
     // collapse), so sumCellContentHeight folds in contextualSuppressed
     // (§17.3.1.33) and the prevSpaceAfter/spaceBefore overlap to match the
-    // paint pass's renderCellContent.
-    return cm.top + cm.bottom + sumCellContentHeight(cell.content, (ce) => {
+    // paint pass's renderCellContent. Drop the §17.4.7 trailing structural
+    // empty paragraph after a nested table for the SAME reason the paint-side
+    // measurer (measureCellContentHeightPx) does — otherwise the paginator
+    // would reserve more height than the paint pass uses and break the page
+    // early (the two are contracted to agree, per this function's docstring).
+    return cm.top + cm.bottom + sumCellContentHeight(trimTrailingStructuralMarker(cell.content), (ce) => {
       if (ce.type === 'paragraph') {
         return estimateParagraphHeight(state, ce as unknown as DocParagraph, innerW);
       }
@@ -2041,16 +2045,15 @@ function estimateTableHeight(state: RenderState, table: DocTable, contentWPt: nu
  *   - layout === 'fixed': use the tblGrid widths verbatim (the historical
  *     behavior), then scale down proportionally if the grid total overflows the
  *     available content width.
- *   - layout absent or 'autofit' (the spec default): each grid column's width is
- *     the maximum *preferred* width (cell `widthPt`, i.e. `<w:tcW type="dxa">`,
- *     or `widthPct` resolved against `contentWPt`) over the cells anchored in
- *     it. A gridSpan cell contributes its preference distributed across the
- *     columns it spans, in proportion to those columns' tblGrid widths, but
- *     only raises a column above what single-column cells already require.
- *     Columns with no preference anywhere keep their tblGrid width. If the
- *     resulting table width exceeds `contentWPt`, all columns are scaled
- *     proportionally to fit — this is what Word does when the preferred-width
- *     sum overflows the text column.
+ *   - layout absent or 'autofit' (the spec default): the tblGrid widths
+ *     (§17.4.48) ARE the column widths, scaled to fit `contentWPt`, with each
+ *     column's content min-width (§17.4.52 auto-fit grows a column too narrow
+ *     for its longest token) the only thing that can raise it. Per-cell `tcW`
+ *     (§17.4.71) is NOT applied here: Word bakes the resolved auto-fit widths
+ *     back into the saved `<w:gridCol>`, so for a round-tripped file the grid is
+ *     already the tcW-resolved layout (see the in-body comment for the full
+ *     rationale + the sample-3 evidence + the tblW=pct limitation). Only a
+ *     degenerate all-zero grid falls back to a tcW-preference distribution.
  *
  * The returned widths sum to at most `contentWPt`. Both `renderTable` (which
  * then multiplies by the device scale) and `computeTableRowHeights` (which
@@ -2110,7 +2113,10 @@ function cellMinContentPt(cell: DocTableCell, table: DocTable, state: RenderStat
   return maxTokenPt + cm.left + cm.right;
 }
 
-function resolveColumnWidths(table: DocTable, contentWPt: number, state: RenderState): number[] {
+/** Resolve a table's per-grid-column widths (pt) to fit `contentWPt`. Exported
+ *  for unit tests (column-widths.test) — see {@link calculateRowHeight} for the
+ *  same test-export pattern. */
+export function resolveColumnWidths(table: DocTable, contentWPt: number, state: RenderState): number[] {
   const n = table.colWidths.length;
   if (n === 0) return [];
 
@@ -2205,10 +2211,43 @@ function resolveColumnWidths(table: DocTable, contentWPt: number, state: RenderS
     return g;
   }
 
-  // Autofit (default): preferred widths drive the column sizes.
+  // Autofit (default). Use the `<w:tblGrid>` (§17.4.48 / gridCol §17.4.16) as
+  // the column widths, scaled to fit, with content min-widths the only grower.
+  //
+  // DELIBERATE DEVIATION from the literal autofit algorithm, to match Word's
+  // actual output: §17.4.16 (gridCol Note) and §17.4.52 (tblLayout) make a
+  // cell's preferred `<w:tcW>` (§17.4.71) an INPUT that can OVERRIDE the grid's
+  // initial widths. But Word does not ship the pre-autofit state — it BAKES the
+  // resolved autofit widths back into the saved `<w:gridCol>` values. So for a
+  // round-tripped Word file (every real-world docx) the grid already IS the
+  // tcW-resolved layout; re-applying `tcW` on top double-counts and diverges
+  // from the ground-truth PDF. sample-3's résumé grid is [2137, 222, 2430, 279,
+  // 2427, 279] twips (a deliberately narrow first content column), yet each
+  // row's single-column cells carry `tcW≈30%`; the old "tcW overrides grid"
+  // path equalized the columns to ~116 pt apiece, shifting every later column
+  // right (the 2nd heading moved ~11 pt past Word's x) and re-wrapping the
+  // description paragraphs past their divider rule. Trusting the grid reproduces
+  // Word exactly.
+  //
+  // LIMITATION: a `tblW=pct` (§17.4.63) table whose SAVED grid no longer matches
+  // the available width (e.g. authored under different margins, or by a tool
+  // that did not bake the grid) is NOT re-scaled up to the pct target here — the
+  // grid is taken as-is (only scaled DOWN by `fitToContent` on overflow). In
+  // practice the renderer lays a table out at the same content width Word saved
+  // it under, so the grid sums to that width; the gap only appears for stale /
+  // non-Word grids. Tracked for a future full tblW pass.
+  const gridSum = grid.reduce((s, w) => s + w, 0);
+  if (gridSum > 0) {
+    const desired = grid.map((g, c) => Math.max(g, minW[c]));
+    return fitToContent(desired);
+  }
+
+  // Degenerate grid (no `<w:gridCol>` widths, e.g. a hand-built model or a
+  // malformed table): fall back to preferred-width autofit, where `tcW` and
+  // content drive the column sizes since there is no grid to anchor them.
   // `pref[c]` accumulates the strongest single-column preference seen so far.
   const pref: number[] = new Array(n).fill(0);
-  // `gridFallback[c]` is true while no cell has expressed a preference for c.
+  // `hasPref[c]` is true once any cell has expressed a preference for c.
   const hasPref: boolean[] = new Array(n).fill(false);
 
   // Translate a cell's `<w:tcW>` into a preferred width in pt, or null when the
@@ -5670,12 +5709,22 @@ function measureCellContentHeightPx(
 ): number {
   const cm = effCellMargins(cell, table);
   const contentW = cellW - (cm.left + cm.right) * scale;
+  // ECMA-376 §17.4.7 requires every <w:tc> to end with a <w:p>. When the cell's
+  // visible content is a nested table, Word emits a trailing empty <w:p/> purely
+  // as that syntactic anchor; it carries no ink and does NOT grow the row (Word's
+  // outer cell hugs the inner table — sample-11's "table inside a table" outer
+  // row measures the inner table height, not inner + the structural mark's line
+  // box + its inherited space-before). Drop it from the row-height measurement,
+  // exactly as the vAlign block height already does (trimTrailingStructuralMarker).
+  // The mark itself is still painted by renderCellContent; being empty it adds no
+  // visible content, so excluding it from sizing cannot hide anything.
+  const measured = trimTrailingStructuralMarker(cell.content);
   // measureCellElementHeight always includes paragraph spaceBefore+spaceAfter;
   // sumCellContentHeight folds in contextualSuppressed (§17.3.1.33) and the
   // prevSpaceAfter/spaceBefore overlap collapse to match the paint pass's
   // renderCellContent. Spacing is converted from pt to px with `scale`.
   return (cm.top + cm.bottom) * scale + sumCellContentHeight(
-    cell.content,
+    measured,
     (ce) => measureCellElementHeight(state, ce, contentW, scale),
     scale,
   );
@@ -5895,7 +5944,30 @@ function measureParaHeight(
     const { asc, desc } = emptyLineNaturalPx(fs, scale);
     return lineBoxHeight(para.lineSpacing, asc, desc, scale, grid, paraHasRuby, emptyIntendedSinglePx(para, scale), paragraphIsEastAsian(para));
   }
-  const lines = layoutLines(state.ctx, segs, maxWidth, 0, scale, para.tabStops, undefined, state.fontFamilyClasses, 0, state.kinsoku, gridCharDeltaPx(grid, scale));
+  // ECMA-376 §17.3.1.12 (`<w:ind>`): the paragraph's own left/right indent
+  // narrows the wrap width and `firstLine` insets the first line — exactly as
+  // the paint pass (renderParagraph) and the paginator (estimateParagraphHeight)
+  // lay it out. The row-height measurer MUST honor them too: without the indent,
+  // a cell paragraph that carries a first-line/left indent (e.g. sample-11's
+  // table cells, firstLine=21.6 pt) is measured for fewer wrapped lines than it
+  // paints, so the row is sized too short and the overflow ("Town" /
+  // "University") bleeds into the next row. `maxWidth` is the cell's inner width
+  // (cell margins already removed by the caller); the paragraph indents come off
+  // it here. `tabOriginPx = indentLeft` mirrors layoutLines' tab origin in the
+  // paint/paginate paths.
+  //
+  // NOTE: like `estimateParagraphHeight` (the paginator), this passes the raw
+  // `indentFirst` and does NOT model a numbering marker's `numBodyOffset` (the
+  // hanging-indent first-line geometry `renderParagraph` applies for a numbered
+  // paragraph). The two non-paint measurers therefore stay consistent with each
+  // other, but a NUMBERED paragraph inside a cell that wraps can still measure
+  // slightly differently from the paint pass. No such cell exists in the covered
+  // samples; revisit together with estimateParagraphHeight if list-in-cell
+  // fidelity is needed.
+  const indLeftPx = para.indentLeft * scale;
+  const indRightPx = para.indentRight * scale;
+  const paraW = Math.max(1, maxWidth - indLeftPx - indRightPx);
+  const lines = layoutLines(state.ctx, segs, paraW, para.indentFirst * scale, scale, para.tabStops, undefined, state.fontFamilyClasses, indLeftPx, state.kinsoku, gridCharDeltaPx(grid, scale));
   return lines.reduce((s, l) => s + lineBoxHeight(para.lineSpacing, l.ascent, l.descent, scale, grid, paraHasRuby, l.intendedSingle, paragraphIsEastAsian(para)), 0);
 }
 

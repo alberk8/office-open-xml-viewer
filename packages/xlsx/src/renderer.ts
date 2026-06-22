@@ -1667,27 +1667,30 @@ function renderQuadrant(
           right: suppressRightGridCol.has(ci) ? null : mergedBorder.right,
         };
       }
-      // Shared-edge conflict resolution. Two adjacent cells share the boundary
-      // along their common row / column edge. In the two-pass order each cell's
-      // border closure runs after every fill, so the upper cell's `bottom` (and
-      // the left cell's `right`) is never erased — it is always drawn. We only
-      // need to touch our own top / left when *we* define an edge there that
-      // CONFLICTS with the neighbour's, so the stronger of the two shows. When
-      // our top / left is unset we leave it unset: the neighbour already owns
-      // and draws that boundary, and adopting its edge would double-stroke it
-      // (two 1-px lines compounding to an over-dark rule — sample-27) or paint a
-      // spurious line over a fill-less cell (sample-6). This is genuine §18.18.3
-      // conflict resolution; the old fill-repair (`paintedFill` gate +
-      // `invertedTop` / `invertedLeft`) is gone.
+      // Shared-edge conflict resolution (ECMA-376 §18.18.3). Two adjacent cells
+      // share the boundary along their common row / column edge. In the two-pass
+      // order each cell's border closure runs after every fill, so the upper
+      // cell's `bottom` (and the left cell's `right`) is never erased — it is
+      // always drawn by that neighbour. So for an INTERIOR cell we only touch our
+      // own top / left when *we* also define an edge there that conflicts, and
+      // render the stronger of the two. Adopting a neighbour's edge we don't
+      // define would double-stroke it (two strokes compounding to an over-dark
+      // rule — sample-27) or paint a spurious line over a fill-less cell
+      // (sample-6). This replaces the old fill-repair (`paintedFill` gate +
+      // `invertedTop` / `invertedLeft`), which is gone.
+      //
+      // EXCEPTION — the quadrant's first rendered row/column (`ri`/`ci` === 0):
+      // the upper / left neighbour lies OUTSIDE this quadrant (the viewport has
+      // no top/left overscan — viewer.ts walks forward from startRow/startCol
+      // with a +2 buffer only at the bottom/right), so when scrolled it is never
+      // iterated and never strokes its own facing edge. There we adopt the
+      // neighbour's edge even when our own side is unset, so a boundary authored
+      // only as the neighbour's bottom/right still shows at the viewport edge.
       const aboveCell = cellMap.get(`${rowIndex - 1}:${colIndex}`);
       const aboveBottom = aboveCell
         ? resolveXf(styles, aboveCell.styleIndex).border.bottom
         : null;
-      if (aboveBottom?.style && mergedBorder.top?.style) {
-        // Both sides define the horizontal boundary — render the stronger so a
-        // medium bottom isn't overdrawn by our thin top (and vice-versa). The
-        // upper cell also strokes its bottom; picking the same winner here means
-        // the two strokes land identically (no doubling).
+      if (aboveBottom?.style && (ri === 0 || mergedBorder.top?.style)) {
         mergedBorder = { ...mergedBorder, top: pickStrongerEdge(mergedBorder.top, aboveBottom) };
       }
       if (!suppressLeftGridCol.has(ci)) {
@@ -1698,7 +1701,7 @@ function renderQuadrant(
         const leftRight = leftCell
           ? resolveXf(styles, leftCell.styleIndex).border.right
           : null;
-        if (leftRight?.style && mergedBorder.left?.style) {
+        if (leftRight?.style && (ci === 0 || mergedBorder.left?.style)) {
           mergedBorder = { ...mergedBorder, left: pickStrongerEdge(mergedBorder.left, leftRight) };
         }
       }

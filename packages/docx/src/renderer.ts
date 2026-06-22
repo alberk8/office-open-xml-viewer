@@ -5416,6 +5416,23 @@ function drawTableRows(
   // from logical column offset to a physical x flips.
   const mirror = table.bidiVisual === true;
 
+  // ECMA-376 §17.4.66 (border-collapse): a shared gridline must sit ON TOP of
+  // every cell fill. Painting cell-by-cell (fill→border, per cell) let the next
+  // column's background fill cover the half of the vertical border the previous
+  // column had just drawn; with alternating row banding (e.g. Medium List 2)
+  // this made a shared vertical rule look like its thickness changed row to row.
+  // So walk the grid ONCE to collect every cell's paint box, then paint in TWO
+  // passes: all backgrounds + content first, all borders second.
+  const jobs: Array<{
+    cell: DocTableCell;
+    x: number;
+    y: number;
+    w: number;
+    h: number;
+    edges: CellEdgeFlags;
+    clipExact: boolean;
+  }> = [];
+
   let y = startY;
   for (let ri = 0; ri < table.rows.length; ri++) {
     const row = table.rows[ri];
@@ -5462,8 +5479,8 @@ function drawTableRows(
         // cell spans multiple rows, so it is never governed by a single row's
         // exact height — only single-row cells clip.
         const clipExact = row.rowHeightRule === 'exact' && cell.vMerge !== true;
-        if (!dryRun) renderCell(cell, table, leadX, y, cellW, drawH, state, edges, mirror, clipExact);
-        else measureCellContent(cell, table, cellW, scale, state);
+        if (dryRun) measureCellContent(cell, table, cellW, scale, state);
+        else jobs.push({ cell, x: leadX, y, w: cellW, h: drawH, edges, clipExact });
       }
 
       x += cellW;
@@ -5471,6 +5488,20 @@ function drawTableRows(
     }
 
     y += rowH;
+  }
+
+  // Pass 1: backgrounds + content. Pass 2: borders, so a border is never
+  // overpainted by a neighbouring cell's fill. `mirror` only swaps which
+  // physical side a logical border maps to, so it is consulted in the border
+  // pass alone.
+  for (const j of jobs) {
+    renderCell(j.cell, table, j.x, j.y, j.w, j.h, state, j.clipExact);
+  }
+  for (const j of jobs) {
+    drawCellBorders(
+      state.ctx, j.x, j.y, j.w, j.h, j.cell.borders, table.borders,
+      scale, j.edges, mirror, state.dpr,
+    );
   }
   return y;
 }
@@ -5636,18 +5667,18 @@ function renderCell(
   w: number,
   h: number,
   state: RenderState,
-  edges: CellEdgeFlags,
-  mirror = false,
   clipExact = false,
 ): void {
   const { ctx, scale } = state;
 
+  // Cell BACKGROUND + content only. Borders are painted in a separate, later
+  // pass by drawTableRows (ECMA-376 §17.4.66 border-collapse): a shared gridline
+  // must sit on top of every cell fill, so no neighbouring cell's background can
+  // occlude the border drawn by the cell on the other side of the gridline.
   if (cell.background) {
     ctx.fillStyle = `#${cell.background}`;
     ctx.fillRect(x, y, w, h);
   }
-
-  drawCellBorders(ctx, x, y, w, h, cell.borders, table.borders, scale, edges, mirror, state.dpr);
 
   const cm = effCellMargins(cell, table);
   const mt = cm.top * scale;

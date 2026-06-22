@@ -33,6 +33,13 @@ export const DOCX_GOOGLE_FONTS: Record<string, FontPreloadEntry> = {
   'poppins':           { url: 'https://fonts.googleapis.com/css2?family=Poppins:ital,wght@0,400;0,700;1,400;1,700&display=swap' },
   'raleway':           { url: 'https://fonts.googleapis.com/css2?family=Raleway:ital,wght@0,400;0,700;1,400;1,700&display=swap' },
   'playfair display':  { url: 'https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400;0,700;1,400;1,700&display=swap' },
+  // Ubuntu (used as the minorFont in some templates, e.g. sample-11). Without
+  // this mapping the renderer falls back to a system sans whose horizontal
+  // metrics are narrower than Ubuntu's, so cells sized for the Ubuntu width
+  // (e.g. table cells with `tcW` measured against the Ubuntu run) wrap
+  // differently from Word — the symptom that motivated this entry was a
+  // table cell expected to break into two lines but staying on one.
+  'ubuntu':            { url: 'https://fonts.googleapis.com/css2?family=Ubuntu:ital,wght@0,400;0,700;1,400;1,700&display=swap' },
   // Common Arabic-script faces that hosts rarely ship. Map them to Noto
   // substitutes so RTL documents (e.g. sample-7, which requests Sakkal Majalla
   // / Univers Next Arabic) render with a real web font instead of an oversized

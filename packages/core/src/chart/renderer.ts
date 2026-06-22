@@ -502,6 +502,15 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
   const barSeries  = chart.series.filter(s => s.seriesType !== 'line');
   const lineSeries = chart.series.filter(s => s.seriesType === 'line');
 
+  // Combo charts (bar + line) may bind the line series to a SECONDARY value
+  // axis drawn on the right (ECMA-376 §21.2.2.* — a second `<c:valAx>` with
+  // axPos="r" / `<c:crosses val="max">`). `sec` is non-null only when both the
+  // axis is declared AND at least one line series opts into it; horizontal bar
+  // charts never carry one.
+  const sec = !isH && chart.secondaryValAxis && lineSeries.some(s => s.useSecondaryAxis === true)
+    ? chart.secondaryValAxis
+    : null;
+
   const cats = chartCategories(chart);
   const n = cats.length;
   if (n === 0) return;
@@ -522,9 +531,15 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
   // sample-30's 18pt) plus a small gap, so big titles get a wide enough gutter
   // and never collide with the tick labels.
   const { catTitlePx, valTitlePx, catTitleH, valTitleW } = axisTitleLayout(chart, w, h, ptToPx);
+  // Right-hand band for the secondary value axis: tick labels + a rotated title.
+  const secTickFontPx = Math.max(8, Math.min(11, h / 20));
+  const secLabelBandW = sec && !sec.hidden ? secTickFontPx * 3 + 10 : 0;
+  const secTitleBandW = sec && sec.title
+    ? (sec.titleFontSizeHpt ? (sec.titleFontSizeHpt / 100) * ptToPx : Math.max(9, h * 0.05)) + 8
+    : 0;
   const pad = {
     t: titleH + legTopH + h * 0.02,
-    r: legRightW + w * 0.03,
+    r: legRightW + w * 0.03 + secLabelBandW + secTitleBandW,
     b: h * 0.14 + catTitleH + legBottomH,
     l: w * 0.12 + valTitleW + legLeftW,
   };
@@ -580,6 +595,31 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
 
   // Bar/column anchors the value axis at 0; ignore the returned min.
   const { max: axMax, step } = valueAxisScale(0, dataMax, undefined, chart.valMax);
+
+  // Secondary value-axis scale (combo charts). Line series bound to it map
+  // through `toYSecondary` instead of the primary axMax. Explicit
+  // `<c:scaling><c:min/max>` win; otherwise derive from the line extents. The
+  // axis is INDEPENDENT of the primary: it keeps its own "nice" major unit and
+  // gridline count (PowerPoint draws the secondary tick labels at their own
+  // positions, not aligned to the primary gridlines). The auto major unit is
+  // Excel-proprietary, so the count can differ from PowerPoint by one step.
+  let sMin = 0, sMax = 1, sStep = 1;
+  if (sec) {
+    const lineVals: number[] = [];
+    for (const s of lineSeries) {
+      if (s.useSecondaryAxis !== true) continue;
+      for (const v of s.values) if (v != null) lineVals.push(v);
+    }
+    const dMin = lineVals.length ? Math.min(...lineVals) : 0;
+    const dMax = lineVals.length ? Math.max(...lineVals) : 1;
+    const scl = valueAxisScale(Math.min(0, dMin), dMax, sec.min, sec.max);
+    sMin = scl.min;
+    sMax = scl.max;
+    sStep = scl.step;
+  }
+  const sRange = (sMax - sMin) || 1;
+  const toYPrimaryLine = (v: number): number => py0 + ph - (v / axMax) * ph;
+  const toYSecondary   = (v: number): number => py0 + ph - ((v - sMin) / sRange) * ph;
 
   const gridColor = '#e0e0e0';
   const steps = Math.round(axMax / step);
@@ -816,6 +856,9 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
     for (let si = 0; si < lineSeries.length; si++) {
       const s = lineSeries[si];
       const color = chartColor(barSeries.length + si, s);
+      // Series bound to the secondary axis map through its scale; others use
+      // the primary (bar) value axis.
+      const yOf = sec && s.useSecondaryAxis === true ? toYSecondary : toYPrimaryLine;
       ctx.strokeStyle = color; ctx.lineWidth = 2; ctx.setLineDash([]);
       ctx.beginPath();
       let started = false;
@@ -823,7 +866,7 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
         const v = s.values[ci];
         if (v == null) { started = false; continue; }
         const lx = px0 + ci * catGap + catGap / 2;
-        const ly = py0 + ph - (v / axMax) * ph;
+        const ly = yOf(v);
         if (!started) { ctx.moveTo(lx, ly); started = true; } else ctx.lineTo(lx, ly);
       }
       ctx.stroke();
@@ -832,11 +875,58 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
           const v = s.values[ci];
           if (v == null) continue;
           const lx = px0 + ci * catGap + catGap / 2;
-          const ly = py0 + ph - (v / axMax) * ph;
+          const ly = yOf(v);
           ctx.fillStyle = color;
           ctx.beginPath(); ctx.arc(lx, ly, 3, 0, Math.PI * 2); ctx.fill();
         }
       }
+    }
+  }
+
+  // Secondary value axis (right edge). Independent scale: its own "nice" major
+  // unit drives the tick labels, positioned via `toYSecondary` (NOT aligned to
+  // the primary gridlines — PowerPoint places them independently). Draws its
+  // rule + ticks on the right; ticks mirror the left axis ("out" points right).
+  if (sec) {
+    const axX = px0 + pw;
+    const secLineColor = sec.lineColor ? `#${sec.lineColor}` : '#aaa';
+    const secLineW = sec.lineWidthEmu ? Math.max(0.5, sec.lineWidthEmu / EMU_PER_PT) * ptToPx : 1;
+    if (!sec.lineHidden) strokeAxis(axX, py0, axX, py0 + ph, secLineColor, secLineW);
+    if (!sec.hidden) {
+      const secFontPx = sec.fontSizeHpt ? (sec.fontSizeHpt / 100) * ptToPx : secTickFontPx;
+      ctx.font = `${secFontPx}px sans-serif`;
+      ctx.fillStyle = sec.fontColor ? `#${sec.fontColor}` : valLabelColor;
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'middle';
+      const tick = sec.majorTickMark;
+      const tickLen = Math.max(4, secLineW + 2);
+      const secSteps = Math.max(1, Math.round(sRange / sStep));
+      for (let si = 0; si <= secSteps; si++) {
+        const sval = sMin + si * sStep;
+        const gy = toYSecondary(sval);
+        if (tick && tick !== 'none') {
+          const outer = tick === 'out' || tick === 'cross' ? tickLen : 0;
+          const inner = tick === 'in' || tick === 'cross' ? -tickLen : 0;
+          ctx.strokeStyle = secLineColor; ctx.lineWidth = secLineW;
+          ctx.beginPath(); ctx.moveTo(axX + inner, gy); ctx.lineTo(axX + outer, gy); ctx.stroke();
+        }
+        ctx.fillText(formatChartValWithCode(sval, sec.formatCode ?? null), axX + 6, gy);
+      }
+    }
+    if (sec.title) {
+      const tFontPx = sec.titleFontSizeHpt ? (sec.titleFontSizeHpt / 100) * ptToPx : Math.max(9, h * 0.05);
+      ctx.save();
+      ctx.fillStyle = sec.titleFontColor
+        ? `#${sec.titleFontColor}`
+        : (sec.fontColor ? `#${sec.fontColor}` : '#555');
+      ctx.font = `${sec.titleFontBold ? 'bold ' : ''}${tFontPx}px sans-serif`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      // Right-axis title reads top-to-bottom (rotate +90), placed past the labels.
+      ctx.translate(px0 + pw + secLabelBandW + tFontPx * 0.6, py0 + ph / 2);
+      ctx.rotate(Math.PI / 2);
+      ctx.fillText(sec.title, 0, 0);
+      ctx.restore();
     }
   }
 

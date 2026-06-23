@@ -143,7 +143,23 @@ pub fn parse(data: &[u8]) -> Result<Document, String> {
         .rfind(|n| n.is_element())
         .filter(|n| n.tag_name().name() == "sectPr");
 
-    let (section, refs) = parse_section(sect_pr, &rel_map);
+    let (section, _body_refs) = parse_section(sect_pr, &rel_map);
+
+    // ECMA-376 §17.10.1 — header/footer references inherit across sections: a
+    // section that omits a reference of a given type uses the previous section's.
+    // The single-section render model (#513) drives one effective header/footer
+    // set, so accumulate references from EVERY sectPr in document order (the body
+    // sectPr last ⇒ it wins for types it specifies, earlier sections fill the
+    // rest). Without this, a header declared only on the first section's sectPr
+    // (e.g. sample-12's running "Journal of …" header) is dropped because the
+    // body-level sectPr carries no reference.
+    let mut refs = SectionRefs::default();
+    for sp in body_node
+        .descendants()
+        .filter(|n| n.is_element() && n.tag_name().name() == "sectPr")
+    {
+        merge_section_refs(sp, &rel_map, &mut refs);
+    }
 
     let body = parse_body_elements(
         body_node,
@@ -1270,8 +1286,26 @@ fn parse_section(
     // (unchanged behavior).
     props.columns = parse_columns(sp);
 
-    // Collect header/footer references
+    // Collect header/footer references from THIS sectPr.
     let mut refs = SectionRefs::default();
+    merge_section_refs(sp, rel_map, &mut refs);
+
+    (props, refs)
+}
+
+/// Merge the `<w:headerReference>` / `<w:footerReference>` entries of one sectPr
+/// into `refs`, per ECMA-376 §17.10.1. Each type ("default" | "first" | "even")
+/// overwrites any prior value — so calling this over every sectPr in document
+/// order accumulates the inheritance (a section that omits a reference of a type
+/// keeps the previous section's), and the body (final) section wins for the
+/// types it specifies. This is why a header declared only on the FIRST section's
+/// sectPr (the common journal-template layout) still applies to the whole
+/// document even though the body-level sectPr carries no reference.
+fn merge_section_refs(
+    sp: roxmltree::Node,
+    rel_map: &HashMap<String, String>,
+    refs: &mut SectionRefs,
+) {
     for child in sp.children().filter(|n| n.is_element()) {
         let local = child.tag_name().name();
         if local != "headerReference" && local != "footerReference" {
@@ -1293,8 +1327,6 @@ fn parse_section(
             refs.footers.insert(kind, target);
         }
     }
-
-    (props, refs)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -7667,6 +7699,44 @@ mod column_tests {
         );
         // Absent <w:type> ⇒ None (paginator falls back to "nextPage").
         assert_eq!(parse(r#"<w:cols w:num="2"/>"#).section_start, None);
+    }
+
+    /// ECMA-376 §17.10.1 — header/footer references inherit across sections.
+    /// `merge_section_refs` accumulates per type with later sectPrs overriding,
+    /// so a reference declared only on the FIRST section's sectPr survives even
+    /// when a later (body) sectPr carries none. This is sample-12's running
+    /// "Journal of …" header, declared on section 0 but not on the body sectPr.
+    #[test]
+    fn header_refs_inherit_from_an_earlier_section() {
+        let xml = r#"<w:root xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+              <w:first><w:sectPr><w:headerReference w:type="default" r:id="rH"/><w:footerReference w:type="default" r:id="rF"/></w:sectPr></w:first>
+              <w:bodylevel><w:sectPr><w:cols w:num="2"/></w:sectPr></w:bodylevel>
+            </w:root>"#;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let rel_map: HashMap<String, String> = [
+            ("rH".to_string(), "header1.xml".to_string()),
+            ("rF".to_string(), "footer1.xml".to_string()),
+        ]
+        .into_iter()
+        .collect();
+        let mut refs = SectionRefs::default();
+        for sp in doc
+            .root_element()
+            .descendants()
+            .filter(|n| n.is_element() && n.tag_name().name() == "sectPr")
+        {
+            merge_section_refs(sp, &rel_map, &mut refs);
+        }
+        // The first section's default header/footer survive the body sectPr that
+        // declares none.
+        assert_eq!(
+            refs.headers.get("default").map(String::as_str),
+            Some("header1.xml")
+        );
+        assert_eq!(
+            refs.footers.get("default").map(String::as_str),
+            Some("footer1.xml")
+        );
     }
 
     /// ECMA-376 §17.6.5 `<w:docGrid w:charSpace>` surfaces on SectionProps as a

@@ -1339,34 +1339,30 @@ export function computePages(
   // 0 when the paragraph has no paragraph-anchored floats (page-absolute floats
   // are pinned regardless of which page the anchor lands on, so they never
   // trigger a break). Measured at scale 1 (pt), matching the paginator's `y`.
-  const anchoredFloatBottomOffset = (para: DocParagraph, spaceBeforePt: number): number => {
+  const anchoredFloatBottomOffset = (para: DocParagraph): number => {
     let maxBottom = 0;
     for (const run of para.runs) {
       if (run.type === 'image') {
         const img = run as unknown as ImageRun;
         if (!img.anchor || !img.anchorYFromPara) continue;
-        // Wrap floats anchor after spaceBefore (registerAnchorFloats uses
-        // state.y post-spaceBefore); non-wrap floats anchor at the paragraph's
-        // pre-spaceBefore top (renderAnchorImages uses paragraphStartY). Mirror
-        // each so the estimate matches the draw position exactly.
-        const anchorBase = isWrapFloat(img.wrapMode) ? spaceBeforePt : 0;
-        const bottom = anchorBase + (img.anchorYPt ?? 0) + img.heightPt;
+        // ECMA-376 §20.4.3.5: a `positionV relativeFrom="paragraph"/"line"` float
+        // anchors against the paragraph's pre-spaceBefore TOP, regardless of wrap
+        // mode (registerAnchorFloats + renderAnchorImages both use paragraphStartY).
+        // So its bottom, measured from the paragraph top (the paginator's `y`), is
+        // anchorYPt + height — no spaceBefore term.
+        const bottom = (img.anchorYPt ?? 0) + img.heightPt;
         if (bottom > maxBottom) maxBottom = bottom;
       } else if (run.type === 'shape') {
         // An anchored shape with positionV relativeFrom="paragraph"/"line" is
-        // kept on its anchor's page the same way an image is. Mirror the image
-        // formula exactly — bottom = anchorBase + anchorYPt + height — but take
-        // the height from resolveShapeBox so sizeRelV / wgp-group scaling is
-        // honored. measureState is scale 1 (pt), so box.h is already in pt.
-        // (paragraphTopPx is passed through for shapes whose height depends on a
-        // paragraph/line container via sizeRelV; it does not affect the height
-        // for the common static-extent case.)
+        // kept on its anchor's page the same way an image is, and anchors at the
+        // same pre-spaceBefore paragraph top. Take the height from resolveShapeBox
+        // so sizeRelV / wgp-group scaling is honored. measureState is scale 1 (pt),
+        // so box.h is already in pt.
         const shp = run as unknown as ShapeRun;
         if (!shp.anchorYFromPara) continue;
-        const anchorBase = isWrapFloat(shp.wrapMode) ? spaceBeforePt : 0;
-        const box = resolveShapeBox(shp, measureState, measureState.y + anchorBase);
+        const box = resolveShapeBox(shp, measureState, measureState.y);
         if (box.h <= 0) continue;
-        const bottom = anchorBase + (shp.anchorYPt ?? 0) + box.h;
+        const bottom = (shp.anchorYPt ?? 0) + box.h;
         if (bottom > maxBottom) maxBottom = bottom;
       }
     }
@@ -1580,7 +1576,12 @@ export function computePages(
       // floats wholesale via newPage(), so this snapshot is unused there.)
       const floatsBefore = measureState.floats.length;
       const floatSeqBefore = measureState.floatParaSeq;
-      const paragraphAnchorY = measureState.y + effectiveBefore;
+      // ECMA-376 §20.4.3.5: a `positionV relativeFrom="paragraph"` float anchors
+      // at the paragraph's TOP (pre-spaceBefore), so register it at measureState.y
+      // BEFORE spaceBefore is folded in — matching the paint pass (paragraphStartY)
+      // and renderAnchorImages (wrapNone). See registerAnchorFloats's call site in
+      // renderParagraph for the spec rationale.
+      const paragraphAnchorY = measureState.y;
       registerAnchorFloats(para, measureState, paragraphAnchorY);
 
       const h = estimateParagraphHeight(measureState, para, colW(), suppressBefore, colX());
@@ -1631,7 +1632,7 @@ export function computePages(
       // keep-on-page behavior). When the float is taller than the page content
       // area it can never fit — leave it on this page and allow the overflow
       // (no break would help, and breaking unconditionally would loop forever).
-      const floatBottomOff = anchoredFloatBottomOffset(para, effectiveBefore);
+      const floatBottomOff = anchoredFloatBottomOffset(para);
       const floatOverflowsHere = floatBottomOff > 0 && y + floatBottomOff > effContentH();
       const floatFitsFresh = floatBottomOff > 0 && floatBottomOff <= effContentH();
       const breakForFloat = y > 0 && floatOverflowsHere && floatFitsFresh;
@@ -1673,7 +1674,7 @@ export function computePages(
           // floats were just discarded): this paragraph is now the first registrant
           // on the fresh page and gets paraId 0 — matching the renderer, which
           // re-registers from a fresh per-page state.
-          registerAnchorFloats(para, measureState, measureState.y + effectiveBefore);
+          registerAnchorFloats(para, measureState, measureState.y);
           // The references move to the new page; nothing was reserved there yet,
           // so the separator region still applies to the first footnote.
           if (haveFootnotes && newRefIds.length > 0) addReservePt = sumReserve(newRefIds);
@@ -1684,7 +1685,7 @@ export function computePages(
           // estimates for this paragraph (and later ones) use the right band.
           measureState.floats.length = floatsBefore;
           measureState.floatParaSeq = floatSeqBefore;
-          registerAnchorFloats(para, measureState, measureState.y + effectiveBefore);
+          registerAnchorFloats(para, measureState, measureState.y);
         }
       }
 
@@ -3257,11 +3258,18 @@ function renderParagraph(
 
   if (!suppressSpaceBefore) state.y += para.spaceBefore * scale;
 
-  // Register anchor floats from this paragraph (must happen after spaceBefore so
-  // that paragraph-relative Y resolves against the textAreaTop, matching Word).
+  // Register anchor floats from this paragraph. ECMA-376 §20.4.3.5: a
+  // `positionV relativeFrom="paragraph"` float is positioned relative to "the
+  // paragraph which contains the drawing anchor" — its TOP edge, BEFORE the
+  // paragraph's spaceBefore (Word anchors the float at the paragraph top, not the
+  // post-spaceBefore text area). So pass `paragraphStartY` (pre-spaceBefore),
+  // identically for wrap AND wrapNone floats (renderAnchorImages below already
+  // uses paragraphStartY). Anchoring wrap floats at the post-spaceBefore text top
+  // placed them spaceBefore too low — e.g. sample-12's figure (anchor paragraph
+  // spaceBefore=12 pt) sat 12 pt under Word, eating the gap above its caption.
   // Skipped for the frame-draw recursion: a frame paragraph's wrap exclusion is
   // its own FloatRect (renderFrameParagraph), not an anchor image/shape float.
-  if (!inFrame) registerAnchorFloats(para, state, state.y);
+  if (!inFrame) registerAnchorFloats(para, state, paragraphStartY);
 
   // behindDoc shapes must render before text so they appear behind it.
   renderAnchorImages(para, state, paragraphStartY, 'behind');
@@ -5003,9 +5011,9 @@ function layoutLines(
     // metrics, rescale to the document font's design line box so the line
     // height (and thus baseline centering, row auto-heights, cell vAlign
     // §17.4.84, and pagination) match Word — see font-metrics.ts.
-    const rawAsc = m.fontBoundingBoxAscent ?? m.actualBoundingBoxAscent ?? s.fontSize * scale * 0.8;
-    const rawDesc = m.fontBoundingBoxDescent ?? m.actualBoundingBoxDescent ?? s.fontSize * scale * 0.2;
-    const corrected = correctLineMetrics(s.fontFamily, effectiveFontPx(s), rawAsc, rawDesc);
+    // Fallback box at the run's full size; correction at the effective size
+    // (smallCaps/vertAlign shrink it). See correctedLineMetrics.
+    const corrected = correctedLineMetrics(m, s.fontFamily, s.fontSize * scale, effectiveFontPx(s));
     let asc = corrected.ascent;
     const desc = corrected.descent;
     // Ruby annotation: small text rendered above the base. Reserve ascent
@@ -5842,11 +5850,13 @@ export function renderShapeText(
  * X: margin-relative offsets add section.marginLeft (ECMA-376 §20.4.3.4
  * relativeFrom="margin"); otherwise anchorXPt is already page-absolute.
  * Y: paragraph-relative offsets add `paraBaseY`; otherwise page-absolute. The
- * caller supplies `paraBaseY` because the two consumers anchor against different
- * paragraph references — wrap floats use the post-spaceBefore textAreaTop, while
- * wrapNone images use the pre-spaceBefore paragraph top (see the
- * anchoredFloatBottomOffset note in the paginator). This is the box origin BEFORE
- * any overlap displacement; resolveFloatOverlap runs on top of it for floats.
+ * caller supplies `paraBaseY` = the paragraph's pre-spaceBefore TOP for ALL
+ * paragraph-relative floats — wrap and wrapNone alike (ECMA-376 §20.4.3.5: a
+ * `positionV relativeFrom="paragraph"` float is positioned relative to the
+ * paragraph that contains the anchor, i.e. its top edge before spaceBefore).
+ * Page-level floats pass 0 (resolveAnchorY ignores paraBaseY for them). This is
+ * the box origin BEFORE any overlap displacement; resolveFloatOverlap runs on
+ * top of it for floats.
  *
  * Exported under a `_test` alias for the anchor-image relativeFrom wiring test
  * (the public renderer entry points consume the box internally; pin the
@@ -6066,7 +6076,8 @@ function registerImageFloat(
   const mode: 'square' | 'topAndBottom' =
     img.wrapMode === 'topAndBottom' ? 'topAndBottom' : 'square';
 
-  // Wrap floats anchor against the post-spaceBefore textAreaTop (paragraphAnchorY).
+  // Paragraph-relative wrap floats anchor at the pre-spaceBefore paragraph top
+  // (paragraphAnchorY), per ECMA-376 §20.4.3.5 — identical to wrapNone images.
   const box = resolveAnchorBox(img, state, paragraphAnchorY);
   const { w, h, dl, dr, dt, db } = box;
 
@@ -6115,8 +6126,8 @@ function registerShapeFloat(
 
   // Match resolveShapeBox's paragraphTopPx convention. resolveAnchorY reads
   // paragraphTopPx only for relativeFrom="paragraph"/"line" (anchorYFromPara);
-  // wrap floats anchor against the post-spaceBefore textAreaTop, identical to
-  // the image path (resolveAnchorBox uses paragraphAnchorY there).
+  // wrap floats anchor at the pre-spaceBefore paragraph top (§20.4.3.5),
+  // identical to the image path (resolveAnchorBox uses paragraphAnchorY there).
   const { x, y, w, h } = resolveShapeBox(shape, state, paragraphAnchorY);
   // A degenerate (zero/negative-area) box — e.g. a wrap-flagged line preset —
   // reserves no band; bail like renderAnchorShape skips drawing it.
@@ -7450,6 +7461,29 @@ function emptyLineNaturalPx(fontSizePt: number, scale: number): { asc: number; d
   return { asc: fontSizePt * scale * 0.8, desc: fontSizePt * scale * 0.2 };
 }
 
+/** Corrected single-line ascent/descent (px) from an ALREADY-measured
+ *  `TextMetrics`: the Canvas `fontBoundingBox` (with the synthetic 0.8/0.2-em
+ *  fallback when the engine reports none), rescaled to the document font's win
+ *  box via {@link correctLineMetrics}. The single source of truth for "how tall
+ *  is one line of `family`", shared by the text-line path (layoutLines) and the
+ *  empty paragraph-mark path (paragraphMarkLineHeight) so the two cannot drift —
+ *  that drift (the empty path skipping `correctLineMetrics`) was the
+ *  empty-paragraph under-measure bug (§17.3.1.29 / §17.3.1.33). `fallbackEmPx`
+ *  sizes the synthetic box (the run's full size); `correctionEmPx` is the design
+ *  size handed to `correctLineMetrics` — they differ only for smallCaps/vertAlign
+ *  runs (where the text path keeps the full-size fallback) and coincide for a
+ *  plain paragraph-mark line. */
+function correctedLineMetrics(
+  m: TextMetrics,
+  family: string | null | undefined,
+  fallbackEmPx: number,
+  correctionEmPx: number,
+): { ascent: number; descent: number } {
+  const rawAsc = m.fontBoundingBoxAscent ?? m.actualBoundingBoxAscent ?? fallbackEmPx * 0.8;
+  const rawDesc = m.fontBoundingBoxDescent ?? m.actualBoundingBoxDescent ?? fallbackEmPx * 0.2;
+  return correctLineMetrics(family, correctionEmPx, rawAsc, rawDesc);
+}
+
 /**
  * Height (px) of the paragraph-mark line box for a paragraph that places no
  * inline content on any line. Per ECMA-376 §17.3.1.29 the paragraph mark always
@@ -7469,21 +7503,33 @@ function paragraphMarkLineHeight(
   fontFamilyClasses: Record<string, string> = {},
 ): number {
   const fs = getDefaultFontSize(para);
+  const family = getDefaultFontFamily(para);
   let asc: number;
   let desc: number;
-  if (eastAsian && ctx) {
-    // East Asian document: the empty paragraph-mark line follows the real East
-    // Asian font box so docGrid cell rounding (lineBoxHeight) reserves whole
-    // cells — a 20pt mark on a 20pt pitch → 2 cells (40px), matching Word's title
-    // pages. The synthetic 0.8/0.2 ≈ 1em fallback measures exactly one pitch and
-    // would round down to a single cell. fontBoundingBox is font-wide, so any
-    // East Asian glyph probes it.
+  if (ctx) {
+    // ECMA-376 §17.3.1.29 / §17.3.1.33: an empty paragraph's mark line reserves
+    // the mark font's REAL single-line height — the SAME fontBoundingBox a text
+    // line of that font and size uses (layoutLines), so an empty paragraph is
+    // exactly as tall as a one-character paragraph of the same run properties.
+    // The synthetic 0.8/0.2 ≈ 1em box under-measured every empty paragraph
+    // whenever the (often substituted) font's real box exceeds 1em — a Latin
+    // fallback reports ~1.15em — so a run of empty "spacer" paragraphs fell
+    // short and the following content rose into a preceding float's wrap band
+    // (sample-12: the figure caption wrapped beside the image instead of below
+    // it). East Asian documents probe an EA glyph so docGrid cell rounding
+    // (lineBoxHeight) reserves whole cells (a 20pt mark on a 20pt pitch → 2
+    // cells); others probe a Latin glyph. fontBoundingBox is reported per
+    // resolved face (not per glyph), so the probe choice does not change the box
+    // for a face that contains it — and the probe is script-matched, so the mark
+    // font does. correctLineMetrics rescales a substituted font to the document
+    // font's win box, identical to the text path (a no-op for fonts absent from
+    // the win-metric table, e.g. Latin).
     const prevFont = ctx.font;
-    ctx.font = buildFont(false, false, fs * scale, getDefaultFontFamily(para), fontFamilyClasses);
-    const m = ctx.measureText('あ');
-    asc = m.fontBoundingBoxAscent ?? m.actualBoundingBoxAscent ?? fs * scale * 0.8;
-    desc = m.fontBoundingBoxDescent ?? m.actualBoundingBoxDescent ?? fs * scale * 0.2;
+    ctx.font = buildFont(false, false, fs * scale, family, fontFamilyClasses);
+    const m = ctx.measureText(eastAsian ? 'あ' : 'x');
     ctx.font = prevFont;
+    // A mark line carries no smallCaps/vertAlign, so fallback == correction size.
+    ({ ascent: asc, descent: desc } = correctedLineMetrics(m, family, fs * scale, fs * scale));
   } else {
     ({ asc, desc } = emptyLineNaturalPx(fs, scale));
   }

@@ -2,7 +2,7 @@ import type {
   Worksheet, Styles, Cell, CellValue, CellFont, CellFill, Border, BorderEdge, CellXf,
   ViewportRange, RenderViewportOptions, XlsxTextRunInfo,
   CfRule, CellRange, CfStop, CfValue, Dxf, Hyperlink, DefinedName,
-  Run, ChartData, GradientFillSpec, ShapeInfo, SlicerItem, ImageAnchor,
+  Run, ChartData, GradientFillSpec, ShapeInfo, SlicerItem,
 } from './types.js';
 import { crispOffset, renderChart, renderSparkline, renderPresetShape, createAuxCanvas, PT_TO_PX, EMU_PER_PX, mathToMathML, recolorSvg, classifyCjkFont, classifyFontGeneric, cjkFallbackChain, NON_CJK_SANS_FALLBACKS, NON_CJK_SERIF_FALLBACKS, kinsokuAdjustedSplit, DEFAULT_KINSOKU_RULES, isCjkBreakChar, xlsxBorderDashArray, type ChartModel, type SparklineModel, type MathNode, type MathRenderer } from '@silurus/ooxml-core';
 import { evalFormulaToBool, todaySerial, nowSerial } from './formula.js';
@@ -2840,7 +2840,11 @@ function sheetYForRow(
 
 /** Source pixel dimensions of a decoded image. `ImageBitmap` / `OffscreenCanvas`
  *  expose native `width`/`height`; an `HTMLImageElement` exposes `naturalWidth`/
- *  `naturalHeight` (its `width`/`height` may be a CSS layout size). */
+ *  `naturalHeight` (its `width`/`height` may be a CSS layout size). On the crop
+ *  path the source is always a raster `ImageBitmap` (a crop forces the raster
+ *  decode — see `decodeImageSource`'s `hasCrop` gate), so `width`/`height` are
+ *  the native pixels; the `naturalWidth` arm is belt-and-suspenders for any
+ *  `HTMLImageElement` that reaches an uncropped draw. */
 function imageNaturalSize(img: CanvasImageSource): { w: number; h: number } {
   const el = img as {
     naturalWidth?: number;
@@ -2851,40 +2855,47 @@ function imageNaturalSize(img: CanvasImageSource): { w: number; h: number } {
   return { w: el.naturalWidth || el.width || 0, h: el.naturalHeight || el.height || 0 };
 }
 
-/** Draw an anchored picture into the destination rect `(dx,dy,dw,dh)`, honoring
- *  an optional ECMA-376 §20.1.8.55 `<a:srcRect>` source-image crop.
+/** Draw a picture into the destination rect `(dx,dy,dw,dh)`, honoring an optional
+ *  ECMA-376 §20.1.8.55 `<a:srcRect>` source-image crop. Shared by the top-level
+ *  `twoCellAnchor` picture (`ws.images`) and the `grpSp` / `oneCellAnchor` image
+ *  leaf (`ws.shapeGroups`), so every xlsx picture placement crops uniformly.
  *
  *  `srcRect` insets are fractions `0..1` of the source bitmap measured inward
  *  from each edge, so the visible region is `[l, t, 1-r, 1-b]` in source pixels:
  *  `sx = l·W`, `sy = t·H`, `sw = (1−l−r)·W`, `sh = (1−t−b)·H` (clamped ≥ 1). The
- *  destination box is unchanged — Word/Excel stretch the visible slice to fill
- *  the anchor rect, which is exactly the 9-arg `drawImage` behavior.
+ *  destination box is unchanged — Excel stretches the visible slice to fill it,
+ *  which is exactly the 9-arg `drawImage` behavior. A negative (overscan) edge is
+ *  clamped to 0, degrading to a full draw; this overscan simplification is shared
+ *  with the pptx renderer.
  *
- *  The crop is applied only for raster blips, whose decoded `ImageBitmap` IS the
- *  full source at native resolution. A metafile (WMF/EMF) is rasterized to the
- *  CROPPED *display* box (see core `decodeRasterOrMetafile`), so cropping it in
- *  bitmap pixels would squish the whole picture to the sub-rect's aspect; until
- *  the decoder can rasterize a metafile at native size we draw it whole (the
- *  same documented limitation as the docx renderer). */
-export function drawAnchorImage(
+ *  Crop is applied only for raster blips, whose decoded `ImageBitmap` IS the full
+ *  source at native resolution. A metafile (WMF/EMF) is rasterized to the CROPPED
+ *  *display* box by core's `decodeRasterOrMetafile`, so cropping its bitmap would
+ *  squish the whole picture to the sub-rect's aspect — those are drawn whole. The
+ *  pptx renderer applies raster crops the same way; the docx renderer currently
+ *  disables crop for ALL blips (raster included). `mimeType` is the only metafile
+ *  signal available here and is extension-derived, so a metafile mislabeled with
+ *  a raster extension would slip past this gate — acceptable because authored
+ *  crops on metafiles are rare. */
+export function drawImageCropped(
   ctx: CanvasRenderingContext2D,
   img: CanvasImageSource,
-  anchor: ImageAnchor,
+  srcRect: { l: number; t: number; r: number; b: number } | undefined,
+  mimeType: string,
   dx: number,
   dy: number,
   dw: number,
   dh: number,
 ): void {
-  const sr = anchor.srcRect;
-  const isMetafile = anchor.mimeType === 'image/wmf' || anchor.mimeType === 'image/emf';
-  if (sr && !isMetafile && (sr.l || sr.t || sr.r || sr.b)) {
+  const isMetafile = mimeType === 'image/wmf' || mimeType === 'image/emf';
+  if (srcRect && !isMetafile && (srcRect.l || srcRect.t || srcRect.r || srcRect.b)) {
     const { w: bw, h: bh } = imageNaturalSize(img);
     if (bw > 0 && bh > 0) {
       const clamp01 = (v: number): number => Math.max(0, Math.min(1, v));
-      const sx = clamp01(sr.l) * bw;
-      const sy = clamp01(sr.t) * bh;
-      const sw = Math.max(1, bw - sx - clamp01(sr.r) * bw);
-      const sh = Math.max(1, bh - sy - clamp01(sr.b) * bh);
+      const sx = clamp01(srcRect.l) * bw;
+      const sy = clamp01(srcRect.t) * bh;
+      const sw = Math.max(1, bw - sx - clamp01(srcRect.r) * bw);
+      const sh = Math.max(1, bh - sy - clamp01(srcRect.b) * bh);
       ctx.drawImage(img, sx, sy, sw, sh, dx, dy, dw, dh);
       return;
     }
@@ -2961,7 +2972,7 @@ function renderImages(
     if (canvasX + imgW < scrollAreaX || canvasX > scrollAreaX + scrollAreaW) continue;
     if (canvasY + imgH < scrollAreaY || canvasY > scrollAreaY + scrollAreaH) continue;
 
-    drawAnchorImage(ctx, img, anchor, canvasX, canvasY, imgW, imgH);
+    drawImageCropped(ctx, img, anchor.srcRect, anchor.mimeType, canvasX, canvasY, imgW, imgH);
   }
 
   ctx.restore();
@@ -3159,7 +3170,9 @@ function drawShape(
     // worse.
     const img = loadedImages?.get(shape.geom.imagePath);
     if (img) {
-      ctx.drawImage(img, 0, 0, sw, sh);
+      // Honor an `<a:srcRect>` crop on the leaf pic (oneCellAnchor / grpSp leaf),
+      // same as the top-level anchor path (ECMA-376 §20.1.8.55).
+      drawImageCropped(ctx, img, shape.geom.srcRect, shape.geom.mimeType, 0, 0, sw, sh);
     }
   }
   // Shape text body (ECMA-376 §20.5.2.34 `<xdr:txBody>`). Drawn after

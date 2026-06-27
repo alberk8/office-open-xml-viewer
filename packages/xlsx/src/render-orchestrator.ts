@@ -124,6 +124,8 @@ export async function prefetchImages(
             // Group's saved EMU extent scaled by the leaf's normalized w/h → pt.
             widthPt: grp.nativeExtCx > 0 ? (grp.nativeExtCx * shape.w) / EMU_PER_PT : 0,
             heightPt: grp.nativeExtCy > 0 ? (grp.nativeExtCy * shape.h) / EMU_PER_PT : 0,
+            // A crop forces the raster decode (native pixel grid for the crop).
+            hasCrop: shape.geom.srcRect != null,
           });
         }
       }

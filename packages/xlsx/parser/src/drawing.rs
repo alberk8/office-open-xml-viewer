@@ -1038,6 +1038,12 @@ pub(crate) fn collect_shapes(
             let svg_image_path = svg_rid.as_deref().and_then(|r| rid_urls.get(r)).cloned();
             let raster_path = pic_rid.as_deref().and_then(|r| rid_urls.get(r)).cloned();
 
+            // `<a:srcRect>` crop lives in the leaf's `<xdr:blipFill>` (§20.1.8.55).
+            let src_rect = child
+                .descendants()
+                .find(|n| n.is_element() && n.tag_name().name() == "blipFill")
+                .and_then(parse_src_rect);
+
             // Prefer the raster as `image_path`; fall back to the SVG when no
             // raster is embedded so an svg-only leaf is never dropped. Drop only
             // when neither resolves. ECMA-376 §20.1.8.13 + MS-ODRAWXML svgBlip.
@@ -1076,6 +1082,7 @@ pub(crate) fn collect_shapes(
                     image_path,
                     mime_type,
                     svg_image_path,
+                    src_rect,
                 },
                 text: None,
             });
@@ -1808,16 +1815,17 @@ mod style_lnref_tests {
 
     /// A `oneCellAnchor` pic is NOT handled by `parse_drawing_anchors` (which only
     /// scans `twoCellAnchor`), so the shape path must keep capturing it — else the
-    /// image is dropped entirely.
+    /// image is dropped entirely. Its `<a:srcRect>` crop must also be surfaced on
+    /// the `ShapeGeom::Image` so the renderer can crop it like a top-level anchor.
     #[test]
-    fn standalone_onecellanchor_pic_is_still_captured() {
+    fn standalone_onecellanchor_pic_is_still_captured_with_crop() {
         let xml = format!(
             r#"<xdr:wsDr {NS} xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><xdr:oneCellAnchor>
               <xdr:from><xdr:col>1</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>1</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from>
               <xdr:ext cx="914400" cy="914400"/>
               <xdr:pic>
                 <xdr:nvPicPr><xdr:cNvPr id="2" name="P"/><xdr:cNvPicPr/></xdr:nvPicPr>
-                <xdr:blipFill><a:blip r:embed="rId1"/><a:stretch><a:fillRect/></a:stretch></xdr:blipFill>
+                <xdr:blipFill><a:blip r:embed="rId1"/><a:srcRect l="10000" t="20000"/><a:stretch><a:fillRect/></a:stretch></xdr:blipFill>
                 <xdr:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="914400" cy="914400"/></a:xfrm>
                   <a:prstGeom prst="rect"><a:avLst/></a:prstGeom></xdr:spPr>
               </xdr:pic>
@@ -1828,10 +1836,16 @@ mod style_lnref_tests {
         rids.insert("rId1".to_string(), "xl/media/image1.png".to_string());
         let anchors = parse_shape_anchors(&xml, &theme(), &[6_350], &rids);
         assert_eq!(anchors.len(), 1, "oneCellAnchor pic must still be captured");
-        assert!(
-            matches!(anchors[0].shapes[0].geom, ShapeGeom::Image { .. }),
-            "captured as an image-geom shape"
-        );
+        match &anchors[0].shapes[0].geom {
+            ShapeGeom::Image { src_rect, .. } => {
+                let sr = src_rect
+                    .as_ref()
+                    .expect("leaf pic surfaces its srcRect crop");
+                assert!((sr.l - 0.1).abs() < 1e-9);
+                assert!((sr.t - 0.2).abs() < 1e-9);
+            }
+            other => panic!("expected an image-geom shape, got {other:?}"),
+        }
     }
 }
 
@@ -2170,6 +2184,7 @@ mod blip_svg_tests {
             image_path: "xl/media/image1.png".to_string(),
             mime_type: "image/png".to_string(),
             svg_image_path: None,
+            src_rect: None,
         };
         let json = serde_json::to_string(&geom).unwrap();
         assert!(json.contains("\"type\":\"image\""));

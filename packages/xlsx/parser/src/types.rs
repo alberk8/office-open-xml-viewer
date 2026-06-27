@@ -972,6 +972,12 @@ pub enum ShapeGeom {
         mime_type: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         svg_image_path: Option<String>,
+        /// ECMA-376 §20.1.8.55 `<a:srcRect>` source-image crop on the leaf pic,
+        /// present only when cropped. Honored by the renderer like the top-level
+        /// `ImageAnchor.src_rect` so a `oneCellAnchor` / `grpSp` leaf pic crops
+        /// the same as a `twoCellAnchor` picture.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        src_rect: Option<SrcRect>,
     },
 }
 

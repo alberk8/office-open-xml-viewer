@@ -795,11 +795,33 @@ export function layoutRichTextLines(
   let cur: RichSeg[] = [];
   let curW = 0;
   let curMaxSize = 0;
+  // Effective font size (pt) of the run currently being laid out — the height
+  // source for a blank line, which has no segment of its own to measure. Mirrors
+  // the shape-text path's `lastTextPt` seed (drawShapeText, PR #583).
+  let lastSizePt = baseFont.size;
 
+  // Flush the current line region as-is. Used at soft-wrap (kinsoku) breaks, where
+  // the region being closed always has content — an empty region here means the
+  // whole line was carried down to the next line, so nothing is emitted.
   const flush = () => {
     if (cur.length === 0) return;
     lines.push({ segments: cur, maxFontSize: curMaxSize });
     cur = []; curW = 0; curMaxSize = 0;
+  };
+
+  // Flush a region delimited by a hard line break (LF) or end-of-value. Unlike
+  // `flush`, an EMPTY region is emitted as a blank line: ECMA-376 §18.8.1
+  // (CT_CellAlignment @wrapText) line-wraps a multi-line cell, and each line —
+  // including a blank one from consecutive / leading / trailing breaks — reserves
+  // one single-line height, as tall as a one-character line of the same font.
+  // Without this the blank line collapsed to zero height and pulled the lines
+  // below it up (the cell analog of the shape-text fix in PR #583 / docx #582).
+  const flushRegion = (emptySizePt: number) => {
+    if (cur.length === 0) {
+      lines.push({ segments: [], maxFontSize: emptySizePt || DEFAULT_FONT_SIZE });
+      return;
+    }
+    flush();
   };
 
   const push = (text: string, font: CellFont) => {
@@ -852,6 +874,7 @@ export function layoutRichTextLines(
 
   for (const run of runs) {
     const font = applyRunFont(baseFont, run);
+    lastSizePt = font.size;
     // Tokenize: runs of non-space latin, spaces, or individual CJK chars
     const tokens: string[] = [];
     let i = 0;
@@ -882,11 +905,14 @@ export function layoutRichTextLines(
       }
     }
     for (const tok of tokens) {
-      if (tok === '\n') flush();
+      if (tok === '\n') flushRegion(font.size);
       else push(tok, font);
     }
   }
-  flush();
+  // Trailing region. If the value ended with a break, `cur` is empty but a line
+  // was already produced, so a trailing blank line is reserved; a value with no
+  // content and no breaks (no segments, no prior line) produces nothing.
+  if (cur.length > 0 || lines.length > 0) flushRegion(lastSizePt);
   return lines;
 }
 

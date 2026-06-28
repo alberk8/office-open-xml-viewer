@@ -107,6 +107,18 @@ impl Default for LevelDef {
     }
 }
 
+/// Key into the running-counter map. numId values and abstractNumId values are
+/// independent ID sequences in WordprocessingML (§17.9.2 / §17.9.5), so they
+/// must NOT share a `u32` key space: a dangling numId (no `<w:num>`) that
+/// happens to equal a real abstractNumId would otherwise hijack that abstract's
+/// live count. `Abstract` holds the shared count for a resolved num; `OrphanNum`
+/// gives an unresolved num its own disjoint counter.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum CounterKey {
+    Abstract(u32),
+    OrphanNum(u32),
+}
+
 #[derive(Default)]
 pub struct NumberingMap {
     /// abstractNumId → [level0..level8]
@@ -122,8 +134,9 @@ pub struct NumberingMap {
     /// one numId carries into the next (sample-13's masthead: numId=30 with a
     /// `<w:startOverride>` restarts abstractNumId 20 to 1, then the body's
     /// numId=6 — same abstract — continues 2, 3, 4 rather than resuming its own
-    /// page-1 tail at 5, 6, 7).
-    pub counters: HashMap<u32, HashMap<u32, u32>>,
+    /// page-1 tail at 5, 6, 7). Keyed by `CounterKey` so an unresolved numId
+    /// gets a disjoint counter instead of colliding with an abstractNumId.
+    counters: HashMap<CounterKey, HashMap<u32, u32>>,
     /// (numId, level) pairs already advanced at least once. A numId carrying a
     /// `<w:lvlOverride><w:startOverride>` restarts the shared abstract counter
     /// only on its FIRST appearance at that level (§17.9.6 / §17.9.7); afterward
@@ -334,7 +347,7 @@ impl NumberingMap {
         // Pre-compute start values to avoid borrow conflicts. `get_start`
         // already folds in any per-numId `<w:startOverride>` for the level.
         let starts: Vec<u32> = (0..=level).map(|l| self.get_start(num_id, l)).collect();
-        let abstract_id = self.abstract_of(num_id);
+        let key = self.counter_key(num_id);
         let has_override = self
             .num_overrides
             .get(&num_id)
@@ -342,7 +355,7 @@ impl NumberingMap {
         // `insert` returns true when the pair was NOT already present.
         let first_for_num = self.started.insert((num_id, level));
 
-        let entry = self.counters.entry(abstract_id).or_default();
+        let entry = self.counters.entry(key).or_default();
 
         // Reset deeper levels (§17.9.25 default lvlRestart).
         let keys: Vec<u32> = entry.keys().copied().filter(|&l| l > level).collect();
@@ -371,10 +384,15 @@ impl NumberingMap {
         val
     }
 
-    /// The abstractNumId a numId resolves to, falling back to the numId itself
-    /// when the `<w:num>` is unknown (keeps an orphan num self-consistent).
-    fn abstract_of(&self, num_id: u32) -> u32 {
-        self.num_to_abstract.get(&num_id).copied().unwrap_or(num_id)
+    /// The counter-map key for a numId: the shared `Abstract(abstractNumId)`
+    /// when the `<w:num>` resolves, else an `OrphanNum(numId)` in a disjoint key
+    /// space so a dangling numId can never collide with a real abstractNumId's
+    /// running counter.
+    fn counter_key(&self, num_id: u32) -> CounterKey {
+        match self.num_to_abstract.get(&num_id) {
+            Some(&abs) => CounterKey::Abstract(abs),
+            None => CounterKey::OrphanNum(num_id),
+        }
     }
 
     /// Resolve the display text for a counter value in the given level.
@@ -392,7 +410,7 @@ impl NumberingMap {
         let Some(lvl) = self.get_level(num_id, level) else {
             return format!("{}.", counter);
         };
-        let abstract_id = self.abstract_of(num_id);
+        let key = self.counter_key(num_id);
 
         let mut text = lvl.text.clone();
         // Replace from the deepest placeholder down so "%1" can never partially
@@ -403,7 +421,7 @@ impl NumberingMap {
                 counter
             } else {
                 self.counters
-                    .get(&abstract_id)
+                    .get(&key)
                     .and_then(|m| m.get(&k))
                     .copied()
                     .unwrap_or_else(|| self.get_start(num_id, k))
@@ -728,5 +746,23 @@ mod tests {
         assert_eq!(m.resolve_text(2, 0, b), "2.");
         let c = m.advance(1, 0);
         assert_eq!(m.resolve_text(1, 0, c), "3.");
+    }
+
+    /// A dangling numId (no `<w:num>`) whose value equals a live abstractNumId
+    /// must NOT hijack that abstract's running counter — numId and abstractNumId
+    /// are independent ID spaces (§17.9.2 / §17.9.5). Here abstractNumId 4 is
+    /// referenced by numId 5; a paragraph then references the unmapped numId 4.
+    #[test]
+    fn orphan_numid_equal_to_abstract_id_keeps_disjoint_counter() {
+        let mut m = map(r#"<w:abstractNum w:abstractNumId="4">
+                 <w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/></w:lvl>
+               </w:abstractNum>
+               <w:num w:numId="5"><w:abstractNumId w:val="4"/></w:num>"#);
+        let a = m.advance(5, 0);
+        assert_eq!(m.resolve_text(5, 0, a), "1.");
+        // numId 4 has no <w:num>; it must start its own count at 1, not read
+        // abstractNumId 4's counter (which would yield 2).
+        let b = m.advance(4, 0);
+        assert_eq!(m.resolve_text(4, 0, b), "1.");
     }
 }

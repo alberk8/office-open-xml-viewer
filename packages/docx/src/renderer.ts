@@ -645,7 +645,7 @@ export async function renderDocumentToCanvas(
   ctx.fillRect(0, 0, cssWidth, cssHeight);
 
   const kinsoku = resolveKinsokuRules(doc.settings);
-  const pages = opts.prebuiltPages ?? paginateWithFooterReserve(doc, ctx, doc.fontFamilyClasses ?? {}, kinsoku, doc.footnotes ?? []);
+  const pages = opts.prebuiltPages ?? paginateWithHeaderFooterReserve(doc, ctx, doc.fontFamilyClasses ?? {}, kinsoku, doc.footnotes ?? []);
   const totalPages = Math.max(opts.totalPages ?? pages.length, pages.length);
   const elements = pages[pageIndex] ?? pages[0] ?? [];
 
@@ -698,26 +698,31 @@ export async function renderDocumentToCanvas(
     noteNumbers,
   };
 
-  // ECMA-376 §17.10.1 — per-section header/footer selection. Resolve the section
-  // active at the top of this page (and whether it's that section's first page)
-  // from the paginated elements' stamped `sectionHF`, then apply the spec
-  // precedence (first → even → default). Single-section docs resolve to
-  // doc.headers/footers/section.titlePage, unchanged.
-  const pageSection = resolvePageSection(pages, pageIndex, doc);
-  const isEvenPage = pageIndex % 2 === 1;
+  // ECMA-376 §17.10.1 — per-section header/footer selection. resolvePageHeader and
+  // resolvePageFooter resolve the section active at the top of this page (and whether
+  // it is that section's first page) from the paginated elements' stamped `sectionHF`,
+  // then apply the spec precedence (first → even → default). Single-section docs
+  // resolve to doc.headers/footers/section.titlePage, unchanged. The paint path uses
+  // the SAME resolvers as the reserve pass (computeHeaderReserves / computeFooterReserves)
+  // so the body's start/end can never drift from the gap pagination reserved.
 
-  // Header: top of page, starting at headerDistance
-  const header = pickHeaderFooter(
-    pageSection.headers, pageSection.isFirstPageOfSection, isEvenPage,
-    pageSection.titlePage, doc.section.evenAndOddHeaders,
-  );
+  // Header: top of page, starting at headerDistance. A header taller than its
+  // top-margin allowance (§17.6.11) overflows the content area downward; the body
+  // was already paginated to clear it (paginateWithHeaderFooterReserve), and its
+  // start y is pushed down by the same overflow so no body line sits over the header.
+  const header = resolvePageHeader(pages, pageIndex, doc);
+  let headerReservePx = 0;
   if (header) {
+    const headerHeight = measureHeaderFooterHeight(header, baseState);
     renderHeaderFooter(header, sec.headerDistance * scale, baseState);
+    // §17.6.11 overflow in device px (headerHeight is at canvas scale), via the shared
+    // formula so the body start matches the pagination reserve exactly.
+    headerReservePx = headerOverflowPt(headerHeight, sec.marginTop * scale, sec.headerDistance * scale);
   }
 
   // Footer: anchored from bottom, rising by its measured height. A footer taller
   // than its bottom-margin allowance (§17.6.11) overflows the content area; the body
-  // was already paginated to clear it (paginateWithFooterReserve), and the same
+  // was already paginated to clear it (paginateWithHeaderFooterReserve), and the same
   // overflow raises the footnote block below so notes clear it too.
   const footer = resolvePageFooter(pages, pageIndex, doc);
   let footerReservePx = 0;
@@ -735,7 +740,11 @@ export async function renderDocumentToCanvas(
   // used as the fallback for elements that carry no per-section `colGeom` (single-
   // section docs, where it equals the whole-body geometry — unchanged path).
   const columns = computeColumns(sec);
-  const bodyState: RenderState = { ...baseState, y: sec.marginTop * scale };
+  // ECMA-376 §17.6.11 (pgMar/@top): the body starts at the GREATER of the top margin
+  // and the header's extent, so a tall header (headerReservePx > 0) pushes the first
+  // body line down to the header's bottom. The same overflow shrank the paginated
+  // content area from the top (computeHeaderReserves), so the body fits within margins.
+  const bodyState: RenderState = { ...baseState, y: sec.marginTop * scale + headerReservePx };
   // Optional column separator rules (`<w:cols w:sep="1">`), drawn before the text
   // so glyphs sit on top. A thin rule is centred in each inter-column gap and
   // spans the content height. With per-section columns a page can carry more than
@@ -759,7 +768,7 @@ export async function renderDocumentToCanvas(
     if (geoms.length === 0 && columns.length > 1) geoms.push(columns);
     for (const g of geoms) drawColumnSeparators(ctx, g, sec, scale);
   }
-  renderBodyElements(elements, bodyState, columns);
+  renderBodyElements(elements, bodyState, columns, headerReservePx);
 
   // Footnotes referenced on this page (ECMA-376 §17.11): drawn at the bottom of
   // the text column, above a short separator rule. The page area was already
@@ -1064,6 +1073,13 @@ export function computeColumns(section: SectionProps): ColumnGeom[] {
   return out;
 }
 
+/** ECMA-376 §17.6.11 — the per-page content-area insets (pt) reserved for a header
+ *  taller than its top-margin allowance (`top`) and a footer taller than its
+ *  bottom-margin allowance (`bottom`). One value per page; see headerOverflowPt /
+ *  footerOverflowPt. */
+interface PageReserve { top: number; bottom: number }
+const ZERO_RESERVE: PageReserve = { top: 0, bottom: 0 };
+
 export function computePages(
   body: BodyElement[],
   section: SectionProps,
@@ -1071,7 +1087,9 @@ export function computePages(
   fontFamilyClasses: Record<string, string> = {},
   kinsoku: KinsokuRules = DEFAULT_KINSOKU_RULES,
   footnotes: DocNote[] = [],
-  footerReservePt: number[] = [],
+  /** Per-page tall header/footer reserve (ECMA-376 §17.6.11). Empty ⇒ no reserve
+   *  (the common case). Computed by paginateWithHeaderFooterReserve's second pass. */
+  pageReserves: PageReserve[] = [],
 ): PaginatedBodyElement[][] {
   const fullContentH = section.pageHeight - section.marginTop - section.marginBottom;
   const measureState = buildMeasureState(ctx, section, fontFamilyClasses, kinsoku, documentHasEastAsian(body));
@@ -1297,9 +1315,23 @@ export function computePages(
   // references the same note twice doesn't double-count, and the renderer draws
   // each note once). Reset on every page flip.
   let pageNoteIds = new Set<string>();
-  // Effective content height for the current page: the full text column minus
-  // the footnote area reserved at the bottom of THIS page.
-  const effContentH = () => fullContentH - (footnoteReservePt[pages.length - 1] ?? 0) - (footerReservePt[pages.length - 1] ?? 0);
+  // Effective content height for the current page: the full text column minus the
+  // footnote + tall-footer reserve at the BOTTOM and the tall-header reserve at the TOP
+  // of THIS page (ECMA-376 §17.6.11). The body cursor is page-relative (0 = content
+  // top); the header reserve also shifts the render-time body start down by the same
+  // amount (renderDocumentToCanvas), so reducing the height here keeps the body within
+  // the bottom margin while it begins below the header.
+  // Clamp past the array end to the last entry: a tall header/footer shrinks every
+  // page, so this (second) pass can have MORE pages than the (first) pass the reserves
+  // were measured over. For a uniform header/footer the last measured reserve is the
+  // right value for any extra page (and a first-page-only reserve's last entry is 0,
+  // also correct). Empty ⇒ no reserve (the common no-overflow path).
+  const reserveAt = (i: number): PageReserve =>
+    pageReserves.length === 0 ? ZERO_RESERVE : (pageReserves[Math.min(i, pageReserves.length - 1)] ?? ZERO_RESERVE);
+  const effContentH = () => {
+    const r = reserveAt(pages.length - 1);
+    return fullContentH - (footnoteReservePt[pages.length - 1] ?? 0) - r.bottom - r.top;
+  };
   const startPageBookkeeping = () => {
     footnoteReservePt[pages.length - 1] = 0;
     pageNoteIds = new Set<string>();
@@ -1993,6 +2025,20 @@ function footerOverflowPt(footerH: number, marginBottom: number, footerDistance:
   return Math.max(0, footerDistance + footerH - marginBottom);
 }
 
+/** ECMA-376 §17.6.11 (pgMar/@top): the SYMMETRIC twin of footerOverflowPt. The
+ *  main-document text TOP is placed at the GREATER of the top margin and the header's
+ *  extent — a header taller than the top-margin allowance pushes content DOWN. Returns
+ *  the pt by which a header of height `headerH` overflows the top margin and must be
+ *  reserved (content starts at the header's bottom, `headerDistance + headerH` from the
+ *  page top). A NEGATIVE top margin means the text is measured from the page top
+ *  regardless of the header — it overlaps the header — so nothing is reserved.
+ *  Unit-agnostic: pass all three args in one unit (pt for the pagination reserve, px
+ *  for the paint-time body start). */
+function headerOverflowPt(headerH: number, marginTop: number, headerDistance: number): number {
+  if (marginTop < 0) return 0;
+  return Math.max(0, headerDistance + headerH - marginTop);
+}
+
 /** Resolve the footer that applies to `pageIndex` with the §17.10.1/§17.10.6
  *  first/even/default precedence (resolvePageSection + pickHeaderFooter), or null if
  *  none. One selection shared by the reserve pass, the footer paint, and the footnote
@@ -2008,9 +2054,23 @@ function resolvePageFooter(
   );
 }
 
-/** Below this (pt) a footer's overflow is sub-point noise — skip the second
- *  pagination pass when no page's footer overflows by at least this much. */
-const MIN_FOOTER_OVERFLOW_PT = 0.5;
+/** Resolve the header that applies to `pageIndex` with the same §17.10.1/§17.10.6
+ *  first/even/default precedence as resolvePageFooter. One selection shared by the
+ *  reserve pass and the header paint so both size and place the SAME header. */
+function resolvePageHeader(
+  pages: PaginatedBodyElement[][],
+  pageIndex: number,
+  doc: DocxDocumentModel,
+): HeaderFooter | null {
+  const ps = resolvePageSection(pages, pageIndex, doc);
+  return pickHeaderFooter(
+    ps.headers, ps.isFirstPageOfSection, pageIndex % 2 === 1, ps.titlePage, doc.section.evenAndOddHeaders,
+  );
+}
+
+/** Below this (pt) a header's/footer's overflow is sub-point noise — skip the second
+ *  pagination pass when no page's header or footer overflows by at least this much. */
+const MIN_MARGIN_OVERFLOW_PT = 0.5;
 
 /**
  * ECMA-376 §17.6.11 (pgMar/@bottom) — per-page pt to reserve at the bottom of the
@@ -2036,22 +2096,53 @@ function computeFooterReserves(
 }
 
 /**
- * Paginate with footer-height awareness (ECMA-376 §17.6.11). Pass 1 paginates without
- * reservation; a tall footer's overflow into the content area is measured per page
- * (computeFooterReserves) and fed into a second pass so body content never overlaps
- * the footer. When no footer overflows — the common case — pass 1 is returned
+ * ECMA-376 §17.6.11 (pgMar/@top) — the SYMMETRIC twin of computeFooterReserves: the
+ * per-page pt to reserve at the TOP of the content area for a header taller than its
+ * top-margin allowance. The main text top sits at the greater of the top margin and the
+ * header extent (`headerDistance + headerHeight`); when the header extent wins, the body
+ * starts at the header's bottom (Word never lays body text over a header). A header that
+ * fits the margin — or a negative top margin (§17.6.11: text then overlaps the header) —
+ * reserves 0. See headerOverflowPt for the exact rule.
+ */
+function computeHeaderReserves(
+  pages: PaginatedBodyElement[][],
+  doc: DocxDocumentModel,
+  measure: RenderState,
+): number[] {
+  const sec = doc.section;
+  return pages.map((_unused, pageIdx) => {
+    const header = resolvePageHeader(pages, pageIdx, doc);
+    if (!header) return 0;
+    const headerH = measureHeaderFooterHeight(header, measure); // pt (measure is scale 1)
+    return headerOverflowPt(headerH, sec.marginTop, sec.headerDistance);
+  });
+}
+
+/**
+ * Paginate with header/footer-height awareness (ECMA-376 §17.6.11). Pass 1 paginates
+ * without reservation; a header or footer taller than its margin allowance overflows
+ * the content area (computeHeaderReserves reserves at the top, computeFooterReserves at
+ * the bottom, measured per page) and both are fed into a second pass so body content
+ * never overlaps either. When nothing overflows — the common case — pass 1 is returned
  * unchanged. Shared by the main render path and the worker so the two can never
  * paginate differently.
  *
- * One re-pass is used (not iterated to a fixpoint). It is exact when an overflowing
- * footer is a section's FIRST-page footer beginning a PAGE-STARTING break
- * (nextPage/odd/even) — e.g. sample-13's masthead DOI block — since such a section
- * always starts at a fresh page top and its page index is identical in both passes.
- * The unhandled edge is a CONTINUOUS section whose tall first-page footer's page index
- * could shift when the reserve repacks content; that combination is exotic and is
- * left for a fixpoint pass if a real document ever needs it.
+ * One re-pass is used (not iterated to a fixpoint), with two bounded approximations:
+ *  - Page-count growth: a tall reserve shrinks every page, so pass 2 can have MORE pages
+ *    than the pass-1 reserve array covers. computePages clamps a past-the-end page to the
+ *    last reserve — exact for a uniform header/footer (every page the same) and for a
+ *    first-page-only reserve (its trailing entry is 0). An even/odd header of DIFFERING
+ *    height on a grown page is the residual gap (exotic, untested).
+ *  - Page-index shift: a CONTINUOUS section whose tall first-page header/footer's page
+ *    index moves when the reserve repacks content is left for a fixpoint pass if a real
+ *    document ever needs it (sample-13's masthead begins a PAGE-STARTING break, so its
+ *    index is identical in both passes).
+ * The reserve shrinks the content height and shifts the body start; it does NOT re-anchor
+ * page-level floats (wrapTopAndBottom / page-anchored), which still measure from the bare
+ * top margin. No bundled document pairs a tall header/footer with such a float; if one
+ * arises, shift measureState.y by the reserve at each page open to keep floats in frame.
  */
-function paginateWithFooterReserve(
+function paginateWithHeaderFooterReserve(
   doc: DocxDocumentModel,
   ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
   fontFamilyClasses: Record<string, string>,
@@ -2060,9 +2151,15 @@ function paginateWithFooterReserve(
 ): PaginatedBodyElement[][] {
   const pass1 = computePages(doc.body, doc.section, ctx, fontFamilyClasses, kinsoku, footnotes);
   const measure = buildMeasureState(ctx, doc.section, fontFamilyClasses, kinsoku, documentHasEastAsian(doc.body));
-  const reserves = computeFooterReserves(pass1, doc, measure);
-  if (!reserves.some((r) => r > MIN_FOOTER_OVERFLOW_PT)) return pass1;
-  return computePages(doc.body, doc.section, ctx, fontFamilyClasses, kinsoku, footnotes, reserves);
+  const footerReserves = computeFooterReserves(pass1, doc, measure);
+  const headerReserves = computeHeaderReserves(pass1, doc, measure);
+  const overflows = (rs: number[]): boolean => rs.some((r) => r > MIN_MARGIN_OVERFLOW_PT);
+  if (!overflows(footerReserves) && !overflows(headerReserves)) return pass1;
+  const pageReserves = pass1.map((_unused, i): PageReserve => ({
+    top: headerReserves[i] ?? 0,
+    bottom: footerReserves[i] ?? 0,
+  }));
+  return computePages(doc.body, doc.section, ctx, fontFamilyClasses, kinsoku, footnotes, pageReserves);
 }
 
 /** Paginate with a throwaway measure context. Pagination must use the same
@@ -2074,7 +2171,7 @@ function paginateWithFooterReserve(
 export function paginateDocument(doc: DocxDocumentModel): PaginatedBodyElement[][] {
   const ctx = new OffscreenCanvas(1, 1).getContext('2d');
   if (!ctx) return [doc.body];
-  return paginateWithFooterReserve(
+  return paginateWithHeaderFooterReserve(
     doc,
     ctx,
     doc.fontFamilyClasses ?? {},
@@ -3122,6 +3219,13 @@ function renderBodyElements(
    *  footer, single-column). Omitted ⇒ the state's existing full-width
    *  contentX/contentW is used unchanged. */
   columns?: ColumnGeom[],
+  /** ECMA-376 §17.6.11 — device-px the content top is reserved below the top
+   *  margin for a header taller than its top-margin allowance. `state.y` already
+   *  carries it for column 0 (the caller's `bodyState.y`); it must be re-added
+   *  whenever a newspaper column (§17.6.4) restarts at its section's region top,
+   *  which is otherwise a bare-margin `colTopPt`. 0 (default) for header/footer
+   *  and nested renders, which have no such reserve. */
+  headerReservePx = 0,
 ): void {
   let prevPara: DocParagraph | null = null;
   let prevSpaceAfter = 0;
@@ -3198,8 +3302,10 @@ function renderBodyElements(
         // the preceding single-column content, not the page content top. The
         // paginator computed and stamped it (`colTopPt`, page-absolute pt); the
         // paint pass consumes it rather than re-deriving the column top. Absent ⇒
-        // a page-spanning section ⇒ the page content top, unchanged.
-        state.y = (el.colTopPt ?? state.marginTop) * state.scale;
+        // a page-spanning section ⇒ the page content top, unchanged. A tall header
+        // (§17.6.11) shifts the whole content frame down — `colTopPt` is the bare
+        // margin top, so re-add the reserve, matching column 0's `bodyState.y`.
+        state.y = (el.colTopPt ?? state.marginTop) * state.scale + headerReservePx;
       }
       prevPara = null;
       prevSpaceAfter = 0;
@@ -3215,7 +3321,7 @@ function renderBodyElements(
       // previous section being multi-column so a 1-col→1-col continuous break
       // (sample-5) keeps the exact prior behavior (continue at the current y).
       if (activeGeom && activeGeom.length > 1 && el.colTopPt != null) {
-        state.y = Math.max(state.y, el.colTopPt * state.scale);
+        state.y = Math.max(state.y, el.colTopPt * state.scale + headerReservePx);
       }
       const col = cols[0];
       state.contentX = col.xPt * state.scale;

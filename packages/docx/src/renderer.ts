@@ -1132,6 +1132,30 @@ export function computePages(
   const isContinuousSectionSpacer = (idx: number): boolean =>
     isSectionBreakSpacerAt(body, idx) && sectionKindFrom(idx + 2) === 'continuous';
 
+  // A continuous-section spacer whose OWN space-before is zero. Word renders NO
+  // paragraph-mark line box for it: the section mark collapses to zero height
+  // instead of occupying a blank line. (A spacer that DOES carry a space-before
+  // keeps its box — the before manifests as the blank line.)
+  //
+  // NOTE — this matches Microsoft WORD's observed layout, NOT a spec rule.
+  // §17.3.1.29 mandates that every paragraph produces one mark line box; no
+  // ECMA-376 clause (nor [MS-DOC] / [MS-OI29500]) documents a section-mark
+  // collapse. The model is reconstructed clean-room from Word's OWN output:
+  //   - sample-12's spacer is Normal with before=0. Word shows exactly ONE blank
+  //     line between "[Format…single line spacing]" and "1. INTRODUCTION" (the
+  //     user verified this by cursor-walk) and paints the heading ~24pt higher
+  //     than our prior two-blank-line layout — i.e. the spacer's own mark line is
+  //     absent (pdftotext -bbox: INTRODUCTION at 446pt, not 470pt).
+  //   - sample-13's spacer is before=440 (22pt). Word keeps its mark line (TWO
+  //     blank lines, heading at 376pt), so the collapse is gated on before=0.
+  // Both gates were pinned against the Word PDFs; we follow Word's measured
+  // behaviour, not any external implementation.
+  const isCollapsedContinuousSpacer = (idx: number): boolean => {
+    if (!isContinuousSectionSpacer(idx)) return false;
+    const p = body[idx] as unknown as DocParagraph;
+    return (p.spaceBefore ?? 0) === 0;
+  };
+
   // ECMA-376 §17.10.1 — the resolved header/footer set + `<w:titlePg>` flag for
   // the section that OWNS the content starting at body index `startIdx`. Mirrors
   // `sectionColumnsFrom`: the owning section's set is carried on the NEXT
@@ -1634,7 +1658,28 @@ export function computePages(
       // drop.
       const spacer = isContinuousSectionSpacer(i);
       if (spacer) (el as PaginatedBodyElement).sectionBreakSpacer = true;
+      // A zero-before continuous-section spacer renders NO mark line box (Word's
+      // section-mark collapse — see isCollapsedContinuousSpacer). Skip it entirely:
+      // add no height and leave prevPara/prevSpaceAfter as the paragraph BEFORE the
+      // spacer, so the next section's first paragraph spaces against it. The paint
+      // pass mirrors this by skipping the stamped element. (Still pushed so the
+      // per-page element sequence — and any section-geometry stamping keyed off it —
+      // is unchanged.)
+      if (isCollapsedContinuousSpacer(i)) {
+        (el as PaginatedBodyElement).collapsedSpacer = true;
+        pushTagged(el as PaginatedBodyElement);
+        continue;
+      }
       const suppressBefore = contextual || spacer;
+
+      // An empty paragraph that immediately precedes a COLLAPSED continuous spacer
+      // begins the section-break empty run, which Word renders FLUSH below the
+      // preceding content (the section transition collapses upward): the previous
+      // paragraph's spaceAfter is dropped too (sample-12: "[Format…]"'s 6pt after
+      // vanishes, so "1. INTRODUCTION" sits at Word's 446pt rather than ~452pt).
+      // Mirrors contextualSpacing's full drop of the previous after; no-op when the
+      // spacer is NOT collapsed (sample-13, before=22 keeps normal flow).
+      const leadsCollapsedRun = isInklessParagraph(para) && isCollapsedContinuousSpacer(i + 1);
 
       // Collapse with the previous paragraph's spaceAfter — Word takes
       // max(prev.after, this.before) between paragraphs, not the sum.
@@ -1642,7 +1687,7 @@ export function computePages(
       // §17.3.1.9 contextualSpacing: same-style adjacent paragraphs drop BOTH the
       // previous after and this before (gap = 0), keeping the paginator's fill in
       // lockstep with the paint pass.
-      const overlap = contextual ? prevSpaceAfter : Math.min(prevSpaceAfter, effectiveBefore);
+      const overlap = (contextual || leadsCollapsedRun) ? prevSpaceAfter : Math.min(prevSpaceAfter, effectiveBefore);
       y -= overlap;
       measureState.y -= overlap;
 
@@ -3093,6 +3138,13 @@ function renderBodyElements(
         renderFrameParagraph(para, state, frameAnchorLineHeightPx(elements, el, state));
         continue;
       }
+      // A zero-before continuous-section spacer renders no mark line box (Word's
+      // section-mark collapse; stamped by the paginator — see
+      // isCollapsedContinuousSpacer). Skip it: paint nothing, advance y by nothing,
+      // and leave prevPara/prevSpaceAfter as the paragraph BEFORE it so the new
+      // section's first paragraph spaces against that paragraph. Mirrors the
+      // paginator's identical skip so fill and paint stay in lockstep.
+      if ((el as PaginatedBodyElement).collapsedSpacer) continue;
       const contextual = contextualSuppressed(prevPara, para);
       // Empty section-break spacer: drop only its own before (see
       // isSectionBreakSpacerAt); contextualSpacing drops the previous after too.
@@ -3100,12 +3152,19 @@ function renderBodyElements(
       // marker is gone from this per-page list), so read the tag here.
       const spacer = !!(el as PaginatedBodyElement).sectionBreakSpacer;
       const suppress = contextual || spacer;
+      // An empty paragraph immediately before a COLLAPSED continuous spacer begins
+      // the section-break empty run; Word renders it FLUSH below the preceding
+      // content, dropping the previous paragraph's spaceAfter too (mirrors the
+      // paginator's leadsCollapsedRun). The next element carries the
+      // `collapsedSpacer` tag stamped during pagination.
+      const leadsCollapsedRun = isInklessParagraph(para)
+        && !!(elements[elIdx + 1] as PaginatedBodyElement | undefined)?.collapsedSpacer;
       // Collapse spaceAfter+spaceBefore like Word: use max, not sum.
       const effBefore = suppress ? 0 : para.spaceBefore;
       // §17.3.1.9 contextualSpacing: between two same-style paragraphs that both
       // set it, BOTH the previous after and this before are dropped (gap = 0), not
       // just collapsed — so e.g. a code listing's lines sit tight.
-      const overlap = contextual ? prevSpaceAfter : Math.min(prevSpaceAfter, effBefore);
+      const overlap = (contextual || leadsCollapsedRun) ? prevSpaceAfter : Math.min(prevSpaceAfter, effBefore);
       state.y -= overlap * state.scale;
       // Continuation slices (slice.start > 0) suppress spaceBefore: the
       // earlier slice already consumed it on the previous page. Likewise

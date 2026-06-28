@@ -233,6 +233,14 @@ export type PaginatedBodyElement = BodyElement & {
    *  the adjacency itself. Runtime-only — never emitted by the parser. See
    *  `isSectionBreakSpacerAt` in renderer.ts. */
   sectionBreakSpacer?: boolean;
+  /** A section-break spacer (see `sectionBreakSpacer`) that ALSO carries no
+   *  space-before of its own: Word renders no paragraph-mark line box for it at
+   *  a CONTINUOUS section break — the section mark collapses to zero height
+   *  rather than occupying a blank line. (A spacer WITH a space-before keeps its
+   *  line box; the before manifests as the blank line.) Stamped by the paginator
+   *  and skipped by both the fill and paint passes so they stay in lockstep. See
+   *  `isCollapsedContinuousSpacer` in renderer.ts. Runtime-only. */
+  collapsedSpacer?: boolean;
   colIndex?: number;
   /** ECMA-376 §17.6.4 — the column geometry of the SECTION this element belongs
    *  to (per-section newspaper columns). Stamped by the paginator so the renderer

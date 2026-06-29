@@ -4130,7 +4130,12 @@ function renderParagraph(
 
     const lineWidth = line.segments.reduce((s, seg) => s + seg.measuredWidth, 0);
     const lineSlack = effAvailW - (x - lineLeft) - lineWidth;
-    const applyJustify = isJustified && (!isLastLine || stretchLastLine);
+    // §17.18.44: a `both` line justifies UNLESS it is the paragraph's true last
+    // line OR ends at a manual `<w:br/>` (§17.3.3.1) — both terminate a logical
+    // line and are left-aligned. `distribute` (stretchLastLine) still spreads
+    // every line, including these.
+    const endsLogicalLine = isLastLine || (line.endsWithBreak ?? false);
+    const applyJustify = isJustified && (!endsLogicalLine || stretchLastLine);
     let alignOffset = 0;
     // ECMA-376 §22.1.2.88 `m:jc` / §22.1.2.30 `m:defJc` — a display equation's
     // justification is independent of the paragraph's text alignment. When this
@@ -4743,6 +4748,11 @@ interface LayoutLine {
   /** Set when at least one segment on this line carries a ruby annotation —
    *  enables docGrid pitch snapping in lineBoxHeight. */
   hasRuby?: boolean;
+  /** ECMA-376 §17.3.3.1 — this line is terminated by a MANUAL line break
+   *  (`<w:br w:type="textWrapping"/>`). In a justified (`both`) paragraph it is
+   *  the end of a logical line and must be left-aligned, not stretched — exactly
+   *  like the paragraph's final line (§17.18.44). */
+  endsWithBreak?: boolean;
 }
 
 /** Additional context passed to layoutLines so it can honor floats on the current page. */
@@ -5385,7 +5395,7 @@ function layoutLines(
   const availW = () => lineMaxWidth - (isFirst ? firstIndent : 0);
 
   let lineHasRuby = false;
-  const flush = (forceHeight?: number) => {
+  const flush = (forceHeight?: number, brTerminated = false) => {
     const h = forceHeight !== undefined ? forceHeight : (lineHeight || 10);
     // If the line has no measured content (empty/line-break line), synthesize
     // stable ascent/descent from the effective font size so wrap/baseline math
@@ -5403,6 +5413,7 @@ function layoutLines(
       availWidth: lineMaxWidth,
       topY: wrapCtx ? currentLineTopY : undefined,
       hasRuby: lineHasRuby,
+      endsWithBreak: brTerminated,
     });
     if (wrapCtx) {
       currentLineTopY += wrapCtx.lineBoxH(asc, desc, lineHasRuby, lineIntendedSingle);
@@ -5530,7 +5541,9 @@ function layoutLines(
 
     // ── Line-break sentinel ──────────────────────────────
     if ('lineBreak' in seg) {
-      flush(seg.fontSize);
+      // The line being flushed ends at a MANUAL break (§17.3.3.1) — mark it so a
+      // justified paragraph left-aligns it like its final line (§17.18.44).
+      flush(seg.fontSize, true);
       trailingBreakFontSize = seg.fontSize;
       continue;
     }

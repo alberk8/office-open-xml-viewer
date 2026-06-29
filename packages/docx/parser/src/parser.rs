@@ -5558,10 +5558,11 @@ mod tests {
         assert_eq!(t.width_pct, None);
     }
 
-    // Regression guard for the direct-rPr merge path. `apply_direct_run` is a
-    // hand-maintained mirror of `styles::apply_run`; a missing arm silently
-    // drops a directly-applied run property. This previously dropped
-    // `<w:highlight>` and (after PR A) `<w:bdr>` / `w:color="auto"` on styleless
+    // Regression guard for the direct-rPr merge path. `apply_direct_run` now
+    // delegates to `styles::apply_run` (the single source of truth) — this test
+    // pins the end-to-end direct-rPr contract so a future change to that merge
+    // can't silently drop a directly-applied run property. Such a drop previously
+    // lost `<w:highlight>` and (later) `<w:bdr>` / `w:color="auto"` on styleless
     // body runs, which `parse_run_fmt`-only unit tests could not catch.
     #[test]
     fn apply_direct_run_carries_decoration_fields() {

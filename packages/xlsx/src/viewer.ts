@@ -194,6 +194,34 @@ export function selectionOverlayStyle(color: string): { border: string; backgrou
   };
 }
 
+/** Ctrl/⌘ + wheel (and trackpad pinch) zoom sensitivity. `deltaY` is multiplied
+ *  by this before `exp()`. Purely an interaction-feel constant (no ECMA-376
+ *  bearing); lower = gentler. */
+const ZOOM_WHEEL_SENSITIVITY = 0.01;
+
+/**
+ * New cell scale for one wheel/pinch zoom step. The step is *exponential* in
+ * `deltaY` rather than a fixed increment, which fixes two problems with a
+ * sign-only `scale ± 0.1`:
+ *
+ *  - A trackpad pinch arrives as a high-frequency stream of small-`deltaY`
+ *    wheel events; a fixed per-event increment compounds across dozens of
+ *    events per gesture and zooms wildly. Because `exp(-k·a)·exp(-k·b) =
+ *    exp(-k·(a+b))`, the total zoom here depends only on the summed `deltaY`
+ *    of the gesture, not on how many events the OS chops it into — so a pinch
+ *    and a mouse wheel covering the same distance zoom by the same amount.
+ *  - It is multiplicative, so a step feels proportional at every zoom level
+ *    (the old additive `+0.1` was huge at 20% and tiny at 400%), and exactly
+ *    symmetric: zooming in then out by the same delta returns to the start.
+ *
+ * Negative `deltaY` (scroll up / pinch out) zooms in. The result is unclamped
+ * and unsnapped; {@link XlsxViewer.setScale} clamps to `[zoomMin, zoomMax]` and
+ * snaps to whole percent.
+ */
+export function zoomStepScale(currentScale: number, deltaY: number): number {
+  return currentScale * Math.exp(-deltaY * ZOOM_WHEEL_SENSITIVITY);
+}
+
 interface SheetAxes { col: AxisMetrics; row: AxisMetrics; }
 const sheetAxisCache = new WeakMap<Worksheet, SheetAxes>();
 
@@ -1651,14 +1679,16 @@ export class XlsxViewer {
     // Ctrl/⌘ + mouse wheel (and trackpad pinch, which the browser reports as a
     // ctrl-wheel) zooms the grid, matching Excel. preventDefault stops the
     // browser's own page zoom. A plain wheel still scrolls the grid natively.
+    // The step is exponential in deltaY (see zoomStepScale) so a trackpad
+    // pinch — a high-frequency stream of small-deltaY events — does not zoom
+    // away; the total zoom tracks the gesture distance, not the event count.
     this.scrollHost.addEventListener(
       'wheel',
       (e: WheelEvent) => {
         if (!(e.ctrlKey || e.metaKey)) return;
         e.preventDefault();
         if (e.deltaY === 0) return;
-        const dir = e.deltaY < 0 ? 1 : -1;
-        this.setScale((this.opts.cellScale ?? 1) + dir * 0.1);
+        this.setScale(zoomStepScale(this.opts.cellScale ?? 1, e.deltaY));
       },
       { passive: false },
     );

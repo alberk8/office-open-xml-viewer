@@ -3830,70 +3830,21 @@ export function nextTabStop(
   return custom ?? auto;
 }
 
-function renderParagraph(
+interface NumberingMarkerLayout {
+  numTab: number;
+  picBullet: { bmp: DecodedImage; w: number; h: number } | null;
+  numBodyOffset: number;
+  markerJcShiftPx: number;
+  hasMarker: boolean;
+}
+
+function resolveNumberingMarker(
   para: DocParagraph,
   state: RenderState,
-  suppressSpaceBefore = false,
-  /** When set, render only `lines[start, end)` of the laid-out paragraph,
-   *  used by the paginator to split paragraphs that don't fit on one page. */
-  lineSlice?: { start: number; end: number },
-  /** True when this call is the redirected draw of a `<w:framePr>` frame
-   *  paragraph (from {@link renderFrameParagraph}). It suppresses the in-flow
-   *  cursor bookkeeping that the frame path handles itself: anchor-float
-   *  registration is skipped (the frame is the float) and the
-   *  topAndBottom-skip / frame dispatch are bypassed (the geometry is already
-   *  the frame box). Frame dispatch for a non-frame call lives in
-   *  renderBodyElements so it can pass the anchor paragraph's line height. */
-  inFrame = false,
-  /** ECMA-376 §17.3.1.7 paragraph-border merge: suppress the top edge when a
-   *  same-border paragraph precedes this one in the same column, and the bottom
-   *  edge when one follows. Computed by the paint loop (renderBodyElements /
-   *  renderParaList), which knows in-flow adjacency. Absent ⇒ draw the full box
-   *  (a standalone bordered paragraph). */
-  borderMerge?: ParaBorderMerge,
-): void {
-  const { ctx, scale, contentX, contentW, defaultColor, dryRun, fontFamilyClasses } = state;
-  // Capture Y before spaceBefore — used for paragraph-relative anchor image positioning
-  const paragraphStartY = state.y;
-
-  if (!suppressSpaceBefore) state.y += para.spaceBefore * scale;
-
-  // Register anchor floats from this paragraph. ECMA-376 §20.4.3.5: a
-  // `positionV relativeFrom="paragraph"` float is positioned relative to "the
-  // paragraph which contains the drawing anchor" — its TOP edge, BEFORE the
-  // paragraph's spaceBefore (Word anchors the float at the paragraph top, not the
-  // post-spaceBefore text area). So pass `paragraphStartY` (pre-spaceBefore),
-  // identically for wrap AND wrapNone floats (renderAnchorImages below already
-  // uses paragraphStartY). Anchoring wrap floats at the post-spaceBefore text top
-  // placed them spaceBefore too low — e.g. sample-12's figure (anchor paragraph
-  // spaceBefore=12 pt) sat 12 pt under Word, eating the gap above its caption.
-  // Skipped for the frame-draw recursion: a frame paragraph's wrap exclusion is
-  // its own FloatRect (renderFrameParagraph), not an anchor image/shape float.
-  if (!inFrame) registerAnchorFloats(para, state, paragraphStartY);
-
-  // behindDoc shapes must render before text so they appear behind it.
-  renderAnchorImages(para, state, paragraphStartY, 'behind');
-
-  // If any topAndBottom float already extends past state.y, skip past it before text starts.
-  state.y = skipPastTopAndBottom(state.y, state.floats);
-
-  const textAreaTopY = state.y;
-
-  // ECMA-376 §17.3.1.12 w:ind — the transitional left/right attributes are
-  // logical start/end (Part 4 §14.11.2). In a bidi paragraph the start side is
-  // the physical RIGHT, so the two indents swap physical sides here.
-  //
-  // A frame paragraph's own body-style indents (e.g. a default first-line indent
-  // inherited from the body style) do NOT apply to the frame content: the frame
-  // box already positions the glyphs from its left edge, and the wrap exclusion
-  // is built from that same left edge (§17.3.1.11). Honoring the indent here
-  // would shift the cap glyph right of the exclusion band and let body text
-  // overlap it, so zero the indents in the frame-draw recursion.
-  const baseRtl = para.bidi === true;
-  const indLeft = inFrame ? 0 : (baseRtl ? para.indentRight : para.indentLeft) * scale;
-  const indRight = inFrame ? 0 : (baseRtl ? para.indentLeft : para.indentRight) * scale;
-  const indFirst = inFrame ? 0 : para.indentFirst * scale;
-
+  indLeft: number,
+  indFirst: number,
+): NumberingMarkerLayout {
+  const { ctx, scale, fontFamilyClasses } = state;
   // Numbering marker. `hasMarker` is the "this paragraph has a marker" flag;
   // it is true for a text/glyph marker (`numMarker`) AND for a §17.9.9 picture
   // bullet (whose lvlText is typically empty — `numMarker` would be falsy).
@@ -3978,6 +3929,76 @@ function renderParagraph(
   }
   // True when the paragraph has any marker to draw (text glyph OR picture bullet).
   const hasMarker = numMarker !== '' || picBullet !== null;
+  return { numTab, picBullet, numBodyOffset, markerJcShiftPx, hasMarker };
+}
+
+function renderParagraph(
+  para: DocParagraph,
+  state: RenderState,
+  suppressSpaceBefore = false,
+  /** When set, render only `lines[start, end)` of the laid-out paragraph,
+   *  used by the paginator to split paragraphs that don't fit on one page. */
+  lineSlice?: { start: number; end: number },
+  /** True when this call is the redirected draw of a `<w:framePr>` frame
+   *  paragraph (from {@link renderFrameParagraph}). It suppresses the in-flow
+   *  cursor bookkeeping that the frame path handles itself: anchor-float
+   *  registration is skipped (the frame is the float) and the
+   *  topAndBottom-skip / frame dispatch are bypassed (the geometry is already
+   *  the frame box). Frame dispatch for a non-frame call lives in
+   *  renderBodyElements so it can pass the anchor paragraph's line height. */
+  inFrame = false,
+  /** ECMA-376 §17.3.1.7 paragraph-border merge: suppress the top edge when a
+   *  same-border paragraph precedes this one in the same column, and the bottom
+   *  edge when one follows. Computed by the paint loop (renderBodyElements /
+   *  renderParaList), which knows in-flow adjacency. Absent ⇒ draw the full box
+   *  (a standalone bordered paragraph). */
+  borderMerge?: ParaBorderMerge,
+): void {
+  const { ctx, scale, contentX, contentW, defaultColor, dryRun, fontFamilyClasses } = state;
+  // Capture Y before spaceBefore — used for paragraph-relative anchor image positioning
+  const paragraphStartY = state.y;
+
+  if (!suppressSpaceBefore) state.y += para.spaceBefore * scale;
+
+  // Register anchor floats from this paragraph. ECMA-376 §20.4.3.5: a
+  // `positionV relativeFrom="paragraph"` float is positioned relative to "the
+  // paragraph which contains the drawing anchor" — its TOP edge, BEFORE the
+  // paragraph's spaceBefore (Word anchors the float at the paragraph top, not the
+  // post-spaceBefore text area). So pass `paragraphStartY` (pre-spaceBefore),
+  // identically for wrap AND wrapNone floats (renderAnchorImages below already
+  // uses paragraphStartY). Anchoring wrap floats at the post-spaceBefore text top
+  // placed them spaceBefore too low — e.g. sample-12's figure (anchor paragraph
+  // spaceBefore=12 pt) sat 12 pt under Word, eating the gap above its caption.
+  // Skipped for the frame-draw recursion: a frame paragraph's wrap exclusion is
+  // its own FloatRect (renderFrameParagraph), not an anchor image/shape float.
+  if (!inFrame) registerAnchorFloats(para, state, paragraphStartY);
+
+  // behindDoc shapes must render before text so they appear behind it.
+  renderAnchorImages(para, state, paragraphStartY, 'behind');
+
+  // If any topAndBottom float already extends past state.y, skip past it before text starts.
+  state.y = skipPastTopAndBottom(state.y, state.floats);
+
+  const textAreaTopY = state.y;
+
+  // ECMA-376 §17.3.1.12 w:ind — the transitional left/right attributes are
+  // logical start/end (Part 4 §14.11.2). In a bidi paragraph the start side is
+  // the physical RIGHT, so the two indents swap physical sides here.
+  //
+  // A frame paragraph's own body-style indents (e.g. a default first-line indent
+  // inherited from the body style) do NOT apply to the frame content: the frame
+  // box already positions the glyphs from its left edge, and the wrap exclusion
+  // is built from that same left edge (§17.3.1.11). Honoring the indent here
+  // would shift the cap glyph right of the exclusion band and let body text
+  // overlap it, so zero the indents in the frame-draw recursion.
+  const baseRtl = para.bidi === true;
+  const indLeft = inFrame ? 0 : (baseRtl ? para.indentRight : para.indentLeft) * scale;
+  const indRight = inFrame ? 0 : (baseRtl ? para.indentLeft : para.indentRight) * scale;
+  const indFirst = inFrame ? 0 : para.indentFirst * scale;
+
+  // Numbering marker layout (§17.9.x): see resolveNumberingMarker.
+  const { numTab, picBullet, numBodyOffset, markerJcShiftPx, hasMarker } =
+    resolveNumberingMarker(para, state, indLeft, indFirst);
 
   const paraX = contentX + indLeft;
   const firstLineX = paraX + indFirst;

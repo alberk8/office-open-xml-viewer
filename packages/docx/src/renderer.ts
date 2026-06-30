@@ -4192,7 +4192,76 @@ function renderParagraph(
   // overflow direction is bounded (the wrap differs by at most a line or two), so
   // all of the paragraph's text is still painted across its slices.
   const paintEnd = Math.min(sliceEnd, lines.length);
+  const drawCtx: ParagraphLineDrawCtx = { ctx, scale, state, para, dryRun, defaultColor, fontFamilyClasses, contentX, contentW, lines, grid, paraX, firstLineX, paraW, indLeft, indFirst, baseRtl, hasMarker, numTab, numBodyOffset, markerJcShiftPx, picBullet, isJustified, stretchLastLine, alignEdge, paraNeedsBidi, decimalAutoTabPx, drawGridDeltaPx, lineHForLine };
   for (let li = sliceStart; li < paintEnd; li++) {
+    drawParagraphLine(li, drawCtx);
+  }
+
+  if (para.borders && !dryRun) {
+    const textH = state.y - textAreaTopY;
+    drawParaBorders(ctx, contentX + indLeft, textAreaTopY, paraW, textH, para.borders, scale, state.dpr, borderMerge);
+  }
+
+  // spaceAfter is paragraph-level; only emit it on the slice that covers
+  // the FINAL line of the paragraph (or when no slice is set at all).
+  const isFinalSlice = !lineSlice || lineSlice.end >= lines.length;
+  if (isFinalSlice) state.y += para.spaceAfter * scale;
+
+  // Anchor images are absolutely positioned — draw after inline flow.
+  // Skip this for continuation slices: anchor positioning is paragraph-relative
+  // and the first slice already painted them.
+  if (!lineSlice || lineSlice.start === 0) {
+    renderAnchorImages(para, state, paragraphStartY);
+  }
+}
+
+/** Per-line draw context for {@link drawParagraphLine}. Bundles the read-only
+ *  paragraph-scope values the line loop reads (plus `state`, mutated by
+ *  reference via `state.y`). Extracted from {@link renderParagraph} verbatim so
+ *  the per-line drawing is a single thin call; no behaviour change. */
+interface ParagraphLineDrawCtx {
+  ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D;
+  scale: number;
+  state: RenderState;
+  para: DocParagraph;
+  dryRun: boolean;
+  defaultColor: string;
+  fontFamilyClasses: Record<string, string>;
+  contentX: number;
+  contentW: number;
+  lines: LayoutLine[];
+  grid: DocGridCtx;
+  paraX: number;
+  firstLineX: number;
+  paraW: number;
+  indLeft: number;
+  indFirst: number;
+  baseRtl: boolean;
+  hasMarker: boolean;
+  numTab: number;
+  numBodyOffset: number;
+  markerJcShiftPx: number;
+  picBullet: { bmp: DecodedImage; w: number; h: number } | null;
+  isJustified: boolean;
+  stretchLastLine: boolean;
+  alignEdge: ReturnType<typeof resolveAlignEdge>;
+  paraNeedsBidi: boolean;
+  decimalAutoTabPx: number | null;
+  drawGridDeltaPx: number;
+  lineHForLine: (l: LayoutLine) => number;
+}
+
+/** Draws line `li` of a paragraph. Extracted from {@link renderParagraph}'s
+ *  per-line loop body verbatim (the loop simply calls this for each line);
+ *  `state.y` is advanced by reference, exactly as before. */
+function drawParagraphLine(li: number, c: ParagraphLineDrawCtx): void {
+  const {
+    ctx, scale, state, para, dryRun, defaultColor, fontFamilyClasses,
+    contentX, contentW, lines, grid, paraX, firstLineX, paraW, indLeft,
+    indFirst, baseRtl, hasMarker, numTab, numBodyOffset, markerJcShiftPx,
+    picBullet, isJustified, stretchLastLine, alignEdge, paraNeedsBidi,
+    decimalAutoTabPx, drawGridDeltaPx, lineHForLine,
+  } = c;
     const line = lines[li];
     // First-line indent and numbering prefix only apply to the paragraph's
     // ORIGINAL first line, not the first line of a continuation slice.
@@ -4759,24 +4828,6 @@ function renderParagraph(
     if (paraNeedsBidi) ctx.direction = 'ltr'; // reset for subsequent draws
 
     state.y += lineH;
-  }
-
-  if (para.borders && !dryRun) {
-    const textH = state.y - textAreaTopY;
-    drawParaBorders(ctx, contentX + indLeft, textAreaTopY, paraW, textH, para.borders, scale, state.dpr, borderMerge);
-  }
-
-  // spaceAfter is paragraph-level; only emit it on the slice that covers
-  // the FINAL line of the paragraph (or when no slice is set at all).
-  const isFinalSlice = !lineSlice || lineSlice.end >= lines.length;
-  if (isFinalSlice) state.y += para.spaceAfter * scale;
-
-  // Anchor images are absolutely positioned — draw after inline flow.
-  // Skip this for continuation slices: anchor positioning is paragraph-relative
-  // and the first slice already painted them.
-  if (!lineSlice || lineSlice.start === 0) {
-    renderAnchorImages(para, state, paragraphStartY);
-  }
 }
 
 // ===== Text layout =====

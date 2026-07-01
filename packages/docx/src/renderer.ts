@@ -6742,35 +6742,43 @@ export function renderShapeText(
   type BlockIndent = { leftPx: number; firstPx: number; paraW: number; firstLineW: number };
   type BlockLayout =
     | { kind: 'image'; fitW: number; fitH: number; ind: BlockIndent }
-    | { kind: 'text'; lines: string[]; lineH: number; asc: number; ind: BlockIndent }
-    | { kind: 'rich'; lines: RichToken[][]; lineHeights: number[]; ascents: number[]; ind: BlockIndent };
+    | { kind: 'text'; lines: string[]; lineH: number; baselineOffset: number; ind: BlockIndent }
+    | { kind: 'rich'; lines: RichToken[][]; lineHeights: number[]; baselineOffsets: number[]; ind: BlockIndent };
   // ECMA-376 line box: the font's NATURAL line height (OS/2 win metrics, read via
   // the browser's fontBoundingBox and corrected for substituted faces by
   // correctLineMetrics), NOT a flat 1.2×em. The flat factor understates real
   // faces, so a text box's trailing line stayed inside a `noAutofit` box that
-  // Word clips (sample-6's 3-line banner). Returns {lineH, asc} so the draw pass
-  // can baseline at the true ascent instead of back-deriving from a 1.2 factor.
+  // Word clips (sample-6's 3-line banner). The §17.3.1.33 line-spacing rule is
+  // applied by the SHARED `lineBoxHeight` (single source of truth with the body
+  // renderer, incl. the `intendedSingleLinePx` floor that keeps a substituted
+  // CJK face — Meiryo — from under-measuring). Returns the CENTERED baseline
+  // offset (half-leading) so the draw pass seats glyphs the way Word centers the
+  // font's natural line within an expanded line box, instead of top-aligning.
   const shapeLineMetrics = (
     family: string | null | undefined,
     bold: boolean,
     italic: boolean,
     fontPx: number,
     b: ShapeText,
-  ): { lineH: number; asc: number } => {
+  ): { lineH: number; baselineOffset: number } => {
     ctx.font = buildFont(bold, italic, fontPx, family ?? null, fontFamilyClasses);
     const m = ctx.measureText('Mg');
     const rawAsc = m.fontBoundingBoxAscent ?? m.actualBoundingBoxAscent ?? fontPx * 0.8;
     const rawDesc = m.fontBoundingBoxDescent ?? m.actualBoundingBoxDescent ?? fontPx * 0.2;
     const c = correctLineMetrics(family ?? null, fontPx, rawAsc, rawDesc);
-    const natural = c.ascent + c.descent;
-    // ECMA-376 §17.3.1.33 line-spacing rule applied to the natural line box:
-    //   "exact"   ⇒ a fixed pt height; "atLeast" ⇒ max(natural, pt);
-    //   "auto" (multiplier, e.g. 276/240 = 1.15) ⇒ natural × val.
-    let lineH = natural;
-    if (b.lineSpacingRule === 'exact' && b.lineSpacingVal != null) lineH = b.lineSpacingVal * scale;
-    else if (b.lineSpacingRule === 'atLeast' && b.lineSpacingVal != null) lineH = Math.max(natural, b.lineSpacingVal * scale);
-    else if (b.lineSpacingVal != null) lineH = natural * b.lineSpacingVal;
-    return { lineH, asc: c.ascent };
+    const intended = intendedSingleLinePx(family ?? null, fontPx);
+    const natural = Math.max(c.ascent + c.descent, intended);
+    const ls: LineSpacing | null = b.lineSpacingRule
+      ? { value: b.lineSpacingVal ?? 0, rule: b.lineSpacingRule as 'auto' | 'exact' | 'atLeast' }
+      : null;
+    const lineH = lineBoxHeight(ls, c.ascent, c.descent, scale, undefined, false, intended, false);
+    // Word centers the font's natural line within the expanded line box
+    // (half-leading): when line-spacing grows the box (auto 1.15×, atLeast,
+    // exact taller than natural) the extra space is split above and below, so
+    // the baseline is (lineH − natural)/2 below the box top plus the ascent.
+    // With no expansion (natural == lineH) this reduces to c.ascent.
+    const baselineOffset = (lineH - natural) / 2 + c.ascent;
+    return { lineH, baselineOffset };
   };
   const layouts: BlockLayout[] = blocks.map((b) => {
     const ind = indentOf(b);
@@ -6798,13 +6806,13 @@ export function renderShapeText(
         kind: 'rich',
         lines,
         lineHeights: metrics.map((x) => x.lineH),
-        ascents: metrics.map((x) => x.asc),
+        baselineOffsets: metrics.map((x) => x.baselineOffset),
         ind,
       };
     }
     const fontPx = b.fontSizePt * scale;
-    const { lineH, asc } = shapeLineMetrics(b.fontFamily, b.bold ?? false, b.italic ?? false, fontPx, b);
-    return { kind: 'text', lines: wrapShapeText(ctx, b.text, ind.paraW, ind.firstLineW), lineH, asc, ind };
+    const { lineH, baselineOffset } = shapeLineMetrics(b.fontFamily, b.bold ?? false, b.italic ?? false, fontPx, b);
+    return { kind: 'text', lines: wrapShapeText(ctx, b.text, ind.paraW, ind.firstLineW), lineH, baselineOffset, ind };
   });
   const blockHeight = (l: BlockLayout): number => {
     if (l.kind === 'image') return l.fitH;
@@ -6835,14 +6843,20 @@ export function renderShapeText(
     cursorY = innerY;
   }
 
-  // ECMA-376 §21.1.2.1.1 — a `<a:noAutofit/>` text box keeps a FIXED size and
-  // Word CLIPS text that overflows the box (spAutoFit grows the box, normAutofit
-  // shrinks the text, so only noAutofit needs a clip: the box is already the
-  // resolved size for the other modes). Clip to the shape's box so an
-  // overflowing trailing line is hidden exactly as Word does — e.g. sample-6's
-  // 3-line banner box whose 3rd line ("All mccp … Creative Commons licence")
-  // sits below the 82 pt box and is not shown in Word.
-  const clipToBox = shape.textAutofit === 'noAutofit';
+  // ECMA-376 §21.1.2.1.1 — a `<a:noAutofit/>` (normalized to "none") text box
+  // keeps a FIXED size and Word CLIPS text that overflows the box ("sp"/spAutoFit
+  // grows the box, "norm"/normAutofit shrinks the text, so only "none" needs a
+  // clip: the box is already the resolved size for the other modes). Clip to the
+  // shape's box so an overflowing trailing line is hidden exactly as Word does —
+  // e.g. sample-6's 3-line banner box whose 3rd line ("All mccp … Creative
+  // Commons licence") sits below the 82 pt box and is not shown in Word.
+  //
+  // Deliberate cross-package divergence (do NOT unify): PowerPoint does NOT clip
+  // its shape text — an overflowing paragraph renders past the shape bounds — so
+  // the pptx renderer intentionally omits this clip (see packages/pptx/src/
+  // renderer.ts, "does NOT clip text that overflows its shape"). Word clips a
+  // fixed box; PowerPoint overflows. Same bodyPr concept, different app behavior.
+  const clipToBox = shape.textAutofit === 'none';
   if (clipToBox) {
     ctx.save();
     ctx.beginPath();
@@ -6913,9 +6927,11 @@ export function renderShapeText(
         } else if (edge === 'right') {
           tx = regionLeft + Math.max(0, regionW - lineW);
         }
-        // Baseline sits the true ascent below the line-box top (metric-based, so
-        // it matches the natural line height used for advancing cursorY).
-        const baseline = cursorY + layout.ascents[li];
+        // Baseline sits at the CENTERED offset below the line-box top (half-
+        // leading, metric-based): the natural line is centered within the
+        // (possibly expanded) line height used for advancing cursorY, matching
+        // the body renderer instead of top-aligning.
+        const baseline = cursorY + layout.baselineOffsets[li];
         // UAX#9 visual reorder (rule L2), the SAME pass body paragraphs use. A
         // rich line draws one token per fillText, so — unlike the single-fillText
         // plain path below, where the canvas reorders internally — the tokens
@@ -6973,9 +6989,11 @@ export function renderShapeText(
       } else if (edge === 'right') {
         tx = regionLeft + Math.max(0, regionW - m.width);
       }
-      // Baseline = line top + the font's true ascent (metric-based, matching
-      // the natural line height used to advance cursorY).
-      const baseline = cursorY + layout.asc;
+      // Baseline = line top + the CENTERED offset (half-leading, metric-based):
+      // the natural line is centered within the (possibly expanded) line height
+      // used to advance cursorY, matching the body renderer instead of top-
+      // aligning.
+      const baseline = cursorY + layout.baselineOffset;
       ctx.fillText(line, tx, baseline);
       cursorY += layout.lineH;
     }

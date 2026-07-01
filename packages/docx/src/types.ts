@@ -579,9 +579,11 @@ export interface ShapeRun {
   textBlocks?: ShapeText[];
   /** "t" | "ctr" | "b" — vertical anchor for the shape's text body (`<wps:bodyPr @anchor>`). */
   textAnchor?: string | null;
-  /** ECMA-376 §21.1.2.1.1 auto-fit mode from `<wps:bodyPr>`: "noAutofit"
-   *  (fixed box — overflowing text is CLIPPED to the box), "spAutoFit" (box
-   *  grows to text), or "normAutofit" (text shrinks). Absent ⇒ overflow visible. */
+  /** ECMA-376 §21.1.2.1.1 auto-fit mode from `<wps:bodyPr>`, normalized to the
+   *  shared core `autoFit` vocabulary (core `src/types/common.ts`): "none"
+   *  (`<a:noAutofit/>`, fixed box — overflowing text is CLIPPED to the box),
+   *  "sp" (`<a:spAutoFit/>`, box grows to text), or "norm" (`<a:normAutofit/>`,
+   *  text shrinks). Absent ⇒ overflow visible. */
   textAutofit?: string | null;
   textInsetL?: number;  // pt
   textInsetT?: number;  // pt

@@ -735,11 +735,12 @@ pub struct ShapeRun {
     /// "b" (bottom). Read from <wps:bodyPr @anchor>. Default = "t".
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text_anchor: Option<String>,
-    /// Text auto-fit mode from the `<wps:bodyPr>` child (ECMA-376 §21.1.2.1.1):
-    /// "noAutofit" (`<a:noAutofit/>`, fixed box — overflowing text is CLIPPED to
-    /// the box), "spAutoFit" (`<a:spAutoFit/>`, box grows to text), or
-    /// "normAutofit" (`<a:normAutofit/>`, text shrinks to fit). Absent ⇒ None
-    /// (renderer treats as the spec default: overflow visible / no clip).
+    /// Text auto-fit mode from the `<wps:bodyPr>` child (ECMA-376 §21.1.2.1.1),
+    /// normalized to the shared core vocabulary (core `src/types/common.ts`
+    /// `autoFit`): "none" (`<a:noAutofit/>`, fixed box — overflowing text is
+    /// CLIPPED to the box), "sp" (`<a:spAutoFit/>`, box grows to text), or
+    /// "norm" (`<a:normAutofit/>`, text shrinks to fit). Absent ⇒ None (renderer
+    /// treats as the spec default: overflow visible / no clip).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text_autofit: Option<String>,
     /// Body-pr text insets in pt (left/top/right/bottom). Default 0 each.

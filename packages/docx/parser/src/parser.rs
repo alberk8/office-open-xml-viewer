@@ -3902,13 +3902,17 @@ fn parse_shape_text_body(
         .and_then(|b| b.attribute("anchor"))
         .map(|s| s.to_string());
     // ECMA-376 §21.1.2.1.1 auto-fit: the bodyPr's autofit is a CHILD element,
-    // one of <a:noAutofit/> / <a:spAutoFit/> / <a:normAutofit/>. Record its tag
-    // so the renderer can clip a fixed (noAutofit) box's overflowing text.
+    // one of <a:noAutofit/> / <a:spAutoFit/> / <a:normAutofit/>. Normalize it to
+    // the shared core vocabulary (packages/core src/types/common.ts `autoFit`):
+    // `noAutofit → "none"` (fixed box → the renderer clips overflow),
+    // `spAutoFit → "sp"` (box grows to fit), `normAutofit → "norm"` (text
+    // shrinks to fit). This matches the pptx path so all three formats emit the
+    // same enum; an absent auto-fit ⇒ None (overflow visible).
     let autofit = body_pr.and_then(|b| {
         b.children().find_map(|n| match n.tag_name().name() {
-            name @ ("noAutofit" | "spAutoFit" | "normAutofit") if n.is_element() => {
-                Some(name.to_string())
-            }
+            "noAutofit" if n.is_element() => Some("none".to_string()),
+            "spAutoFit" if n.is_element() => Some("sp".to_string()),
+            "normAutofit" if n.is_element() => Some("norm".to_string()),
             _ => None,
         })
     });
@@ -4119,46 +4123,30 @@ fn extract_simple_paragraph_text(
     // reserved INSIDE the text box (twips → pt). Word offsets the text down by
     // `w:before` (sample-13's "Journal homepage" line carries `w:before="1000"`,
     // i.e. 50 pt, which is why it sits well below the box top). Absent ⇒ 0.
-    // Per-attribute resolution mirroring the indent path above: a direct
-    // `w:before`/`w:after` wins; otherwise inherit the style-chain-resolved value
-    // (`style_para`, which folds in docDefaults §17.7.2). Without the style
-    // fallback a txbxContent paragraph carrying no direct `<w:spacing>` lost the
-    // inter-paragraph gaps Word applies (sample-6's 3-line box then kept its
-    // clipped 3rd line visible).
-    let spacing = child_w(p, "pPr").and_then(|ppr| child_w(ppr, "spacing"));
-    let space_before = spacing
-        .and_then(|s| attr_w(s, "before"))
-        .map(|v| twips_to_pt(&v))
+    // Resolved EXACTLY like the indent path above — direct `<w:spacing>` wins
+    // (via `parse_para_fmt`'s `direct_ind`, which reads the paragraph's OWN
+    // `<w:pPr>`), else inherit the style-chain-resolved value (`style_para`,
+    // which folds in docDefaults §17.7.2). `ParaFmt` already carries the
+    // spaceBefore/After and line/lineRule values with the same twips→pt and
+    // auto⇒raw/240 · exact/atLeast⇒raw/20 encoding, so we reuse them instead of
+    // re-parsing `<w:spacing>` here. Without the style fallback a txbxContent
+    // paragraph carrying no direct `<w:spacing>` lost the inter-paragraph gaps
+    // Word applies (sample-6's 3-line box then kept its clipped 3rd line
+    // visible); the docDefault `line=276 lineRule=auto` = 1.15× likewise grows
+    // the 3-line box past its 82 pt bound so Word — and the renderer — clip it.
+    let space_before = direct_ind
+        .space_before
         .or(style_para.space_before)
         .unwrap_or(0.0);
-    let space_after = spacing
-        .and_then(|s| attr_w(s, "after"))
-        .map(|v| twips_to_pt(&v))
+    let space_after = direct_ind
+        .space_after
         .or(style_para.space_after)
         .unwrap_or(0.0);
-    // ECMA-376 §17.3.1.33 line spacing (line/lineRule), same direct-wins-then-
-    // style fallback. Encoding matches styles.rs: auto ⇒ raw/240 (multiplier on
-    // the natural line box), exact/atLeast ⇒ raw/20 (pt). A txbxContent paragraph
-    // with no direct line inherits the style chain's value (sample-6 inherits the
-    // docDefault `line=276 lineRule=auto` = 1.15×, which grows the 3-line box past
-    // its 82 pt bound so Word — and now the renderer — clips the 3rd line).
-    let (line_spacing_val, line_spacing_rule) = match spacing.and_then(|s| attr_w(s, "line")) {
-        Some(v) => {
-            let raw: f64 = v.parse().unwrap_or(240.0);
-            let rule = spacing
-                .and_then(|s| attr_w(s, "lineRule"))
-                .unwrap_or_else(|| "auto".to_string());
-            match rule.as_str() {
-                "exact" => (Some(raw / 20.0), Some("exact".to_string())),
-                "atLeast" => (Some(raw / 20.0), Some("atLeast".to_string())),
-                _ => (Some(raw / 240.0), Some("auto".to_string())),
-            }
-        }
-        None => (
-            style_para.line_spacing_val,
-            style_para.line_spacing_rule.clone(),
-        ),
-    };
+    let line_spacing_val = direct_ind.line_spacing_val.or(style_para.line_spacing_val);
+    let line_spacing_rule = direct_ind
+        .line_spacing_rule
+        .clone()
+        .or_else(|| style_para.line_spacing_rule.clone());
 
     // Single block-level format fields come from the FIRST text run (kept for
     // backward compatibility with existing consumers and the image-block path).
@@ -8967,10 +8955,10 @@ mod txbx_inline_image_tests {
         assert_eq!(blocks[1].alignment, "center");
     }
 
-    /// `parse_shape_text_body` records the bodyPr auto-fit CHILD element
-    /// (§21.1.2.1.1): `<a:noAutofit/>` ⇒ Some("noAutofit") (fixed box → the
-    /// renderer clips overflow), `<a:spAutoFit/>` ⇒ Some("spAutoFit"), and an
-    /// absent auto-fit ⇒ None (overflow visible).
+    /// `parse_shape_text_body` normalizes the bodyPr auto-fit CHILD element
+    /// (§21.1.2.1.1) to the shared core vocabulary: `<a:noAutofit/>` ⇒
+    /// Some("none") (fixed box → the renderer clips overflow), `<a:spAutoFit/>`
+    /// ⇒ Some("sp"), and an absent auto-fit ⇒ None (overflow visible).
     #[test]
     fn parse_shape_text_body_records_autofit_mode() {
         let wsp = |body_pr: &str| {
@@ -8996,11 +8984,11 @@ mod txbx_inline_image_tests {
         };
         assert_eq!(
             autofit_of(wsp(r#"<wps:bodyPr><a:noAutofit/></wps:bodyPr>"#)).as_deref(),
-            Some("noAutofit")
+            Some("none")
         );
         assert_eq!(
             autofit_of(wsp(r#"<wps:bodyPr><a:spAutoFit/></wps:bodyPr>"#)).as_deref(),
-            Some("spAutoFit")
+            Some("sp")
         );
         assert_eq!(autofit_of(wsp(r#"<wps:bodyPr/>"#)), None);
     }

@@ -3646,10 +3646,14 @@ export function drawShapeText(
         else out = p.spaceLine.val * PT_TO_PX * cs;
       }
       // normAutofit lnSpcReduction (§21.1.2.1.3): apply the STORED reduction
-      // only. fontScale font-shrink and spAutoFit shape-grow are runtime layout
-      // behaviors intentionally out of scope (modeled but not applied) — the
-      // repo requires explicit user approval for reverse-engineered autofit.
-      if (txt.autoFit === 'norm' && txt.lnSpcReduction != null) {
+      // only, and ONLY to paragraphs with PERCENTAGE line spacing — the spec's
+      // normative note reads "This attribute applies only to paragraphs with
+      // percentage line spacing." So pct and the implicit single (= 100 %
+      // percentage) get it; an absolute spcPts height does NOT. fontScale
+      // font-shrink and spAutoFit shape-grow are runtime layout behaviors
+      // intentionally out of scope (modeled but not applied) — the repo requires
+      // explicit user approval for reverse-engineered autofit.
+      if (txt.autoFit === 'norm' && txt.lnSpcReduction != null && p.spaceLine?.type !== 'pts') {
         out *= 1 - txt.lnSpcReduction;
       }
       return out;

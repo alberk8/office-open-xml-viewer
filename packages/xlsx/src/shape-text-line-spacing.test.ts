@@ -92,6 +92,20 @@ describe('shape-text line spacing (§21.1.2.2.5 <a:lnSpc>) + normAutofit lnSpcRe
     // A stored fontScale is modeled but intentionally NOT applied to layout.
     expect(gap([para('A'), para('B')], { autoFit: 'norm', fontScale: 0.5 })).toBeCloseTo(naturalSingle, 5);
   });
+
+  it('lnSpcReduction does NOT reduce absolute spcPts spacing (§21.1.2.1.3 note)', () => {
+    // The spec: lnSpcReduction "applies only to paragraphs with percentage line
+    // spacing." An absolute spcPts line height must be left as-is; only pct and
+    // the implicit single (100 % percentage) are reduced.
+    const pts = [para('A', { type: 'pts', val: 40 }), para('B', { type: 'pts', val: 40 })];
+    const reduced = gap(pts, { autoFit: 'norm', lnSpcReduction: 0.2 });
+    // Still the absolute 40 pt — NOT 40 × 0.8.
+    expect(reduced).toBeCloseTo(40 * PT_TO_PX * cs, 5);
+    // A pct paragraph in the same body IS reduced (control), proving the gate is
+    // on the spacing type, not on the reduction being ignored entirely.
+    const pct = [para('A', { type: 'pct', val: 100000 }), para('B', { type: 'pct', val: 100000 })];
+    expect(gap(pct, { autoFit: 'norm', lnSpcReduction: 0.2 })).toBeCloseTo(naturalSingle * 0.8, 5);
+  });
 });
 
 // Commit-1 companion: the natural single line is FLOORED by the authored font's

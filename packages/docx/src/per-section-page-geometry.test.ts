@@ -387,4 +387,41 @@ describe('page-size fact (§17.6.13/§17.6.11) — paginateDocument sectionGeom'
     expect(sizeOf(0)).toEqual({ widthPt: 200, heightPt: 140 });
     expect(sizeOf(1)).toEqual({ widthPt: 140, heightPt: 200 });
   });
+
+  // Direct unit coverage of DocxDocument.pageSize itself. The class needs a
+  // Worker/WASM to construct normally, so inject the private state onto a bare
+  // prototype instance (TS-private fields are runtime-assignable) — covering the
+  // worker branch (_meta), the main branch (_document + pagination), clamping,
+  // the not-loaded {0,0} contract, and the fresh-object (no aliasing) guarantee.
+  it('DocxDocument.pageSize: both branches, clamp, not-loaded, no aliasing', async () => {
+    const { DocxDocument } = await import('./document.js');
+    // The constructor is private, so derive the instance type from the factory.
+    type Doc = Awaited<ReturnType<typeof DocxDocument.load>>;
+    const make = (state: Record<string, unknown>) => {
+      const d = Object.create(DocxDocument.prototype) as Doc;
+      Object.assign(d, { _meta: null, _document: null, _pages: null }, state);
+      return d;
+    };
+
+    // Worker branch: reads _meta.pageSizes with clamp; returns a COPY.
+    const meta = { pageCount: 2, comments: [], footnotes: [], endnotes: [],
+      pageSizes: [{ widthPt: 200, heightPt: 140 }, { widthPt: 140, heightPt: 200 }] };
+    const w = make({ _meta: meta });
+    expect(w.pageSize(0)).toEqual({ widthPt: 200, heightPt: 140 });
+    expect(w.pageSize(1)).toEqual({ widthPt: 140, heightPt: 200 });
+    expect(w.pageSize(-5)).toEqual({ widthPt: 200, heightPt: 140 }); // clamp low
+    expect(w.pageSize(99)).toEqual({ widthPt: 140, heightPt: 200 }); // clamp high
+    const returned = w.pageSize(0);
+    returned.widthPt = 9999; // mutating the return value must not corrupt the meta
+    expect(w.pageSize(0)).toEqual({ widthPt: 200, heightPt: 140 });
+
+    // Main branch: paginates the model and reads the stamped sectionGeom.
+    const m = make({ _document: mixedDoc() });
+    expect(m.pageSize(0)).toEqual({ widthPt: 200, heightPt: 140 });
+    expect(m.pageSize(1)).toEqual({ widthPt: 140, heightPt: 200 });
+    expect(m.pageSize(99)).toEqual({ widthPt: 140, heightPt: 200 }); // clamp high
+
+    // Not loaded (pre-load / post-destroy): {0,0}.
+    expect(make({}).pageSize(0)).toEqual({ widthPt: 0, heightPt: 0 });
+  });
 });

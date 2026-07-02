@@ -229,14 +229,19 @@ export class DocxDocument {
    * Available in BOTH modes: worker mode reads the worker-built `pageSizes` meta;
    * main mode reads the paginated pages' stamped geometry. Returns the body-level
    * section size for an out-of-range index (clamped) or a page with no stamped
-   * geometry. A 0-page document (empty `pageSizes`/no pages) yields `{ 0, 0 }`.
+   * geometry. `{ 0, 0 }` means "not loaded" (before `load()` resolves or after
+   * `destroy()`). Returns a fresh object per call — safe to mutate.
    * The recommended way to ask "how big is page i?" for layout.
    */
   pageSize(pageIndex: number): { widthPt: number; heightPt: number } {
     if (this._meta) {
       const sizes = this._meta.pageSizes;
       const clamped = Math.max(0, Math.min(pageIndex, sizes.length - 1));
-      return sizes[clamped] ?? { widthPt: 0, heightPt: 0 };
+      const s = sizes[clamped];
+      // Copy — never alias the meta's stored object (a caller mutating the
+      // return value must not corrupt subsequent reads; main mode below already
+      // builds a fresh object per call).
+      return s ? { widthPt: s.widthPt, heightPt: s.heightPt } : { widthPt: 0, heightPt: 0 };
     }
     if (!this._document) return { widthPt: 0, heightPt: 0 };
     const pages = this._getPages();

@@ -97,11 +97,6 @@ pub fn to_markdown_native(data: &[u8]) -> Result<String, String> {
     Ok(render_presentation_md(&pres))
 }
 
-// ───────────────────────────────────────────────────────────────────────────
-//  Markdown projection (text-focused) — separate code path from the rich JSON
-//  serialization used by the viewer. Lossy by design.
-// ───────────────────────────────────────────────────────────────────────────
-
 /// Extract raw bytes for a single entry (e.g. "ppt/media/media2.mp4") from a
 /// pptx zip archive. Used by the main thread to materialize media blobs for
 /// interactive playback without re-parsing the whole file.
@@ -204,12 +199,6 @@ impl PptxArchive {
         Ok(render_presentation_md(&pres))
     }
 }
-
-// ===========================
-//  Data types  (camelCase JSON → TypeScript)
-// ===========================
-
-// ===== Table data model =====
 
 // ===========================
 //  ZIP helpers
@@ -410,38 +399,6 @@ pub(crate) fn find_rel_target_by_type(rels_xml: &str, type_suffix: &str) -> Opti
 pub(crate) fn resolve_path(base_dir: &str, target: &str) -> String {
     ooxml_common::rels::resolve_target(base_dir, target)
 }
-
-// ===========================
-//  Group transform
-// ===========================
-
-// ===========================
-//  Layout placeholder map
-// ===========================
-
-// ===========================
-//  Chart parsing
-// ===========================
-
-// ===========================
-//  Placeholder defaults
-// ===========================
-
-// ===========================
-//  Placeholder detection
-// ===========================
-
-// ===========================
-//  Shape parsing  (p:sp)
-// ===========================
-
-// ===========================
-//  Picture parsing  (p:pic)
-// ===========================
-
-// ===========================
-//  Table parsing
-// ===========================
 
 // ===========================
 //  Slide parser

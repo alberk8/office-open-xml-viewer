@@ -38,6 +38,7 @@
 
 import { decodePackedDib, blitDibToCtx } from './dib.js';
 import { renderEmfToBitmap } from './emf.js';
+import { createAuxCanvas } from '../canvas/aux-canvas.js';
 
 // WMF record function codes (the subset we act on; others are skipped by size).
 const META = {
@@ -658,8 +659,13 @@ export async function renderWmfToBitmap(
 ): Promise<ImageBitmap | null> {
   if (!isWmf(bytes)) return null;
   if (targetW <= 0 || targetH <= 0) return null;
-  const canvas = new OffscreenCanvas(targetW, targetH);
-  const ctx = canvas.getContext('2d') as OffscreenCanvasRenderingContext2D | null;
+  // Prefer OffscreenCanvas but fall back to a detached <canvas> (or null in a
+  // headless env) via the shared allocator, matching emf.ts / dib.ts — a WMF
+  // blip then rasterizes on the main thread too instead of hard-requiring
+  // OffscreenCanvas. null ⇒ degrade to the caller's "missing image" path.
+  const canvas = createAuxCanvas(targetW, targetH);
+  if (!canvas) return null;
+  const ctx = canvas.getContext('2d') as AnyCtx | null;
   if (!ctx) return null;
   ctx.lineJoin = 'round';
   ctx.lineCap = 'round';

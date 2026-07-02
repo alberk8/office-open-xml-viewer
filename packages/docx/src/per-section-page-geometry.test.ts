@@ -97,6 +97,100 @@ describe('per-section page geometry (§17.6.13/§17.6.11) — paginator', () => 
     expect(p1.sectionGeom?.pageHeight).toBe(200);
   });
 
+  // Height-sensitive spill — proves the const→arrow conversion of the page frame.
+  // A first section of 200×140 with margins 20 has a content height of 100pt ⇒ five
+  // 20pt paragraphs per page, so a SIXTH paragraph spills to a second page WITHIN the
+  // first section. If the frame were still read from the body-level section (140×200,
+  // content 160 ⇒ eight 20pt lines fit), all six would stay on page 0 and this test
+  // would fail — i.e. it regresses the moment the per-section frame reverts to a const.
+  it('paginates each section against ITS OWN page height (const→arrow)', () => {
+    const portrait: SectionGeom = {
+      pageWidth: 200, pageHeight: 140,
+      marginTop: 20, marginRight: 20, marginBottom: 20, marginLeft: 20,
+      headerDistance: 0, footerDistance: 0,
+    };
+    const bodySection: SectionProps = {
+      pageWidth: 140, pageHeight: 200,
+      marginTop: 20, marginRight: 20, marginBottom: 20, marginLeft: 20,
+      headerDistance: 0, footerDistance: 0, titlePage: false, evenAndOddHeaders: false,
+    } as SectionProps;
+    // Six 20pt paragraphs in the portrait first section, then a nextPage break into
+    // the landscape body section carrying one paragraph.
+    const body: BodyElement[] = [
+      para('A1'), para('A2'), para('A3'), para('A4'), para('A5'), para('A6'),
+      { type: 'sectionBreak', kind: 'nextPage', geom: portrait } as BodyElement,
+      para('B1'),
+    ];
+    const doc = {
+      section: bodySection, body,
+      headers: { default: null, first: null, even: null },
+      footers: { default: null, first: null, even: null },
+      fontFamilyClasses: {},
+    } as unknown as DocxDocumentModel;
+    const pages = computePages(doc.body, doc.section, makeCtx());
+    const texts = pages.map((page) =>
+      page
+        .filter((e) => e.type === 'paragraph')
+        .map((e) => (e as unknown as { runs: { text: string }[] }).runs.map((r) => r.text).join('')),
+    );
+    // Portrait content height 100 ⇒ A1..A5 on page 0, A6 spills to page 1 (still the
+    // portrait section), then the break opens page 2 for the landscape section.
+    expect(texts).toEqual([['A1', 'A2', 'A3', 'A4', 'A5'], ['A6'], ['B1']]);
+    // The spilled A6 still carries the portrait section geometry (it precedes the
+    // break); B1 carries the body-level landscape geometry.
+    const a6 = pages[1].find((e) => e.type === 'paragraph') as PaginatedBodyElement;
+    expect(a6.sectionGeom?.pageWidth).toBe(200);
+    expect(a6.sectionGeom?.pageHeight).toBe(140);
+    const b1 = pages[2].find((e) => e.type === 'paragraph') as PaginatedBodyElement;
+    expect(b1.sectionGeom?.pageWidth).toBe(140);
+    expect(b1.sectionGeom?.pageHeight).toBe(200);
+  });
+
+  // Geom-less middle break — exercises `e.geom ?? bodySectionGeom`. Three sections:
+  // break1 carries geom, break2 does NOT. `sectionGeomFrom` walks FORWARD, so the
+  // element BETWEEN the two breaks (S2) belongs to the section ENDING at break2,
+  // which has no geom ⇒ it falls back to the body-level geometry. S1 (before break1)
+  // gets break1's geom; S3 (after break2, the final section) gets the body geometry.
+  it('falls back to body geometry for a section whose break carries no geom', () => {
+    const geom1: SectionGeom = {
+      pageWidth: 300, pageHeight: 400,
+      marginTop: 10, marginRight: 10, marginBottom: 10, marginLeft: 10,
+      headerDistance: 0, footerDistance: 0,
+    };
+    const bodySection: SectionProps = {
+      pageWidth: 140, pageHeight: 200,
+      marginTop: 20, marginRight: 20, marginBottom: 20, marginLeft: 20,
+      headerDistance: 0, footerDistance: 0, titlePage: false, evenAndOddHeaders: false,
+    } as SectionProps;
+    const body: BodyElement[] = [
+      para('S1'),
+      { type: 'sectionBreak', kind: 'nextPage', geom: geom1 } as BodyElement,
+      para('S2'),
+      // No `geom`: this section inherits pgSz/pgMar ⇒ bodySectionGeom fallback.
+      { type: 'sectionBreak', kind: 'nextPage' } as BodyElement,
+      para('S3'),
+    ];
+    const doc = {
+      section: bodySection, body,
+      headers: { default: null, first: null, even: null },
+      footers: { default: null, first: null, even: null },
+      fontFamilyClasses: {},
+    } as unknown as DocxDocumentModel;
+    const pages = computePages(doc.body, doc.section, makeCtx());
+    const s1 = pages[0].find((e) => e.type === 'paragraph') as PaginatedBodyElement;
+    const s2 = pages[1].find((e) => e.type === 'paragraph') as PaginatedBodyElement;
+    const s3 = pages[2].find((e) => e.type === 'paragraph') as PaginatedBodyElement;
+    // S1: section ending at break1 ⇒ break1's geom.
+    expect(s1.sectionGeom?.pageWidth).toBe(300);
+    expect(s1.sectionGeom?.pageHeight).toBe(400);
+    // S2: section ending at break2, which has NO geom ⇒ body-level geometry.
+    expect(s2.sectionGeom?.pageWidth).toBe(140);
+    expect(s2.sectionGeom?.pageHeight).toBe(200);
+    // S3: final section ⇒ body-level geometry.
+    expect(s3.sectionGeom?.pageWidth).toBe(140);
+    expect(s3.sectionGeom?.pageHeight).toBe(200);
+  });
+
   it('single-section document stamps the body-level geometry on every element', () => {
     const section: SectionProps = {
       pageWidth: 200, pageHeight: 140,

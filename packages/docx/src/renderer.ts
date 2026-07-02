@@ -1133,6 +1133,8 @@ export function computePages(
   // read the ACTIVE section (`currentSectionGeom`, reassigned at every break) so a
   // landscape section paginates against its own (wider/shorter) page. For a
   // single-section document `currentSectionGeom` never changes ⇒ identical values.
+  // `currentSectionGeom` is declared below (TDZ-safe: these arrows only close over
+  // it, and the first call happens during the element loop, after its `let` init).
   const bodyTopPt = () => bodyMarginInsetPt(currentSectionGeom.marginTop);
   const bodyBottomPt = () => bodyMarginInsetPt(currentSectionGeom.marginBottom);
   const fullContentH = () => currentSectionGeom.pageHeight - bodyTopPt() - bodyBottomPt();
@@ -1155,9 +1157,14 @@ export function computePages(
     for (let j = startIdx; j < body.length; j++) {
       const e = body[j];
       if (e.type === 'sectionBreak') {
-        // computeColumns reads only `section.columns` + the page geometry (which
-        // is constant across the body), so resolve this section's cols by
-        // swapping in its ColumnsSpec.
+        // Resolve this section's cols by swapping in its ColumnsSpec. Page
+        // GEOMETRY is now per-section (`sectionGeomFrom`), but `computeColumns`
+        // here still receives the BODY-LEVEL width (`section.pageWidth`/margins) —
+        // a documented residual: a mid-body section with a different page WIDTH and
+        // multiple columns tiles against the body width, not its own. Single-column
+        // sections and uniform-width documents are unaffected. Aligning column
+        // widths to the per-section width is the width-residual follow-up in the
+        // design doc; do NOT change it here.
         return computeColumns({ ...section, columns: e.columns ?? null });
       }
     }
@@ -1259,16 +1266,7 @@ export function computePages(
   // inherits pgSz/pgMar) also falls back to the body-level geometry. For a
   // single-section document there are no markers, so every element gets the
   // body-level geometry — behaviour-neutral.
-  const bodySectionGeom: SectionGeom = {
-    pageWidth: section.pageWidth,
-    pageHeight: section.pageHeight,
-    marginTop: section.marginTop,
-    marginRight: section.marginRight,
-    marginBottom: section.marginBottom,
-    marginLeft: section.marginLeft,
-    headerDistance: section.headerDistance,
-    footerDistance: section.footerDistance,
-  };
+  const bodySectionGeom: SectionGeom = sectionGeomOf(section);
   const sectionGeomFrom = (startIdx: number): SectionGeom => {
     for (let j = startIdx; j < body.length; j++) {
       const e = body[j];
@@ -1681,7 +1679,21 @@ export function computePages(
       // without forcing every nextPage→continuous boundary to break a page.
       const upcomingKind = sectionKindFrom(i + 1);
       if (upcomingKind === 'continuous') {
-        // ECMA-376 §17.18.79 "continuous": NO page break — the next section's
+        // ECMA-376 §17.18.77 (ST_SectionMark) / §17.6.22 (type) — geometry residual:
+        // reassigning `currentSectionGeom` above activates the incoming section's
+        // page frame MID-PAGE (`bodyTopPt()`/`effContentH()` switch here). The spec
+        // does NOT mandate promoting a continuous break to a new page when the page
+        // size differs; it says the opposite — "continuous section breaks might not
+        // specify certain page-level section properties, since they shall be
+        // inherited from the following section" (§17.18.77 / §17.6.22). The only
+        // spec-defined exception is a footnote reference on the break page (§17.11.14
+        // ⇒ the new section begins on the following page). Word additionally defers a
+        // differing page geometry to the next page in practice, but that is a runtime
+        // behaviour, not a spec rule — left as a documented residual (see design doc),
+        // NOT reverse-engineered here (root CLAUDE.md: spec-first, no runtime guessing
+        // without approval).
+        //
+        // ECMA-376 §17.18.77 "continuous": NO page break — the next section's
         // content continues on the SAME page. It must start below the BOTTOM of
         // EVERY column of the section just ended (ECMA-376 §17.6.4), not at the
         // last-filled column's cursor: a 2-col section whose first column ran to
@@ -2133,6 +2145,25 @@ function bodyMarginInsetPt(margin: number): number {
   return Math.abs(margin);
 }
 
+/** ECMA-376 §17.6.13 (pgSz) + §17.6.11 (pgMar) — project a {@link SectionProps}
+ *  onto the smaller {@link SectionGeom} view (page size + margins + header/footer
+ *  distances, dropping the section's title-page/columns/etc.). Used to seed the
+ *  body-level fallback geometry in `computePages` (bodySectionGeom); a private
+ *  module helper so the boundary-promotion path can reuse the SAME 8-field
+ *  projection when comparing an incoming section's geometry to the ending one. */
+function sectionGeomOf(s: SectionProps): SectionGeom {
+  return {
+    pageWidth: s.pageWidth,
+    pageHeight: s.pageHeight,
+    marginTop: s.marginTop,
+    marginRight: s.marginRight,
+    marginBottom: s.marginBottom,
+    marginLeft: s.marginLeft,
+    headerDistance: s.headerDistance,
+    footerDistance: s.footerDistance,
+  };
+}
+
 /** Resolve the footer that applies to `pageIndex` with the §17.10.1/§17.10.6
  *  first/even/default precedence (resolvePageSection + pickHeaderFooter), or null if
  *  none. One selection shared by the reserve pass, the footer paint, and the footnote
@@ -2302,9 +2333,13 @@ function buildMeasureState(
     dryRun: true,
     marginLeft: section.marginLeft,
     marginRight: section.marginRight,
-    // §17.6.11: the measure state's marginTop is the body inset (|margin|) — the base for
-    // the page-absolute region top stamped on slices (splitParagraphAcrossPages' colTopPt),
-    // which must match the paint pass. Never the raw sign. Identity for non-negative.
+    // §17.6.11: the measure state's marginTop is the BODY-LEVEL body inset (|margin|).
+    // Per-section colTopPt stamps no longer read this field directly: the split
+    // functions derive the region top from the threaded `tagSectionGeom` closure
+    // (`bodyMarginInsetPt(tagSectionGeom().marginTop)`), matching pushTagged's
+    // `bodyTopPt()` per-section convention. This body-level value is only the
+    // single-section-equivalent fallback (identical when there is one section) and
+    // still seeds contentW/pageH below. Never the raw sign. Identity for non-negative.
     marginTop: bodyMarginInsetPt(section.marginTop),
     marginBottom: bodyMarginInsetPt(section.marginBottom),
     pageWidth: section.pageWidth,
@@ -2549,8 +2584,21 @@ function splitParagraphAcrossPages(
     if (tagColIndex) el.colIndex = tagColIndex();
     if (colGeom) el.colGeom = colGeom;
     // Front-loaded layout: stamp the region top (page-absolute pt) so the paint
-    // pass resets this slice's column cursor to it instead of the page top.
-    if (columnTop) el.colTopPt = measureState.marginTop + colTop();
+    // pass resets this slice's column cursor to it instead of the page top. The
+    // top inset is PER-SECTION (§17.6.11): a slice in a mid-body section with a
+    // different marginTop must anchor against ITS section, not the body-level
+    // `measureState.marginTop` (frozen at buildMeasureState). `tagSectionGeom` is
+    // the active section's geometry (constant across a paragraph's slices), so
+    // `bodyMarginInsetPt(tagSectionGeom().marginTop)` matches pushTagged's
+    // `bodyTopPt()` convention exactly. For a single-section document this equals
+    // `measureState.marginTop` (both are `bodyMarginInsetPt(section.marginTop)`)
+    // — value-identical. Falls back to the body-level inset when no geom thunk.
+    if (columnTop) {
+      const topInset = tagSectionGeom
+        ? bodyMarginInsetPt(tagSectionGeom().marginTop)
+        : measureState.marginTop;
+      el.colTopPt = topInset + colTop();
+    }
     if (tagSectionHF) el.sectionHF = tagSectionHF();
     if (tagSectionGeom) el.sectionGeom = tagSectionGeom();
     return el;

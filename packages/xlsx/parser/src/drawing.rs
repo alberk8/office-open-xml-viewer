@@ -1,5 +1,6 @@
 use crate::types::*;
-use crate::{parse_rels_map, read_zip_bytes, read_zip_entry, resolve_zip_path};
+use crate::{parse_rels_map, resolve_zip_path};
+use ooxml_common::zip::{read_zip_bytes, read_zip_string};
 // Shared DrawingML blip helpers (ECMA-376 §20.1.8.13 + Microsoft 2016 SVG
 // extension, MS-ODRAWXML). `mime_from_ext` is the single source of truth for
 // `.svg ⇒ image/svg+xml`; `svg_blip_rid` resolves the vector original nested in
@@ -129,7 +130,7 @@ pub(crate) fn parse_drawing_anchors(
             let media_path = resolve_zip_path(drawing_dir, target);
             // Confirm the entry resolves before emitting its path (preserves the
             // previous "drop when bytes are missing" semantics).
-            read_zip_bytes(archive, &media_path)?;
+            read_zip_bytes(archive, &media_path).ok()?;
             Some(media_path)
         };
 
@@ -1369,7 +1370,7 @@ pub(crate) fn load_sheet_shape_groups(
         return Vec::new();
     };
     let sheet_rels_path = format!("xl/{}/_rels/{}.rels", sheet_dir, sheet_file);
-    let Ok(sheet_rels_xml) = read_zip_entry(archive, &sheet_rels_path) else {
+    let Ok(sheet_rels_xml) = read_zip_string(archive, &sheet_rels_path) else {
         return Vec::new();
     };
     let Ok(rels_doc) = roxmltree::Document::parse(&sheet_rels_xml) else {
@@ -1390,7 +1391,7 @@ pub(crate) fn load_sheet_shape_groups(
     let mut all: Vec<ShapeAnchor> = Vec::new();
     for target in drawing_targets {
         let drawing_path = resolve_zip_path(&format!("xl/{}", sheet_dir), &target);
-        let Ok(drawing_xml) = read_zip_entry(archive, &drawing_path) else {
+        let Ok(drawing_xml) = read_zip_string(archive, &drawing_path) else {
             continue;
         };
         let rid_urls = build_drawing_rid_urls(archive, &drawing_path);
@@ -1417,7 +1418,7 @@ pub(crate) fn build_drawing_rid_urls(
         return HashMap::new();
     };
     let rels_path = format!("{}/_rels/{}.rels", drawing_dir, drawing_file);
-    let rels = read_zip_entry(archive, &rels_path)
+    let rels = read_zip_string(archive, &rels_path)
         .ok()
         .map(|xml| parse_rels_map(&xml))
         .unwrap_or_default();
@@ -1440,7 +1441,7 @@ pub(crate) fn build_drawing_rid_urls(
         let media_path = resolve_zip_path(drawing_dir, &target);
         // Only emit the path when the entry actually resolves (preserves the
         // previous behavior of dropping rIds whose bytes are missing).
-        if read_zip_bytes(archive, &media_path).is_some() {
+        if read_zip_bytes(archive, &media_path).is_ok() {
             result.insert(rid, media_path);
         }
     }
@@ -1458,7 +1459,7 @@ pub(crate) fn load_sheet_images(
         return Vec::new();
     };
     let sheet_rels_path = format!("xl/{}/_rels/{}.rels", sheet_dir, sheet_file);
-    let Ok(sheet_rels_xml) = read_zip_entry(archive, &sheet_rels_path) else {
+    let Ok(sheet_rels_xml) = read_zip_string(archive, &sheet_rels_path) else {
         return Vec::new();
     };
 
@@ -1488,7 +1489,7 @@ pub(crate) fn load_sheet_images(
         // sheet_dir is "worksheets", target typically "../drawings/drawing1.xml"
         // base dir for the drawing = "xl/worksheets" + "../drawings" → "xl/drawings"
         let drawing_path = resolve_zip_path(&format!("xl/{}", sheet_dir), &target);
-        let Ok(drawing_xml) = read_zip_entry(archive, &drawing_path) else {
+        let Ok(drawing_xml) = read_zip_string(archive, &drawing_path) else {
             continue;
         };
         // Drawing rels:  xl/drawings/_rels/drawing1.xml.rels
@@ -1496,7 +1497,7 @@ pub(crate) fn load_sheet_images(
             continue;
         };
         let drawing_rels_path = format!("{}/_rels/{}.rels", drawing_dir, drawing_file);
-        let drawing_rels = read_zip_entry(archive, &drawing_rels_path)
+        let drawing_rels = read_zip_string(archive, &drawing_rels_path)
             .ok()
             .map(|xml| parse_rels_map(&xml))
             .unwrap_or_default();

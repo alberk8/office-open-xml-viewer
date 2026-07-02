@@ -1,5 +1,6 @@
 use crate::types::*;
-use crate::{parse_rels_map, read_zip_entry, resolve_fill_color, resolve_zip_path};
+use crate::{parse_rels_map, resolve_fill_color, resolve_zip_path};
+use ooxml_common::zip::read_zip_string;
 use std::collections::HashMap;
 use std::io::Cursor;
 
@@ -14,7 +15,7 @@ pub(crate) fn load_sheet_charts(
         return Vec::new();
     };
     let sheet_rels_path = format!("xl/{}/_rels/{}.rels", sheet_dir, sheet_file);
-    let Ok(sheet_rels_xml) = read_zip_entry(archive, &sheet_rels_path) else {
+    let Ok(sheet_rels_xml) = read_zip_string(archive, &sheet_rels_path) else {
         return Vec::new();
     };
     let Ok(rels_doc) = roxmltree::Document::parse(&sheet_rels_xml) else {
@@ -47,7 +48,7 @@ pub(crate) fn load_sheet_charts(
     for target in drawing_targets {
         // Resolve drawing path relative to the sheet directory
         let drawing_path = resolve_zip_path(&format!("xl/{}", sheet_dir), &target);
-        let Ok(drawing_xml) = read_zip_entry(archive, &drawing_path) else {
+        let Ok(drawing_xml) = read_zip_string(archive, &drawing_path) else {
             continue;
         };
         let Ok(draw_doc) = roxmltree::Document::parse(&drawing_xml) else {
@@ -59,7 +60,7 @@ pub(crate) fn load_sheet_charts(
             continue;
         };
         let drawing_rels_path = format!("{}/_rels/{}.rels", drawing_dir, drawing_file);
-        let drawing_rels = read_zip_entry(archive, &drawing_rels_path)
+        let drawing_rels = read_zip_string(archive, &drawing_rels_path)
             .ok()
             .map(|xml| parse_rels_map(&xml))
             .unwrap_or_default();
@@ -170,7 +171,7 @@ pub(crate) fn load_sheet_charts(
                 continue;
             };
             let chart_path = resolve_zip_path(drawing_dir, chart_target);
-            let Ok(chart_xml) = read_zip_entry(archive, &chart_path) else {
+            let Ok(chart_xml) = read_zip_string(archive, &chart_path) else {
                 continue;
             };
             let Some(chart_data) = parse_chart_xml(&chart_xml, c_ns, a_ns, theme_colors) else {

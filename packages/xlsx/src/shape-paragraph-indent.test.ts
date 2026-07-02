@@ -47,8 +47,9 @@ function textRun(text: string, size = 11): ShapeTextRun {
 
 function shapeOf(paragraphs: ShapeParagraph[]): ShapeText {
   // wrap:none keeps each paragraph on a single line so the first fillText x is
-  // the line's left edge (no wrapping interference).
-  return { anchor: 't', wrap: 'none', paragraphs };
+  // the line's left edge (no wrapping interference). Insets are the ECMA-376
+  // §21.1.2.1.1 spec defaults (the parser always emits them).
+  return { anchor: 't', wrap: 'none', lIns: 91440, tIns: 45720, rIns: 91440, bIns: 45720, paragraphs };
 }
 
 function drawFirstX(p: ShapeParagraph): number {
@@ -104,7 +105,13 @@ describe('shape paragraph indent — wrapping, alignment region, hanging, marR',
   // All fillText calls for a single paragraph at a given wrap mode (sw=sh=300, cs=1).
   function callsFor(p: ShapeParagraph, wrap: 'none' | 'normal'): FillTextCall[] {
     const { ctx, calls } = makeRecordingCtx();
-    drawShapeText(ctx, { anchor: 't', wrap, paragraphs: [p] }, 300, 300, 1);
+    drawShapeText(
+      ctx,
+      { anchor: 't', wrap, lIns: 91440, tIns: 45720, rIns: 91440, bIns: 45720, paragraphs: [p] },
+      300,
+      300,
+      1,
+    );
     return calls;
   }
 

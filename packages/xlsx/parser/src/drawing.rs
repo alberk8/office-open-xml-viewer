@@ -516,35 +516,50 @@ pub(crate) fn parse_tx_body(
     tx_body: &roxmltree::Node,
     theme_colors: &[String],
 ) -> Option<ShapeText> {
-    let mut anchor = String::from("t");
-    let mut wrap = String::from("square");
-    // `<a:bodyPr>` autofit child (ECMA-376 §21.1.2.1.1-.3). Default "none"
-    // (xlsx has no theme txDef fallback). Mirrors the pptx parser; for
-    // normAutofit also capture the stored fontScale / lnSpcReduction
-    // (ST_TextFontScalePercentOrPercentString / ST_TextSpacingPercentOrPercentString,
-    // 1000ths of a percent → fraction).
-    let mut auto_fit = String::from("none");
-    let mut font_scale: Option<f64> = None;
-    let mut ln_spc_reduction: Option<f64> = None;
+    // `<a:bodyPr>` shared grammar (anchor / wrap / insets / autofit) via
+    // ooxml_common::text::parse_body_pr over the bare ECMA-376 §21.1.2.1.1
+    // defaults — xlsx has no theme objectDefaults / inheritance layer, so
+    // BodyPrDefaults::spec() is the whole fallback (anchor `t`, wrap `square`,
+    // autofit `none`, insets 91440/45720 EMU). `vert` is parsed but xlsx does
+    // not model it. When there is no `<a:bodyPr>` the spec defaults apply.
+    let body = tx_body
+        .children()
+        .find(|n| n.is_element() && n.tag_name().name() == "bodyPr")
+        .map(|bp| {
+            ooxml_common::text::parse_body_pr(bp, &ooxml_common::text::BodyPrDefaults::spec())
+        })
+        .unwrap_or_else(|| {
+            let d = ooxml_common::text::BodyPrDefaults::spec();
+            ooxml_common::text::BodyPr {
+                anchor: d.anchor,
+                wrap: d.wrap,
+                vert: d.vert,
+                l_ins: d.l_ins,
+                t_ins: d.t_ins,
+                r_ins: d.r_ins,
+                b_ins: d.b_ins,
+                auto_fit: d.auto_fit,
+                font_scale: None,
+                ln_spc_reduction: None,
+            }
+        });
+    let anchor = body.anchor;
+    let wrap = body.wrap;
+    // Text insets (EMU), §21.1.2.1.1. Emitted always (spec default when the
+    // attribute is absent) so the renderer stops using empirical padding.
+    let l_ins = body.l_ins;
+    let t_ins = body.t_ins;
+    let r_ins = body.r_ins;
+    let b_ins = body.b_ins;
+    // Autofit (spAutoFit / normAutofit / noAutofit); normAutofit also carries the
+    // stored fontScale / lnSpcReduction (1000ths of a percent → fraction).
+    let auto_fit = body.auto_fit;
+    let font_scale = body.font_scale;
+    let ln_spc_reduction = body.ln_spc_reduction;
     let mut paragraphs: Vec<ShapeParagraph> = Vec::new();
     for c in tx_body.children().filter(|n| n.is_element()) {
         match c.tag_name().name() {
-            "bodyPr" => {
-                if let Some(a) = c.attribute("anchor") {
-                    anchor = a.to_string();
-                }
-                if let Some(w) = c.attribute("wrap") {
-                    wrap = w.to_string();
-                }
-                // Autofit child (spAutoFit / normAutofit / noAutofit). Shared
-                // with pptx; xlsx keeps the "none" default when there is no
-                // autofit child (parse_autofit returns None).
-                if let Some((af, fs, lsr)) = ooxml_common::text::parse_autofit(c) {
-                    auto_fit = af;
-                    font_scale = fs;
-                    ln_spc_reduction = lsr;
-                }
-            }
+            "bodyPr" => {}
             "p" => {
                 let mut align = String::from("l");
                 let mut rtl = false;
@@ -687,6 +702,10 @@ pub(crate) fn parse_tx_body(
             auto_fit,
             font_scale,
             ln_spc_reduction,
+            l_ins,
+            t_ins,
+            r_ins,
+            b_ins,
             paragraphs,
         })
     }

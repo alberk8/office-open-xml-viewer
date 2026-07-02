@@ -1,6 +1,6 @@
 use ooxml_common::blip::{mime_from_ext, parse_src_rect, svg_blip_rid, SrcRect};
 use ooxml_common::math::{nodes_to_text, parse_omath_nodes, MathNode};
-use ooxml_common::text::{parse_autofit, parse_lnspc, SpaceLine};
+use ooxml_common::text::{parse_lnspc, SpaceLine};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::{Cursor, Read};
@@ -4613,53 +4613,58 @@ fn parse_text_body(
     let theme_auto_fit =
         || -> Option<String> { theme.get(&format!("{def_prefix}-autoFit")).cloned() };
 
-    let vertical_anchor = body_pr
-        .and_then(|n| attr(&n, "anchor"))
-        .map(|a| a.to_string())
-        .or(inherited_anchor)
-        .or_else(|| theme_default_str("anchor"))
-        .unwrap_or_else(|| "t".into());
-    // Text insets (EMU). OOXML defaults: lIns=rIns=91440, tIns=bIns=45720.
-    // Shape attribute → theme objectDefaults → spec default.
-    let l_ins = body_pr
-        .and_then(|n| attr_i64(&n, "lIns"))
-        .or_else(|| theme_default_i64("lIns"))
-        .unwrap_or(91_440);
-    let r_ins = body_pr
-        .and_then(|n| attr_i64(&n, "rIns"))
-        .or_else(|| theme_default_i64("rIns"))
-        .unwrap_or(91_440);
-    let t_ins = body_pr
-        .and_then(|n| attr_i64(&n, "tIns"))
-        .or_else(|| theme_default_i64("tIns"))
-        .unwrap_or(45_720);
-    let b_ins = body_pr
-        .and_then(|n| attr_i64(&n, "bIns"))
-        .or_else(|| theme_default_i64("bIns"))
-        .unwrap_or(45_720);
-    let wrap = body_pr
-        .and_then(|n| attr(&n, "wrap"))
-        .or_else(|| theme_default_str("wrap"))
-        .unwrap_or_else(|| "square".into());
-    let vert = body_pr
-        .and_then(|n| attr(&n, "vert"))
-        .or_else(|| theme_default_str("vert"))
-        .unwrap_or_else(|| "horz".into());
-    // Auto-fit child element (spAutoFit / normAutofit). When the shape's own
-    // bodyPr is absent or contains no autofit child, defer to theme txDef.
-    // For normAutofit, also capture PowerPoint's stored fontScale /
-    // lnSpcReduction (ECMA-376 §21.1.2.1.3) — ST_Percentage in 1000ths of a
-    // percent, so 62500 → 0.625. The renderer applies these directly.
-    // parse_autofit returns None when there is no bodyPr, or a bodyPr with no
-    // autofit child, so both fall through to the theme txDef default.
-    let (auto_fit, font_scale, ln_spc_reduction) =
-        body_pr.and_then(parse_autofit).unwrap_or_else(|| {
-            (
-                theme_auto_fit().unwrap_or_else(|| "none".to_owned()),
-                None,
-                None,
-            )
-        });
+    // Shared `<a:bodyPr>` grammar (anchor / wrap / vert / insets / autofit) via
+    // ooxml_common::text::parse_body_pr. pptx's inheritance + theme
+    // objectDefaults resolution is pre-baked into the defaults: each field is
+    // `inherited?.or(theme objectDefault)?.or(spec default)`, and parse_body_pr
+    // then applies the shape's own bodyPr attribute over it — so the effective
+    // precedence (shape attr → inherited → theme → spec) is unchanged. When the
+    // shape has no `<a:bodyPr>` at all, the resolved defaults ARE the result.
+    //
+    // Insets: OOXML defaults lIns=rIns=91440, tIns=bIns=45720 (the shared
+    // ooxml_common::text::DEFAULT_INS_* constants, via BodyPrDefaults::spec()).
+    // Autofit child (spAutoFit / normAutofit): when absent, defer to theme txDef
+    // (auto_fit default below); a normAutofit also captures PowerPoint's stored
+    // fontScale / lnSpcReduction (ECMA-376 §21.1.2.1.3, 62500 → 0.625).
+    let spec = ooxml_common::text::BodyPrDefaults::spec();
+    let body_pr_defaults = ooxml_common::text::BodyPrDefaults {
+        anchor: inherited_anchor
+            .or_else(|| theme_default_str("anchor"))
+            .unwrap_or(spec.anchor),
+        wrap: theme_default_str("wrap").unwrap_or(spec.wrap),
+        vert: theme_default_str("vert").unwrap_or(spec.vert),
+        l_ins: theme_default_i64("lIns").unwrap_or(spec.l_ins),
+        t_ins: theme_default_i64("tIns").unwrap_or(spec.t_ins),
+        r_ins: theme_default_i64("rIns").unwrap_or(spec.r_ins),
+        b_ins: theme_default_i64("bIns").unwrap_or(spec.b_ins),
+        auto_fit: theme_auto_fit().unwrap_or(spec.auto_fit),
+    };
+    let body = match body_pr {
+        Some(n) => ooxml_common::text::parse_body_pr(n, &body_pr_defaults),
+        // No <a:bodyPr>: every field resolves to its default.
+        None => ooxml_common::text::BodyPr {
+            anchor: body_pr_defaults.anchor.clone(),
+            wrap: body_pr_defaults.wrap.clone(),
+            vert: body_pr_defaults.vert.clone(),
+            l_ins: body_pr_defaults.l_ins,
+            t_ins: body_pr_defaults.t_ins,
+            r_ins: body_pr_defaults.r_ins,
+            b_ins: body_pr_defaults.b_ins,
+            auto_fit: body_pr_defaults.auto_fit.clone(),
+            font_scale: None,
+            ln_spc_reduction: None,
+        },
+    };
+    let vertical_anchor = body.anchor;
+    let l_ins = body.l_ins;
+    let r_ins = body.r_ins;
+    let t_ins = body.t_ins;
+    let b_ins = body.b_ins;
+    let wrap = body.wrap;
+    let vert = body.vert;
+    let auto_fit = body.auto_fit;
+    let font_scale = body.font_scale;
+    let ln_spc_reduction = body.ln_spc_reduction;
     // ECMA-376 §20.1.10.34: numCol on <a:bodyPr> tells the renderer to
     // distribute paragraphs across N columns within the shape. Default 1.
     // spcCol is the inter-column gutter in EMU (default 0). Both fall back

@@ -128,6 +128,7 @@ const DASH_PATTERNS: Record<string, number[]> = {
   sysDash:      [4, 2],
   sysDot:       [1, 2],
   sysDashDot:   [4, 2, 1, 2],
+  sysDashDotDot:[4, 2, 1, 2, 1, 2],
 };
 
 /**

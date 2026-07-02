@@ -7368,6 +7368,17 @@ export const __test_isPageLevelAnchorY = (
   fromPara: boolean,
 ): boolean => isPageLevelAnchorY(rf, fromPara);
 
+/** Exported for the scale-invariance characterization test (Phase 4-1 B2 Stage 1).
+ *  {@link layoutLines} is the single line-breaking + measurement kernel called by
+ *  BOTH the paginator (scale 1, pt space) and the paint pass (device scale). The
+ *  compute-once refactor stamps the paginator's scale-1 lines and rehydrates them
+ *  at the paint scale, so the test pins EXACTLY which `LayoutLine` fields scale
+ *  linearly with the passed `scale` (px advances, ascent/descent, xOffset,
+ *  availWidth, topY) versus which are scale-invariant (segment count, line count,
+ *  pt `height`) — and surfaces any field/branch that is NOT a clean ×scale. */
+export const __test_layoutLines = layoutLines;
+export type { LayoutSeg as __test_LayoutSeg, LayoutLine as __test_LayoutLine, LayoutTextSeg as __test_LayoutTextSeg, WrapLayoutCtx as __test_WrapLayoutCtx };
+
 function resolveAnchorBox(
   img: ImageRun,
   state: RenderState,

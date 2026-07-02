@@ -92,7 +92,7 @@ describe('elideToWidth', () => {
     // 'ab' + emoji (2 code units) + 'cd'. Widths: 8px per code unit under the
     // mock, so budgets are chosen to force cuts at every position around the
     // pair; the result must never contain a lone surrogate.
-    const ctx = makeCtx((t) => t.length * 8);
+    const ctx = mockCtx(8);
     const text = 'ab\u{1F389}cd';
     for (let budget = 8; budget <= 8 * (text.length + 1); budget += 4) {
       const out = elideToWidth(ctx, text, budget);

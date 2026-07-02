@@ -349,6 +349,32 @@ export class XlsxViewer {
   private _bitmapCtx: ImageBitmapRenderingContext | null = null;
   private resizeObserver: ResizeObserver | null = null;
   /**
+   * Pending `requestAnimationFrame` handle for a coalesced re-render, or `null`
+   * when none is scheduled. High-frequency event-driven repaints (scroll, live
+   * resize drag, selection drag, container resize) route through
+   * {@link scheduleRender} so at most one render runs per animation frame: a
+   * burst of scroll events within a single frame collapses to one draw at the
+   * frame's latest scroll position (`renderCurrentSheet` reads the live scroll
+   * offset, so "latest wins" needs no stored position). Explicit API calls
+   * (`showSheet`/`goToSheet`, `select`, `setScale`) stay synchronous — they must
+   * paint immediately, not a frame later. `destroy()` cancels any pending frame.
+   */
+  private _rafId: number | null = null;
+  /**
+   * Monotonic render-request counter for worker-mode stale-frame dropping.
+   * Every {@link renderCurrentSheet} bumps it and captures the value before it
+   * awaits the worker's bitmap; on resolution a captured value below the current
+   * one means a newer render was requested meanwhile (scroll moved on, the sheet
+   * switched, a zoom changed), so that bitmap is stale and must be closed and
+   * dropped instead of painted over the fresher frame. The WorkerBridge already
+   * correlates each request↔response by id, but requests overlap — a slow bitmap
+   * for an old scroll position can resolve after a newer one — so the viewer
+   * needs this generation guard, the single-canvas analogue of the pptx
+   * scroll-viewer's per-slot render epoch (PR #663). The main-thread path renders
+   * synchronously and cannot interleave, so it needs no guard.
+   */
+  private _renderSeq = 0;
+  /**
    * Start-anchored horizontal scroll position (the {@link effectiveScrollLeft}
    * value last produced by a real user scroll or a programmatic reset), kept
    * as the source of truth across container size changes. The native
@@ -548,7 +574,11 @@ export class XlsxViewer {
       if (this.scrollHost.clientWidth > 0) {
         this.effectiveH = this.effectiveScrollLeft;
       }
-      this.renderCurrentSheet();
+      // Coalesce into the next frame: a scroll gesture fires many events per
+      // frame, and the previous synchronous redraw ran the full render on each
+      // one. The overlay update is cheap DOM geometry (no canvas paint) and must
+      // track the scroll immediately, so it stays synchronous.
+      this.scheduleRender();
       this.updateSelectionOverlay();
     });
 
@@ -558,7 +588,10 @@ export class XlsxViewer {
     // view drifts (or, after a hidden mount, stays stranded at the far end).
     this.resizeObserver = new ResizeObserver(() => {
       this.reanchorHorizontalScroll();
-      this.renderCurrentSheet();
+      // Container resizes can burst (a live window/pane drag); coalesce the
+      // canvas paint into one frame. The re-anchor, overlay and nav updates are
+      // cheap and must reflect the new size at once, so they stay synchronous.
+      this.scheduleRender();
       this.updateSelectionOverlay();
       this.updateNavButtons();
     });
@@ -1074,7 +1107,10 @@ export class XlsxViewer {
     sheetAxisCache.delete(ws); // sizes changed → rebuild the cumulative-offset axes
     this.updateSpacerSize(ws);
     this.updateSelectionOverlay();
-    void this.renderCurrentSheet();
+    // Live resize drag fires per pointermove; coalesce the canvas repaint into
+    // one frame. The spacer (scrollbar extent) and overlay updates are cheap DOM
+    // writes that must track the drag immediately, so they stay synchronous.
+    this.scheduleRender();
   }
 
   /**
@@ -1746,7 +1782,10 @@ export class XlsxViewer {
       }
 
       this.updateSelectionOverlay();
-      void this.renderCurrentSheet();
+      // Drag-select fires per pointermove; coalesce the canvas repaint (the
+      // header-highlight bands the renderer draws) into one frame. The overlay
+      // rect and the selection-change callback stay synchronous.
+      this.scheduleRender();
       this.opts.onSelectionChange?.(this.selection);
     });
 
@@ -2115,12 +2154,40 @@ export class XlsxViewer {
     this.spacer.style.height = `${totalH}px`;
   }
 
+  /**
+   * Coalesce a re-render into the next animation frame. Called from the
+   * high-frequency event-driven paths (scroll, live column/row resize, drag-
+   * selection, container resize); a burst of these within one frame schedules a
+   * single {@link renderCurrentSheet}, avoiding the previous behavior where every
+   * scroll event forced its own synchronous full redraw. Already-scheduled frames
+   * are not re-scheduled — the one pending render reads the live scroll/scale
+   * state when it runs, so the most recent position always wins without threading
+   * a coordinate through. Falls back to a synchronous render when
+   * `requestAnimationFrame` is unavailable (e.g. a non-DOM host), preserving the
+   * old semantics there.
+   */
+  private scheduleRender(): void {
+    if (this._rafId !== null) return;
+    if (typeof requestAnimationFrame !== 'function') {
+      void this.renderCurrentSheet();
+      return;
+    }
+    this._rafId = requestAnimationFrame(() => {
+      this._rafId = null;
+      void this.renderCurrentSheet();
+    });
+  }
+
   private async renderCurrentSheet(): Promise<void> {
     if (!this.currentWorksheet) return;
     const ws = this.currentWorksheet;
     const w = this.canvasArea.clientWidth;
     const h = this.canvasArea.clientHeight;
     if (w <= 0 || h <= 0) return;
+
+    // Claim a render generation up front so a later render started while this one
+    // awaits the worker can mark this frame stale (worker mode only; see below).
+    const seq = ++this._renderSeq;
 
     const cs = this.opts.cellScale ?? 1;
     const dpr = window.devicePixelRatio ?? 1;
@@ -2195,10 +2262,27 @@ export class XlsxViewer {
       // Render the viewport off the main thread and paint the returned bitmap.
       // The selection overlay (geometry-based, from getCellRect) is unaffected.
       const bmp = await this.workbook.renderViewportToBitmap(this.currentSheet, viewport, renderOpts);
-      this.canvas.width = bmp.width;
-      this.canvas.height = bmp.height;
-      this.canvas.style.width = `${w}px`;
-      this.canvas.style.height = `${h}px`;
+      // Drop a stale frame: if a newer render was requested while this bitmap was
+      // in flight (scroll moved on, the sheet switched, a zoom changed), painting
+      // it would overwrite the fresher frame. Close it to free the GPU memory
+      // (PR #659/#663 flow) and return without painting. The freshest render owns
+      // the canvas.
+      if (seq !== this._renderSeq) {
+        bmp.close();
+        return;
+      }
+      // Resize the canvas only when the bitmap dimensions actually change.
+      // Re-assigning canvas.width/height re-allocates the GPU backing store even
+      // when the value is identical, which on a steady scroll stream (same size
+      // every frame) is a wasted allocation per frame (improvement plan C4).
+      // transferFromImageBitmap replaces the whole canvas, so the resize's
+      // implicit clear is not relied upon; skipping the no-op resize is safe.
+      if (this.canvas.width !== bmp.width) this.canvas.width = bmp.width;
+      if (this.canvas.height !== bmp.height) this.canvas.height = bmp.height;
+      const cssW = `${w}px`;
+      const cssH = `${h}px`;
+      if (this.canvas.style.width !== cssW) this.canvas.style.width = cssW;
+      if (this.canvas.style.height !== cssH) this.canvas.style.height = cssH;
       this._bitmapCtx?.transferFromImageBitmap(bmp);
     } else {
       await this.workbook.renderViewport(this.canvas, this.currentSheet, viewport, renderOpts);
@@ -2267,6 +2351,17 @@ export class XlsxViewer {
    */
   destroy(): void {
     this.resizeObserver?.disconnect();
+    // Cancel any coalesced render still queued for the next frame so it can't
+    // fire against a torn-down viewer (matches the destroy-completeness flow:
+    // no scheduled work outlives destroy()).
+    if (this._rafId !== null && typeof cancelAnimationFrame === 'function') {
+      cancelAnimationFrame(this._rafId);
+      this._rafId = null;
+    }
+    // Advance the render generation so any worker bitmap still in flight is
+    // treated as stale on resolution (closed + not painted), never touching the
+    // torn-down canvas.
+    this._renderSeq++;
     this.hideCommentPopup();
     this.hideValidationPanel();
     if (this.keydownHandler) {

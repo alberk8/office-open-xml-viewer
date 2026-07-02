@@ -10,16 +10,13 @@
 // resolved direction. Inline objects (image / math / tab) participate as a
 // single neutral object-replacement character.
 
-import { getDefaultBidiEngine, type BidiClass } from '@silurus/ooxml-core';
-
-/** Strong-RTL scripts (Hebrew, Arabic, Syriac, Thaana, NKo, Samaritan, …) +
- *  Arabic presentation forms. Used only as a cheap gate to decide whether a
- *  line needs the (exact) bidi pass at all — never for ordering itself. */
-const RTL_GATE =
-  // strong-RTL blocks incl. presentation forms, Plane-1 RTL blocks
-  // (Phoenician..Old Hungarian U+10800-10FFF; Mende Kikakui/Adlam/Arabic
-  // Math U+1E800-1EFFF), and RTL-implicating controls (RLM/RLE/RLO/RLI).
-  /[\u0590-\u08FF\uFB1D-\uFDFF\uFE70-\uFEFF\u200F\u202B\u202E\u2067]|[\u{10800}-\u{10FFF}\u{1E800}-\u{1EFFF}]/u;
+import {
+  getDefaultBidiEngine,
+  hasStrongRtl,
+  OBJECT_PLACEHOLDER,
+  buildVisualOrder,
+  type BidiClass,
+} from '@silurus/ooxml-core';
 
 /** A laid-out segment as seen here: only its optional text matters for bidi.
  *  Typed as `unknown` element so the renderer's LayoutSeg union (whose image /
@@ -47,7 +44,7 @@ export function segmentsHaveRtl(segments: readonly unknown[]): boolean {
   for (const s of segments) {
     if (segRtl(s)) return true;
     const t = segText(s);
-    if (t !== undefined && RTL_GATE.test(t)) return true;
+    if (t !== undefined && hasStrongRtl(t)) return true;
   }
   return false;
 }
@@ -58,8 +55,6 @@ export interface LineVisualOrder {
   /** Per-LOGICAL-index resolved direction (true = RTL) for `ctx.direction`. */
   rtl: boolean[];
 }
-
-const OBJECT_PLACEHOLDER = '￼'; // OBJECT REPLACEMENT CHARACTER (bidi class ON)
 
 /** Punctuation/symbols — the "ambiguous" characters a run-level `<w:rtl>`
  *  resolves to RTL (§17.3.2.30). Whitespace is deliberately EXCLUDED: an
@@ -141,23 +136,23 @@ export function computeLineVisualOrder(
     classOverride,
   );
 
-  // Ordering level = the RESOLVED level of the segment's first real code unit.
-  // No level forcing for rtl-marked segments: Latin letters keep their even
-  // (LTR) level (so English words in an rtl-marked run keep their mutual LTR
-  // order, as Word renders them), while the run's punctuation resolves to the
-  // odd level via the §17.3.2.30 class override above.
-  //
+  // Ordering: each segment takes the RESOLVED level of its first real code unit
+  // (255-removed → paragraph level), then UAX#9 L2 permutes them — the shared
+  // `buildVisualOrder` back half. No level forcing for rtl-marked segments:
+  // Latin letters keep their even (LTR) level (so English words in an rtl-marked
+  // run keep their mutual LTR order, as Word renders them), while the run's
+  // punctuation resolves to the odd level via the §17.3.2.30 class override
+  // above.
+  const { order } = buildVisualOrder(levels, paragraphLevel, segStart);
+
   // Direction hint = "does the segment contain ANY odd-level unit". A
   // digits-with-punctuation slice like "1. " has its "." resolve to the odd
   // level, so the slice draws with ctx.direction rtl and Canvas mirrors it to
   // ".1" exactly as Word does — whereas a pure-Latin slice is all-even and
-  // keeps its LTR rendering.
-  const segLevels = new Uint8Array(n);
+  // keeps its LTR rendering. This is docx-specific (pptx/xlsx use plain
+  // first-unit level parity), so it stays here rather than in buildVisualOrder.
   const rtl: boolean[] = new Array(n);
   for (let i = 0; i < n; i++) {
-    const lvl = levels[segStart[i]];
-    // 255 = removed by X9 (no glyph); fall back to the paragraph level.
-    segLevels[i] = lvl === 255 ? paragraphLevel : lvl;
     // Scan excludes the segment's TRAILING whitespace: an inter-word space's
     // level is seam context (N2 gives it the embedding level between
     // opposite-direction neighbours), not segment content — only the content
@@ -175,7 +170,6 @@ export function computeLineVisualOrder(
     rtl[i] = anyOdd;
   }
 
-  const order = engine.reorderVisual(segLevels, 0, n);
   return { order, rtl };
 }
 /** Physical edge a line aligns to, resolving logical start/end against base direction. */

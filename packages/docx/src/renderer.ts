@@ -639,8 +639,28 @@ export async function renderDocumentToCanvas(
   const myToken = (tokenHost.__docxRenderToken = (tokenHost.__docxRenderToken ?? 0) + 1);
   const superseded = () => tokenHost.__docxRenderToken !== myToken;
 
-  const sec = doc.section;
   const dpr = opts.dpr ?? defaultDpr();
+  // getContext before sizing is legal: resizing a canvas after getContext resets
+  // its drawing state, and the ctx.scale/fill below run AFTER canvas.width/height.
+  // The pagination fallback (paginateWithHeaderFooterReserve) needs this ctx.
+  const ctx = canvas.getContext('2d') as CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D;
+  const kinsoku = resolveKinsokuRules(doc.settings);
+  const pages = opts.prebuiltPages ?? paginateWithHeaderFooterReserve(doc, ctx, doc.fontFamilyClasses ?? {}, kinsoku, doc.footnotes ?? []);
+  const totalPages = Math.max(opts.totalPages ?? pages.length, pages.length);
+  const elements = pages[pageIndex] ?? pages[0] ?? [];
+
+  // ECMA-376 §17.6.13 / §17.6.11 — page geometry is PER-SECTION. Size THIS page from
+  // the section active at its top (resolvePageSection.geom, stamped by the paginator),
+  // NOT from the single body-level `doc.section`. `sec` merges the resolved geometry
+  // (size + margins + header/footer distances) over the body-level section so the
+  // docGrid / columns / sectionStart / even-odd fields keep their body-level values —
+  // those already flow per-section through the paginator's `colGeom`/docGrid state
+  // rails, so only the page-box geometry needs the per-page swap here. For a
+  // single-section document `geom` equals `doc.section`, so `sec === doc.section` in
+  // value — byte-identical output.
+  const pageGeom = resolvePageSection(pages, pageIndex, doc).geom;
+  const sec: SectionProps = { ...doc.section, ...pageGeom };
+
   const cssWidth = opts.width ?? sec.pageWidth * PT_TO_PX;
   const scale = cssWidth / sec.pageWidth;  // px per pt
   const cssHeight = sec.pageHeight * scale;
@@ -654,16 +674,9 @@ export async function renderDocumentToCanvas(
     if (!canvas.style.display) canvas.style.display = 'block';
   }
 
-  const ctx = canvas.getContext('2d') as CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D;
   ctx.scale(dpr, dpr);
-
   ctx.fillStyle = '#ffffff';
   ctx.fillRect(0, 0, cssWidth, cssHeight);
-
-  const kinsoku = resolveKinsokuRules(doc.settings);
-  const pages = opts.prebuiltPages ?? paginateWithHeaderFooterReserve(doc, ctx, doc.fontFamilyClasses ?? {}, kinsoku, doc.footnotes ?? []);
-  const totalPages = Math.max(opts.totalPages ?? pages.length, pages.length);
-  const elements = pages[pageIndex] ?? pages[0] ?? [];
 
   const images = await preloadImages(doc, opts.fetchImage);
   // A newer render of this canvas started while we awaited image decode — stop
@@ -3217,14 +3230,19 @@ function resolvePageSection(
   pages: PaginatedBodyElement[][],
   pageIndex: number,
   doc: DocxDocumentModel,
-): { headers: HeadersFooters; footers: HeadersFooters; titlePage: boolean; isFirstPageOfSection: boolean } {
+): { headers: HeadersFooters; footers: HeadersFooters; titlePage: boolean; isFirstPageOfSection: boolean; geom: SectionGeom } {
   const sectionOf = (idx: number): PaginatedBodyElement['sectionHF'] => pages[idx]?.[0]?.sectionHF;
   const active = sectionOf(pageIndex);
   const headers = active?.headers ?? doc.headers;
   const footers = active?.footers ?? doc.footers;
   const titlePage = active?.titlePage ?? doc.section.titlePage;
   const isFirstPageOfSection = pageIndex === 0 || sectionOf(pageIndex - 1) !== active;
-  return { headers, footers, titlePage, isFirstPageOfSection };
+  // ECMA-376 §17.6.13 / §17.6.11 — the page's geometry, from the paginator's stamp
+  // on this page's first element, falling back to the body-level section (the value
+  // the paginator itself stamps for the final/single section, so this fallback only
+  // fires for a truly empty page). Sizes the canvas + margins per page.
+  const geom: SectionGeom = pages[pageIndex]?.[0]?.sectionGeom ?? sectionGeomOf(doc.section);
+  return { headers, footers, titlePage, isFirstPageOfSection, geom };
 }
 
 function renderHeaderFooter(hf: HeaderFooter, topY: number, base: RenderState): void {

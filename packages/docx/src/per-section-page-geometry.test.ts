@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { computePages, paginateDocument } from './renderer.js';
+import { computePages, paginateDocument, renderDocumentToCanvas } from './renderer.js';
 import type {
   BodyElement, DocParagraph, DocxTextRun, SectionProps, DocxDocumentModel,
   SectionGeom, PaginatedBodyElement, HeaderFooter,
@@ -275,5 +275,83 @@ describe('per-section HF reserves (§17.6.11) — paginator', () => {
     // All five A-paragraphs fit page 0 (reserve 0 under ITS section's marginBottom 60).
     expect(textsOn(0)).toEqual(['A1', 'A2', 'A3', 'A4', 'A5']);
     expect(textsOn(1)).toEqual(['B1']);
+  });
+});
+
+// A recording canvas that exposes width/height + records fillText, so a test can
+// assert both the page pixel size and which paragraph text landed on a page.
+function makeRecordingCanvas(): { canvas: HTMLCanvasElement; texts: string[] } {
+  let font = '10px serif';
+  const texts: string[] = [];
+  const ctx = {
+    get font() { return font; }, set font(v: string) { font = v; },
+    letterSpacing: '0px',
+    measureText: (s: string) => {
+      const p = parseFloat(/(\d+(?:\.\d+)?)px/.exec(font)?.[1] ?? '10');
+      return {
+        width: [...s].length * p * 0.5,
+        fontBoundingBoxAscent: p * 0.8, fontBoundingBoxDescent: p * 0.2,
+        actualBoundingBoxAscent: p * 0.8, actualBoundingBoxDescent: p * 0.2,
+      } as TextMetrics;
+    },
+    save() {}, restore() {}, beginPath() {}, closePath() {},
+    moveTo() {}, lineTo() {}, stroke() {}, fill() {}, fillRect() {},
+    strokeRect() {}, clip() {}, rect() {}, scale() {}, translate() {},
+    setLineDash() {}, clearRect() {}, arc() {}, quadraticCurveTo() {},
+    bezierCurveTo() {}, createLinearGradient() { return { addColorStop() {} }; },
+    drawImage() {},
+    fillText(s: string) { texts.push(s); }, strokeText(s: string) { texts.push(s); },
+    fillStyle: '#000', strokeStyle: '#000', lineWidth: 1,
+    textAlign: 'left' as CanvasTextAlign, direction: 'ltr' as CanvasDirection,
+    globalAlpha: 1, lineCap: 'butt' as CanvasLineCap, lineJoin: 'miter' as CanvasLineJoin,
+  };
+  const canvas = { width: 0, height: 0, style: {} as Record<string, string>, getContext: () => ctx };
+  return { canvas: canvas as unknown as HTMLCanvasElement, texts };
+}
+
+describe('per-section page geometry (§17.6.13/§17.6.11) — renderer', () => {
+  it('sizes each page from its own section (portrait then landscape)', async () => {
+    const doc = mixedDoc();
+    // dpr:1 so canvas.width == cssWidth. No `width` override ⇒ each page sizes from
+    // its OWN section's pageWidth × PT_TO_PX. Page 0 = portrait 200×140,
+    // page 1 = landscape 140×200. The bug was every page sizing from doc.section
+    // (140×200), so page 0 would come out 140-wide.
+    const { canvas: c0, texts: t0 } = makeRecordingCanvas();
+    await renderDocumentToCanvas(doc, c0, 0, { dpr: 1 });
+    const { canvas: c1, texts: t1 } = makeRecordingCanvas();
+    await renderDocumentToCanvas(doc, c1, 1, { dpr: 1 });
+
+    // Join with '' — the deterministic mock ctx wraps "PORTRAIT_SECTION" into two
+    // fillText calls at the content-width boundary, so the text arrives split.
+    expect(t0.join('')).toContain('PORTRAIT_SECTION');
+    expect(t1.join('')).toContain('LANDSCAPE_SECTION');
+    // Portrait page is wider than tall; landscape page is taller than wide. This is
+    // the load-bearing discriminator: before the fix page 0 sized from the body-level
+    // (landscape 140×200) section, so c0 would be TALLER than wide (test Red).
+    expect(c0.width).toBeGreaterThan(c0.height);
+    expect(c1.height).toBeGreaterThan(c1.width);
+    // Aspect ratios match the two sections (200/140 vs 140/200). Precision 2: canvas
+    // dims are integer-pixel (Math.round(cssW/H*dpr)), so the ratio carries a ~7e-4
+    // rounding residual — precision 2 still cleanly separates 1.43 from the buggy 0.70.
+    expect(c0.width / c0.height).toBeCloseTo(200 / 140, 2);
+    expect(c1.width / c1.height).toBeCloseTo(140 / 200, 2);
+  });
+
+  it('single-section document sizes every page from doc.section (no regression)', async () => {
+    const section: SectionProps = {
+      pageWidth: 300, pageHeight: 400,
+      marginTop: 20, marginRight: 20, marginBottom: 20, marginLeft: 20,
+      headerDistance: 0, footerDistance: 0, titlePage: false, evenAndOddHeaders: false,
+    } as SectionProps;
+    const doc = {
+      section, body: [para('ONLY_SECTION')],
+      headers: { default: null, first: null, even: null },
+      footers: { default: null, first: null, even: null },
+      fontFamilyClasses: {},
+    } as unknown as DocxDocumentModel;
+    const { canvas } = makeRecordingCanvas();
+    await renderDocumentToCanvas(doc, canvas, 0, { dpr: 1 });
+    // Precision 2: integer-pixel rounding gives 400/533 = 0.7505, ~5e-4 off 0.75.
+    expect(canvas.width / canvas.height).toBeCloseTo(300 / 400, 2);
   });
 });

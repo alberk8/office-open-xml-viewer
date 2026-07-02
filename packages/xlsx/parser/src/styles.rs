@@ -1,5 +1,6 @@
+use crate::parse_color;
 use crate::types::*;
-use crate::{parse_color, read_zip_entry};
+use ooxml_common::zip::read_zip_string;
 use std::io::Cursor;
 
 /// Resolve the workbook's Normal-style font (family name + point size) by
@@ -10,7 +11,7 @@ use std::io::Cursor;
 pub(crate) fn parse_default_font(
     archive: &mut zip::ZipArchive<Cursor<&[u8]>>,
 ) -> (Option<String>, Option<f64>) {
-    let Ok(xml) = read_zip_entry(archive, "xl/styles.xml") else {
+    let Ok(xml) = read_zip_string(archive, "xl/styles.xml") else {
         return (None, None);
     };
     let Ok(doc) = roxmltree::Document::parse(&xml) else {
@@ -62,7 +63,7 @@ pub(crate) fn parse_styles(
     archive: &mut zip::ZipArchive<Cursor<&[u8]>>,
     theme_colors: &[String],
 ) -> Result<Styles, String> {
-    let xml = read_zip_entry(archive, "xl/styles.xml")?;
+    let xml = read_zip_string(archive, "xl/styles.xml")?;
     let doc = roxmltree::Document::parse(&xml).map_err(|e| e.to_string())?;
     let ns = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
 

@@ -1,5 +1,6 @@
+use crate::resolve_zip_path;
 use crate::types::*;
-use crate::{read_zip_entry, resolve_zip_path};
+use ooxml_common::zip::read_zip_string;
 use std::collections::HashMap;
 use std::io::Cursor;
 
@@ -42,7 +43,7 @@ pub(crate) fn load_all_pivot_cache_fields(
         .filter(|n| n.starts_with("xl/pivotCache/pivotCacheDefinition") && n.ends_with(".xml"))
         .collect();
     for name in names {
-        let Ok(xml) = read_zip_entry(archive, &name) else {
+        let Ok(xml) = read_zip_string(archive, &name) else {
             continue;
         };
         let Ok(doc) = roxmltree::Document::parse(&xml) else {
@@ -91,7 +92,7 @@ pub(crate) fn load_all_slicer_caches(
         .filter(|n| n.starts_with("xl/slicerCaches/slicerCache") && n.ends_with(".xml"))
         .collect();
     for path in names {
-        let Ok(xml) = read_zip_entry(archive, &path) else {
+        let Ok(xml) = read_zip_string(archive, &path) else {
             continue;
         };
         let Ok(doc) = roxmltree::Document::parse(&xml) else {
@@ -161,7 +162,7 @@ pub(crate) fn load_sheet_slicers(
         return Vec::new();
     };
     let sheet_rels_path = format!("xl/{}/_rels/{}.rels", sheet_dir, sheet_file);
-    let Ok(sheet_rels_xml) = read_zip_entry(archive, &sheet_rels_path) else {
+    let Ok(sheet_rels_xml) = read_zip_string(archive, &sheet_rels_path) else {
         return Vec::new();
     };
     let Ok(rels_doc) = roxmltree::Document::parse(&sheet_rels_xml) else {
@@ -195,7 +196,7 @@ pub(crate) fn load_sheet_slicers(
     let mut slicer_defs: HashMap<String, SlicerDef> = HashMap::new();
     for target in &slicer_targets {
         let slicer_path = resolve_zip_path(&format!("xl/{}", sheet_dir), target);
-        let Ok(xml) = read_zip_entry(archive, &slicer_path) else {
+        let Ok(xml) = read_zip_string(archive, &slicer_path) else {
             continue;
         };
         for (k, v) in parse_slicers_xml(&xml) {
@@ -214,7 +215,7 @@ pub(crate) fn load_sheet_slicers(
     let mut out: Vec<SlicerAnchor> = Vec::new();
     for target in drawing_targets {
         let drawing_path = resolve_zip_path(&format!("xl/{}", sheet_dir), &target);
-        let Ok(drawing_xml) = read_zip_entry(archive, &drawing_path) else {
+        let Ok(drawing_xml) = read_zip_string(archive, &drawing_path) else {
             continue;
         };
         out.extend(parse_slicer_anchors(

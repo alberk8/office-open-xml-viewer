@@ -2,6 +2,8 @@ use std::collections::HashMap;
 use std::io::{Cursor, Read};
 use wasm_bindgen::prelude::*;
 
+use ooxml_common::zip::read_zip_string;
+
 mod markdown;
 
 mod types;
@@ -58,7 +60,7 @@ pub fn parse_sheet(
     let cursor = Cursor::new(data);
     let mut archive = zip::ZipArchive::new(cursor).map_err(|e| e.to_string())?;
 
-    let workbook_xml = read_zip_entry(&mut archive, "xl/workbook.xml")?;
+    let workbook_xml = read_zip_string(&mut archive, "xl/workbook.xml")?;
     let wb_doc = roxmltree::Document::parse(&workbook_xml).map_err(|e| e.to_string())?;
     let sheets = parse_workbook_sheets(&wb_doc);
 
@@ -67,14 +69,14 @@ pub fn parse_sheet(
         .ok_or_else(|| format!("sheet index {} out of range", sheet_index))?;
 
     // Resolve rId → target path from workbook.xml.rels
-    let rels_xml = read_zip_entry(&mut archive, "xl/_rels/workbook.xml.rels")?;
+    let rels_xml = read_zip_string(&mut archive, "xl/_rels/workbook.xml.rels")?;
     let rels_doc = roxmltree::Document::parse(&rels_xml).map_err(|e| e.to_string())?;
     let sheet_path = resolve_sheet_path(&rels_doc, &sheet_meta.r_id)
         .ok_or_else(|| format!("rId {} not found in rels", sheet_meta.r_id))?;
 
     let theme_colors = parse_theme_colors(&mut archive);
     let shared_strings = read_shared_strings(&mut archive, &theme_colors);
-    let sheet_xml = read_zip_entry(&mut archive, &format!("xl/{}", sheet_path))?;
+    let sheet_xml = read_zip_string(&mut archive, &format!("xl/{}", sheet_path))?;
     let (mut ws, hyperlink_rids) =
         parse_worksheet(&sheet_xml, &shared_strings, &theme_colors, name)
             .map_err(|e| e.to_string())?;
@@ -102,7 +104,7 @@ fn parse_xlsx_inner(data: &[u8]) -> Result<ParsedWorkbook, String> {
     let cursor = Cursor::new(data);
     let mut archive = zip::ZipArchive::new(cursor).map_err(|e| e.to_string())?;
 
-    let workbook_xml = read_zip_entry(&mut archive, "xl/workbook.xml")?;
+    let workbook_xml = read_zip_string(&mut archive, "xl/workbook.xml")?;
     let wb_doc = roxmltree::Document::parse(&workbook_xml).map_err(|e| e.to_string())?;
     let sheets = parse_workbook_sheets(&wb_doc);
 
@@ -116,7 +118,7 @@ fn parse_xlsx_inner(data: &[u8]) -> Result<ParsedWorkbook, String> {
     // small head read of each sheet entry is enough — we never decompress the
     // (potentially huge) `<sheetData>` body just to read the tab color.
     let mut sheets = sheets;
-    if let Ok(rels_xml) = read_zip_entry(&mut archive, "xl/_rels/workbook.xml.rels") {
+    if let Ok(rels_xml) = read_zip_string(&mut archive, "xl/_rels/workbook.xml.rels") {
         if let Ok(rels_doc) = roxmltree::Document::parse(&rels_xml) {
             for sheet in sheets.iter_mut() {
                 let Some(path) = resolve_sheet_path(&rels_doc, &sheet.r_id) else {
@@ -187,32 +189,13 @@ fn extract_tab_color_from_head(head: &str, theme_colors: &[String]) -> Option<St
     )
 }
 
-pub(crate) fn read_zip_entry(
-    archive: &mut zip::ZipArchive<Cursor<&[u8]>>,
-    name: &str,
-) -> Result<String, String> {
-    let max = ooxml_common::zip::current_max();
-    let mut file = archive
-        .by_name(name)
-        .map_err(|e| format!("entry '{}' not found: {}", name, e))?;
-    if file.size() > max {
-        return Err(format!("entry '{}' exceeds size limit", name));
-    }
-    let mut buf = String::new();
-    file.by_ref()
-        .take(max)
-        .read_to_string(&mut buf)
-        .map_err(|e| e.to_string())?;
-    Ok(buf)
-}
-
 /// Theme `fmtScheme > lnStyleLst` line widths (EMU), in declaration order.
 /// A drawing shape's `<a:style><a:lnRef idx="N">` resolves its outline width
 /// from entry N (1-based) of this list (ECMA-376 §20.1.4.2.19); an entry
 /// without an explicit `w` uses the CT_LineProperties default 9525 EMU =
 /// 0.75 pt (§20.1.2.2.24).
 pub(crate) fn parse_theme_ln_widths(archive: &mut zip::ZipArchive<Cursor<&[u8]>>) -> Vec<i64> {
-    let Ok(xml) = read_zip_entry(archive, "xl/theme/theme1.xml") else {
+    let Ok(xml) = read_zip_string(archive, "xl/theme/theme1.xml") else {
         return Vec::new();
     };
     let Ok(doc) = roxmltree::Document::parse(&xml) else {
@@ -239,7 +222,7 @@ pub(crate) fn parse_theme_ln_widths(archive: &mut zip::ZipArchive<Cursor<&[u8]>>
 }
 
 fn parse_theme_colors(archive: &mut zip::ZipArchive<Cursor<&[u8]>>) -> Vec<String> {
-    let Ok(xml) = read_zip_entry(archive, "xl/theme/theme1.xml") else {
+    let Ok(xml) = read_zip_string(archive, "xl/theme/theme1.xml") else {
         return Vec::new();
     };
     let Ok(doc) = roxmltree::Document::parse(&xml) else {
@@ -525,7 +508,7 @@ fn read_shared_strings(
     archive: &mut zip::ZipArchive<Cursor<&[u8]>>,
     theme_colors: &[String],
 ) -> Vec<SharedString> {
-    let Ok(xml) = read_zip_entry(archive, "xl/sharedStrings.xml") else {
+    let Ok(xml) = read_zip_string(archive, "xl/sharedStrings.xml") else {
         return Vec::new();
     };
     let Ok(doc) = roxmltree::Document::parse(&xml) else {
@@ -1280,7 +1263,7 @@ fn load_sheet_comments(
         return Vec::new();
     };
     let sheet_rels_path = format!("xl/{}/_rels/{}.rels", sheet_dir, sheet_file);
-    let Ok(rels_xml) = read_zip_entry(archive, &sheet_rels_path) else {
+    let Ok(rels_xml) = read_zip_string(archive, &sheet_rels_path) else {
         return Vec::new();
     };
     let Ok(rels_doc) = roxmltree::Document::parse(&rels_xml) else {
@@ -1314,14 +1297,14 @@ fn load_sheet_comments(
 
     if let Some(target) = classic_target {
         let comments_path = resolve_zip_path(&format!("xl/{}", sheet_dir), &target);
-        if let Ok(comments_xml) = read_zip_entry(archive, &comments_path) {
+        if let Ok(comments_xml) = read_zip_string(archive, &comments_path) {
             return parse_comments_xml(&comments_xml);
         }
     }
 
     if let Some(target) = threaded_target {
         let tc_path = resolve_zip_path(&format!("xl/{}", sheet_dir), &target);
-        if let Ok(tc_xml) = read_zip_entry(archive, &tc_path) {
+        if let Ok(tc_xml) = read_zip_string(archive, &tc_path) {
             let persons = load_persons(archive);
             return parse_threaded_comments_xml(&tc_xml, &persons);
         }
@@ -1343,7 +1326,7 @@ fn load_persons(archive: &mut zip::ZipArchive<Cursor<&[u8]>>) -> HashMap<String,
         .filter(|n| n.starts_with("xl/persons/") && n.ends_with(".xml"))
         .collect();
     for path in person_paths {
-        let Ok(xml) = read_zip_entry(archive, &path) else {
+        let Ok(xml) = read_zip_string(archive, &path) else {
             continue;
         };
         let Ok(doc) = roxmltree::Document::parse(&xml) else {
@@ -1558,7 +1541,7 @@ fn load_hyperlinks(
         return Vec::new();
     };
     let rels_path = format!("xl/{}/_rels/{}.rels", sheet_dir, sheet_file);
-    let rels = read_zip_entry(archive, &rels_path)
+    let rels = read_zip_string(archive, &rels_path)
         .ok()
         .map(|xml| parse_rels_map(&xml))
         .unwrap_or_default();
@@ -1570,21 +1553,6 @@ fn load_hyperlinks(
             url: rels.get(&rid).cloned(),
         })
         .collect()
-}
-
-/// Read a binary file from the zip.
-pub(crate) fn read_zip_bytes(
-    archive: &mut zip::ZipArchive<Cursor<&[u8]>>,
-    path: &str,
-) -> Option<Vec<u8>> {
-    let max = ooxml_common::zip::current_max();
-    let mut file = archive.by_name(path).ok()?;
-    if file.size() > max {
-        return None;
-    }
-    let mut buf = Vec::new();
-    file.by_ref().take(max).read_to_end(&mut buf).ok()?;
-    Some(buf)
 }
 
 /// Resolve a relative path ("../media/image1.png") against a base dir ("xl/drawings").
@@ -1852,7 +1820,7 @@ fn load_sheet_sparklines(
                                 .find(|s| s.name == name)
                                 .and_then(|s| resolve_sheet_path(rels_doc, &s.r_id))
                                 .map(|p| format!("xl/{}", p));
-                            let xml = path.and_then(|p| read_zip_entry(archive, &p).ok());
+                            let xml = path.and_then(|p| read_zip_string(archive, &p).ok());
                             xml_cache.insert(name.clone(), xml);
                         }
                         xml_cache.get(&name).and_then(|o| o.as_deref())
@@ -2071,7 +2039,7 @@ pub fn to_markdown_native(data: &[u8]) -> Result<String, String> {
 fn to_markdown_impl(data: &[u8]) -> Result<String, String> {
     let cursor = Cursor::new(data);
     let mut archive = zip::ZipArchive::new(cursor).map_err(|e| e.to_string())?;
-    let workbook_xml = read_zip_entry(&mut archive, "xl/workbook.xml")?;
+    let workbook_xml = read_zip_string(&mut archive, "xl/workbook.xml")?;
     let wb_doc = roxmltree::Document::parse(&workbook_xml).map_err(|e| e.to_string())?;
     let sheets = parse_workbook_sheets(&wb_doc);
 
@@ -2092,7 +2060,7 @@ pub fn parse_sheet_native(data: &[u8], sheet_index: u32, name: &str) -> Result<S
     let cursor = Cursor::new(data);
     let mut archive = zip::ZipArchive::new(cursor).map_err(|e| e.to_string())?;
 
-    let workbook_xml = read_zip_entry(&mut archive, "xl/workbook.xml")?;
+    let workbook_xml = read_zip_string(&mut archive, "xl/workbook.xml")?;
     let wb_doc = roxmltree::Document::parse(&workbook_xml).map_err(|e| e.to_string())?;
     let sheets = parse_workbook_sheets(&wb_doc);
 
@@ -2100,14 +2068,14 @@ pub fn parse_sheet_native(data: &[u8], sheet_index: u32, name: &str) -> Result<S
         .get(sheet_index as usize)
         .ok_or_else(|| format!("sheet index {} out of range", sheet_index))?;
 
-    let rels_xml = read_zip_entry(&mut archive, "xl/_rels/workbook.xml.rels")?;
+    let rels_xml = read_zip_string(&mut archive, "xl/_rels/workbook.xml.rels")?;
     let rels_doc = roxmltree::Document::parse(&rels_xml).map_err(|e| e.to_string())?;
     let sheet_path = resolve_sheet_path(&rels_doc, &sheet_meta.r_id)
         .ok_or_else(|| format!("rId {} not found in rels", sheet_meta.r_id))?;
 
     let theme_colors = parse_theme_colors(&mut archive);
     let shared_strings = read_shared_strings(&mut archive, &theme_colors);
-    let sheet_xml = read_zip_entry(&mut archive, &format!("xl/{}", sheet_path))?;
+    let sheet_xml = read_zip_string(&mut archive, &format!("xl/{}", sheet_path))?;
     let (mut ws, hyperlink_rids) =
         parse_worksheet(&sheet_xml, &shared_strings, &theme_colors, name)
             .map_err(|e| e.to_string())?;

@@ -1,5 +1,6 @@
 use crate::types::*;
-use crate::{parse_cell_ref, read_zip_entry, resolve_zip_path};
+use crate::{parse_cell_ref, resolve_zip_path};
+use ooxml_common::zip::read_zip_string;
 use std::io::Cursor;
 
 /// Parse `xl/tables/tableN.xml` files referenced from the sheet rels and
@@ -51,7 +52,7 @@ pub(crate) fn parse_table_styles_map(
 ) -> std::collections::HashMap<String, TableStyleElements> {
     use std::collections::HashMap;
     let mut map: HashMap<String, TableStyleElements> = HashMap::new();
-    let Ok(xml) = read_zip_entry(archive, "xl/styles.xml") else {
+    let Ok(xml) = read_zip_string(archive, "xl/styles.xml") else {
         return map;
     };
     let Ok(doc) = roxmltree::Document::parse(&xml) else {
@@ -127,7 +128,7 @@ pub(crate) fn load_sheet_tables(
         return Vec::new();
     };
     let sheet_rels_path = format!("xl/{}/_rels/{}.rels", sheet_dir, sheet_file);
-    let Ok(rels_xml) = read_zip_entry(archive, &sheet_rels_path) else {
+    let Ok(rels_xml) = read_zip_string(archive, &sheet_rels_path) else {
         return Vec::new();
     };
     let Ok(rels_doc) = roxmltree::Document::parse(&rels_xml) else {
@@ -150,7 +151,7 @@ pub(crate) fn load_sheet_tables(
     let mut tables: Vec<TableInfo> = Vec::new();
     for target in table_targets {
         let table_path = resolve_zip_path(&format!("xl/{}", sheet_dir), &target);
-        let Ok(xml) = read_zip_entry(archive, &table_path) else {
+        let Ok(xml) = read_zip_string(archive, &table_path) else {
             continue;
         };
         let Ok(doc) = roxmltree::Document::parse(&xml) else {

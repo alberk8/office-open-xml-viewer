@@ -1,7 +1,7 @@
 use ooxml_common::blip::{blip_embed_rid, mime_from_ext, parse_src_rect, svg_blip_rid};
+use ooxml_common::zip::{read_zip_bytes, read_zip_string};
 use roxmltree::Document as XmlDoc;
 use std::collections::HashMap;
-use std::io::Read;
 use zip::ZipArchive;
 
 use crate::numbering::NumberingMap;
@@ -75,7 +75,7 @@ pub fn parse(data: &[u8]) -> Result<Document, String> {
     let cursor = std::io::Cursor::new(data);
     let mut zip = ZipArchive::new(cursor).map_err(|e| e.to_string())?;
 
-    let rels_xml = read_zip_entry(&mut zip, "word/_rels/document.xml.rels").unwrap_or_default();
+    let rels_xml = read_zip_string(&mut zip, "word/_rels/document.xml.rels").unwrap_or_default();
     let rel_map = parse_rels(&rels_xml);
 
     // Styles are referenced from the document relationships (Target may be
@@ -89,7 +89,7 @@ pub fn parse(data: &[u8]) -> Result<Document, String> {
             }
         })
         .unwrap_or_else(|| "word/styles.xml".to_string());
-    let style_map = read_zip_entry(&mut zip, &styles_path)
+    let style_map = read_zip_string(&mut zip, &styles_path)
         .map(|s| StyleMap::parse(&s))
         .unwrap_or_else(|_| StyleMap::parse(""));
 
@@ -118,11 +118,11 @@ pub fn parse(data: &[u8]) -> Result<Document, String> {
             .map(|(d, _)| d)
             .unwrap_or("word");
         let rels_path = format!("{}/_rels/{}.xml.rels", dir, stem);
-        let rels_xml = read_zip_entry(&mut zip, &rels_path).unwrap_or_default();
+        let rels_xml = read_zip_string(&mut zip, &rels_path).unwrap_or_default();
         let rel_map = parse_rels(&rels_xml);
         load_media_map(&mut zip, &rel_map, &format!("{}/", dir))
     };
-    let mut num_map = read_zip_entry(&mut zip, &numbering_path)
+    let mut num_map = read_zip_string(&mut zip, &numbering_path)
         .map(|s| NumberingMap::parse(&s, &numbering_media_map))
         .unwrap_or_default();
 
@@ -135,7 +135,7 @@ pub fn parse(data: &[u8]) -> Result<Document, String> {
             } else {
                 format!("word/{}", t)
             };
-            read_zip_entry(&mut zip, &p)
+            read_zip_string(&mut zip, &p)
                 .map(|s| ThemeColors::parse(&s))
                 .unwrap_or_default()
         })
@@ -156,7 +156,7 @@ pub fn parse(data: &[u8]) -> Result<Document, String> {
     // §17.10.1 even/odd headers is a settings.xml flag (not a sectPr property), so
     // capture it here and stamp it onto the section below.
     let mut even_and_odd_headers = false;
-    if let Ok(settings_xml) = read_zip_entry(&mut zip, &settings_path) {
+    if let Ok(settings_xml) = read_zip_string(&mut zip, &settings_path) {
         if let Some(lang) = parse_theme_font_bidi_lang(&settings_xml) {
             theme.fill_default_cs_font(&lang);
         }
@@ -177,7 +177,7 @@ pub fn parse(data: &[u8]) -> Result<Document, String> {
 
     let media_map = load_media_map(&mut zip, &rel_map, "word/");
 
-    let doc_xml = read_zip_entry(&mut zip, "word/document.xml")?;
+    let doc_xml = read_zip_string(&mut zip, "word/document.xml")?;
     let xml_doc = XmlDoc::parse(&doc_xml).map_err(|e| e.to_string())?;
 
     let body_node = xml_doc
@@ -274,7 +274,7 @@ pub fn parse(data: &[u8]) -> Result<Document, String> {
             }
         })
         .unwrap_or_else(|| "word/fontTable.xml".to_string());
-    let font_family_classes = read_zip_entry(&mut zip, &font_table_path)
+    let font_family_classes = read_zip_string(&mut zip, &font_table_path)
         .map(|s| parse_font_table(&s))
         .unwrap_or_default();
 
@@ -292,7 +292,7 @@ pub fn parse(data: &[u8]) -> Result<Document, String> {
                 format!("word/{}", t)
             }
         })
-        .and_then(|p| read_zip_entry(&mut zip, &p).ok())
+        .and_then(|p| read_zip_string(&mut zip, &p).ok())
         .map(|xml| parse_comments(&xml))
         .unwrap_or_default();
     let footnotes_path = find_rel_target(&rels_xml, "footnotes").map(|t| {
@@ -444,7 +444,7 @@ fn parse_notes(
     num_map: &mut NumberingMap,
     theme: &ThemeColors,
 ) -> Vec<crate::types::DocxNote> {
-    let Ok(xml) = read_zip_entry(zip, path) else {
+    let Ok(xml) = read_zip_string(zip, path) else {
         return Vec::new();
     };
 
@@ -461,7 +461,7 @@ fn parse_notes(
     } else {
         format!("{}/", dir)
     };
-    let rels_xml = read_zip_entry(zip, &rels_path).unwrap_or_default();
+    let rels_xml = read_zip_string(zip, &rels_path).unwrap_or_default();
     let local_rel_map = parse_rels(&rels_xml);
     let local_media_map = load_media_map(zip, &local_rel_map, &base_dir);
 
@@ -1355,7 +1355,7 @@ fn load_header_footer_set(
     let mut out = HeadersFooters::default();
     for (kind, target) in type_to_target {
         let path = format!("word/{}", target);
-        let xml = match read_zip_entry(zip, &path) {
+        let xml = match read_zip_string(zip, &path) {
             Ok(s) => s,
             Err(_) => continue,
         };
@@ -1363,7 +1363,7 @@ fn load_header_footer_set(
         // Per-file rels for image resolution
         let stem = target.trim_end_matches(".xml");
         let rels_path = format!("word/_rels/{}.xml.rels", stem);
-        let rels_xml = read_zip_entry(zip, &rels_path).unwrap_or_default();
+        let rels_xml = read_zip_string(zip, &rels_path).unwrap_or_default();
         let local_rel_map = parse_rels(&rels_xml);
         let local_media_map = load_media_map(zip, &local_rel_map, "word/");
 
@@ -5580,36 +5580,6 @@ fn parse_rels(xml: &str) -> HashMap<String, String> {
         }
     }
     map
-}
-
-fn read_zip_entry(zip: &mut Zip, path: &str) -> Result<String, String> {
-    let max = ooxml_common::zip::current_max();
-    let mut entry = zip.by_name(path).map_err(|e| format!("{}: {}", path, e))?;
-    if entry.size() > max {
-        return Err(format!("{}: exceeds size limit", path));
-    }
-    let mut s = String::new();
-    entry
-        .by_ref()
-        .take(max)
-        .read_to_string(&mut s)
-        .map_err(|e| e.to_string())?;
-    Ok(s)
-}
-
-fn read_zip_bytes(zip: &mut Zip, path: &str) -> Result<Vec<u8>, String> {
-    let max = ooxml_common::zip::current_max();
-    let mut entry = zip.by_name(path).map_err(|e| format!("{}: {}", path, e))?;
-    if entry.size() > max {
-        return Err(format!("{}: exceeds size limit", path));
-    }
-    let mut buf = vec![];
-    entry
-        .by_ref()
-        .take(max)
-        .read_to_end(&mut buf)
-        .map_err(|e| e.to_string())?;
-    Ok(buf)
 }
 
 #[cfg(test)]

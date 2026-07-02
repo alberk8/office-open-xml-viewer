@@ -1722,17 +1722,6 @@ fn read_zip_str(zip: &mut PptxZip<'_>, path: &str) -> Result<String, Box<dyn std
     Ok(buf)
 }
 
-fn read_zip_bytes(zip: &mut PptxZip<'_>, path: &str) -> Option<Vec<u8>> {
-    let max = ooxml_common::zip::current_max();
-    let mut file = zip.by_name(path).ok()?;
-    if file.size() > max {
-        return None;
-    }
-    let mut buf = Vec::new();
-    file.by_ref().take(max).read_to_end(&mut buf).ok()?;
-    Some(buf)
-}
-
 // ===========================
 //  Table style data model
 // ===========================
@@ -3909,7 +3898,7 @@ fn parse_master_level_bullets(
         // Verify the part exists so a listed-but-missing rId yields None and the
         // bullet falls through to Bullet::Inherit (matches the variant's doc
         // comment), mirroring the master background resolver.
-        read_zip_bytes(zip, &path)?;
+        ooxml_common::zip::read_zip_bytes(zip, &path).ok()?;
         Some(path)
     };
 
@@ -4229,7 +4218,7 @@ fn parse_layout_placeholders(
             // Verify the part exists so a listed-but-missing rId yields None and
             // the bullet falls through to Bullet::Inherit (matches the variant's
             // doc comment), mirroring the master/layout background resolvers.
-            read_zip_bytes(zip, &path)?;
+            ooxml_common::zip::read_zip_bytes(zip, &path).ok()?;
             Some(path)
         };
         let layout_level_bullets: LevelBullets = child(sp, "txBody")
@@ -4292,7 +4281,7 @@ fn parse_layout_placeholders(
             let image_path = resolve_path(layout_dir, rel_target);
             // Verify the part exists so a dangling rId yields None (no inherited
             // fill), preserving the prior data-URL behaviour.
-            read_zip_bytes(zip, &image_path)?;
+            ooxml_common::zip::read_zip_bytes(zip, &image_path).ok()?;
             let mime_type = mime_from_ext(&image_path).to_owned();
             Some(InheritedBlipFill {
                 image_path,
@@ -4620,7 +4609,7 @@ fn parse_text_body(
         // Verify the part exists so a listed-but-missing rId yields None and the
         // bullet falls through to Bullet::Inherit (matches the variant's doc
         // comment), mirroring the slide picture-fill resolvers.
-        read_zip_bytes(zip, &path)?;
+        ooxml_common::zip::read_zip_bytes(zip, &path).ok()?;
         Some(path)
     };
     let own_level_bullets = extract_level_bullets(tx_body, theme, &mut resolve_slide_blip);
@@ -4863,7 +4852,7 @@ fn parse_paragraph(
         // Verify the part exists so a listed-but-missing rId yields None and the
         // bullet falls through to Bullet::Inherit (matches the variant's doc
         // comment), mirroring the slide picture-fill resolvers.
-        read_zip_bytes(zip, &path)?;
+        ooxml_common::zip::read_zip_bytes(zip, &path).ok()?;
         Some(path)
     };
     let bullet = match parse_bullet(p_pr, theme, &mut resolve_para_blip) {
@@ -6923,7 +6912,7 @@ fn svg_blip_path(
     let svg_rid = svg_blip_rid(blip)?;
     let svg_target = rels.get(&svg_rid)?;
     let svg_path = resolve_path(slide_dir, svg_target);
-    read_zip_bytes(zip, &svg_path)?;
+    ooxml_common::zip::read_zip_bytes(zip, &svg_path).ok()?;
     Some(svg_path)
 }
 
@@ -6961,7 +6950,7 @@ fn parse_picture(
         let r_id = attr_r(&blip, "embed")?;
         let rel_target = rels.get(&r_id)?;
         let path = resolve_path(slide_dir, rel_target);
-        let image_bytes = read_zip_bytes(zip, &path)?;
+        let image_bytes = ooxml_common::zip::read_zip_bytes(zip, &path).ok()?;
         // Intrinsic PNG size for the ink-fallback centering (None for non-PNG,
         // unchanged from the former png_size_from_data_url semantics).
         let size = png_size_from_bytes(&image_bytes);
@@ -7868,7 +7857,7 @@ fn parse_slide(
             // Resolve to the zip path; verify the part exists so a dangling
             // rId still yields None (the bg chain then falls through to the
             // next level), preserving the prior data-URL behaviour.
-            read_zip_bytes(zip, &path)?;
+            ooxml_common::zip::read_zip_bytes(zip, &path).ok()?;
             Some(path)
         };
         background = parse_background(n, theme, &mut resolve);
@@ -7882,7 +7871,7 @@ fn parse_slide(
                     let mut resolve = |rid: &str| -> Option<String> {
                         let target = layout_rels.get(rid)?;
                         let path = resolve_path(layout_dir, target);
-                        read_zip_bytes(zip, &path)?;
+                        ooxml_common::zip::read_zip_bytes(zip, &path).ok()?;
                         Some(path)
                     };
                     background = parse_background(n, theme, &mut resolve);
@@ -8142,7 +8131,7 @@ fn parse_sp_tree_node(
                     if t.cx > 0 && t.cy > 0 {
                         if let Some(target) = rels.get(rid) {
                             let image_path = resolve_path(slide_dir, target);
-                            if let Some(bytes) = read_zip_bytes(zip, &image_path) {
+                            if let Ok(bytes) = ooxml_common::zip::read_zip_bytes(zip, &image_path) {
                                 let mime_type = mime_from_ext(&image_path).to_owned();
                                 let (intrinsic_width_px, intrinsic_height_px) =
                                     match png_size_from_bytes(&bytes) {
@@ -8300,7 +8289,9 @@ fn parse_sp_tree_node(
                         if let Some(rid) = r_id {
                             if let Some(rel_target) = rels.get(&rid) {
                                 let image_path = resolve_path(slide_dir, rel_target);
-                                if let Some(image_bytes) = read_zip_bytes(zip, &image_path) {
+                                if let Ok(image_bytes) =
+                                    ooxml_common::zip::read_zip_bytes(zip, &image_path)
+                                {
                                     let mime_type = mime_from_ext(&image_path).to_owned();
                                     let (intrinsic_width_px, intrinsic_height_px) =
                                         match png_size_from_bytes(&image_bytes) {
@@ -9019,7 +9010,7 @@ fn build_master_bundle(
         let mut resolve = |rid: &str| -> Option<String> {
             let target = master_rels.get(rid)?;
             let path = resolve_path(&master_dir, target);
-            read_zip_bytes(zip, &path)?;
+            ooxml_common::zip::read_zip_bytes(zip, &path).ok()?;
             Some(path)
         };
         parse_background(c_sld, &theme, &mut resolve)
@@ -9325,7 +9316,7 @@ fn parse_presentation(data: &[u8]) -> Result<Presentation, Box<dyn std::error::E
                 let mut resolve = |rid: &str| -> Option<String> {
                     let target = bundle.master_rels.get(rid)?;
                     let path = resolve_path(&bundle.master_dir, target);
-                    read_zip_bytes(&mut zip, &path)?;
+                    ooxml_common::zip::read_zip_bytes(&mut zip, &path).ok()?;
                     Some(path)
                 };
                 parse_background(c_sld, &theme, &mut resolve)

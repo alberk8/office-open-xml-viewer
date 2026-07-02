@@ -7,9 +7,15 @@ import type { RenderPageOptions } from './types';
 
 /**
  * Options for {@link DocxScrollViewer}. Extends `RenderPageOptions` (per-page
- * render knobs) and `LoadOptions` (parse/worker knobs). See design §8.1.
+ * render knobs, minus `onTextRun`) and `LoadOptions` (parse/worker knobs). See
+ * design §8.1.
+ *
+ * `onTextRun` is omitted deliberately: the viewer drives it internally per
+ * mounted slot to build the optional per-page selection overlay (gated by
+ * `enableTextSelection`), so exposing it here would let a caller's callback be
+ * silently overridden.
  */
-export interface DocxScrollViewerOptions extends RenderPageOptions, LoadOptions {
+export interface DocxScrollViewerOptions extends Omit<RenderPageOptions, 'onTextRun'>, LoadOptions {
   /** Base fit width in CSS px → base zoom scale. Default: the container's width
    *  at first non-zero layout (design §7/§11 zero-width deferral). */
   width?: number;
@@ -38,8 +44,12 @@ export interface DocxScrollViewerOptions extends RenderPageOptions, LoadOptions 
    *  `computeVisibleRange` (the first page intersecting the viewport top,
    *  EXCLUDING overscan). */
   onVisiblePageChange?: (topIndex: number, total: number) => void;
-  /** Error callback. When set, `load()` invokes it and resolves; otherwise the
-   *  error is rethrown (shared viewer error contract). */
+  /** Error callback. When set, `load()` invokes it and resolves (otherwise the
+   *  error is rethrown — shared viewer error contract). It ALSO fires for async
+   *  per-slot render failures (both main `renderPage` and worker
+   *  `renderPageToBitmap` rejections); a failed page is left blank rather than
+   *  crashing the loop. Without an `onError`, render failures are logged via
+   *  `console.error` so they are never fully silent. */
   onError?: (err: Error) => void;
 }
 
@@ -52,7 +62,11 @@ interface PageSlot {
   textLayer: HTMLDivElement | null;
   /** page index this slot is currently rendering / has rendered, or -1 when free. */
   renderedPage: number;
-  /** worker-mode: the last ImageBitmap painted into this slot, to `.close()` on recycle. */
+  /** worker-mode: a transient hold on a just-received ImageBitmap, set only
+   *  between receipt from the worker and its `transferFromImageBitmap` (which
+   *  consumes it, after which we null the field). Its purpose is the throw path:
+   *  if the transfer throws, `destroy()`/`_recycleSlot` can still find and
+   *  `.close()` the bitmap. Normally null once transfer completes. */
   bitmap: ImageBitmap | null;
   /** bitmaprenderer ctx (worker mode), grabbed once per canvas. */
   bitmapCtx: ImageBitmapRenderingContext | null;
@@ -89,10 +103,26 @@ export class DocxScrollViewer {
   private _lastRange: VisibleRange | null = null;
   private _lastTopIndex = -1;
   private _scrollListener: (() => void) | null = null;
+  /** Set by `destroy()`. Async render callbacks (main + worker) check it before
+   *  reporting an error so a rejection that lands after teardown is swallowed
+   *  rather than surfaced to a `onError` on a dead viewer. */
+  private _destroyed = false;
   /** Worker mode: page indices whose bitmap render is currently dispatched to the
    *  engine. Coalesces a scroll storm — we never dispatch a second render for a
    *  page whose first is still in flight — and lets us drop pages that scrolled
-   *  out of the window before dispatch (design §11 worker coalescing). */
+   *  out of the window before dispatch (design §11 worker coalescing).
+   *
+   *  T4 ZOOM HAZARD (must fix when `setScale` lands): coalescing keys on page
+   *  INDEX only, with no notion of the scale a dispatch was made at. When
+   *  `setScale` changes the zoom mid-flight, an in-flight bitmap dispatched at the
+   *  OLD scale can still pass the on-resolution identity check (`_slots.get(i) ===
+   *  slot && slot.renderedPage === i`) if the same slot is still mounted for page
+   *  `i`, and get painted at the WRONG resolution — with no re-dispatch, because
+   *  the index is (or was) already in this Set. T4 MUST either (a) add a render
+   *  epoch/generation bumped on every `setScale` and fold it into the in-flight
+   *  identity (dispatch at epoch E, drop on resolve if the live epoch moved), or
+   *  (b) on scale change clear `_bitmapInFlight` and force-redispatch the mounted
+   *  window. A same-index Set alone is not enough once scale is mutable. */
   private readonly _bitmapInFlight = new Set<number>();
 
   constructor(container: HTMLElement, opts: DocxScrollViewerOptions = {}) {
@@ -157,7 +187,11 @@ export class DocxScrollViewer {
         math: this._opts.math,
         mode: this._mode,
       });
-      // Layout + first render wired in T2/T3.
+      // Lay out + mount the first window now that the engine exists (mirrors the
+      // injected-engine path in the constructor). relayout() is idempotent and
+      // defers under a zero-width container — the resize path (T6) re-runs it
+      // once width appears.
+      this.relayout();
     } catch (err) {
       const e = err instanceof Error ? err : new Error(String(err));
       if (this._opts.onError) {
@@ -276,7 +310,7 @@ export class DocxScrollViewer {
         const slot = this._acquireSlot();
         this._positionSlot(slot, i, r);
         this._slots.set(i, slot);
-        this._renderSlot(i, slot); // T3
+        this._renderSlot(i, slot);
       } else {
         // Re-position (offsets shift after a spacer/height change).
         this._positionSlot(this._slots.get(i)!, i, r);
@@ -292,7 +326,7 @@ export class DocxScrollViewer {
   private _acquireSlot(): PageSlot {
     const reused = this._free.pop();
     if (reused) {
-      reused.renderedPage = -1;
+      // _recycleSlot already reset renderedPage to -1 before pooling this slot.
       this._scrollHost.appendChild(reused.wrapper);
       return reused;
     }
@@ -302,7 +336,6 @@ export class DocxScrollViewer {
     canvas.style.cssText = 'display:block;background:#fff;';
     wrapper.appendChild(canvas);
     let textLayer: HTMLDivElement | null = null;
-    const bitmapCtx: ImageBitmapRenderingContext | null = null;
     if (this._opts.enableTextSelection) {
       textLayer = document.createElement('div');
       textLayer.style.cssText =
@@ -311,7 +344,7 @@ export class DocxScrollViewer {
       wrapper.appendChild(textLayer);
     }
     this._scrollHost.appendChild(wrapper);
-    const slot: PageSlot = { wrapper, canvas, textLayer, renderedPage: -1, bitmap: null, bitmapCtx };
+    const slot: PageSlot = { wrapper, canvas, textLayer, renderedPage: -1, bitmap: null, bitmapCtx: null };
     return slot;
   }
 
@@ -392,8 +425,17 @@ export class DocxScrollViewer {
         }
       })
       .catch((err: unknown) => {
-        this._opts.onError?.(err instanceof Error ? err : new Error(String(err)));
+        this._reportRenderError(err);
       });
+  }
+
+  /** Route an async render failure to `onError`, or `console.error` when none is
+   *  set (so failures are never fully silent), and never after teardown. */
+  private _reportRenderError(err: unknown): void {
+    if (this._destroyed) return;
+    const e = err instanceof Error ? err : new Error(String(err));
+    if (this._opts.onError) this._opts.onError(e);
+    else console.error('[ooxml] DocxScrollViewer render failed:', e);
   }
 
   /**
@@ -419,7 +461,9 @@ export class DocxScrollViewer {
     // Grab the bitmaprenderer ctx ONCE per canvas — a canvas holds one context
     // type for its lifetime. A recycled canvas keeps the ctx grabbed on its
     // first worker render (bitmapCtx survives recycle), so we never re-getContext
-    // a canvas that already has one (which would throw a type-flip in the DOM).
+    // a canvas that already has one. (getContext for a conflicting type returns
+    // null rather than throwing; caching the first non-null ctx avoids relying on
+    // that and skips redundant lookups.)
     if (!slot.bitmapCtx) {
       slot.bitmapCtx = slot.canvas.getContext('bitmaprenderer') as ImageBitmapRenderingContext | null;
     }
@@ -427,6 +471,7 @@ export class DocxScrollViewer {
       const bmp = await this._doc!.renderPageToBitmap(i, {
         width: widthPx,
         dpr,
+        defaultTextColor: this._opts.defaultTextColor,
         showTrackChanges: this._opts.showTrackChanges,
       });
       // The slot may have recycled to a different page while the worker ran, or
@@ -436,10 +481,12 @@ export class DocxScrollViewer {
         bmp.close();
         return;
       }
-      // Close the slot's previous bitmap, then hold the new one BEFORE transfer so
-      // a concurrent recycle between now and transfer can close it (the recycle
-      // path closes slot.bitmap). transferFromImageBitmap consumes the bitmap, so
-      // we null the field immediately after — leaving nothing to double-close.
+      // Close any prior bitmap, then hold the new one on the slot BEFORE the
+      // transfer. JS is single-threaded so nothing recycles between here and the
+      // transfer; the hold's real value is the throw path — if
+      // transferFromImageBitmap throws, `destroy()`/`_recycleSlot` can still find
+      // and close this bitmap. transferFromImageBitmap consumes the bitmap, so we
+      // null the field immediately after — leaving nothing to double-close.
       if (slot.bitmap) slot.bitmap.close();
       slot.bitmap = bmp;
       slot.canvas.width = bmp.width;
@@ -449,7 +496,7 @@ export class DocxScrollViewer {
       slot.bitmapCtx?.transferFromImageBitmap(bmp);
       slot.bitmap = null; // transfer consumed it
     } catch (err) {
-      this._opts.onError?.(err instanceof Error ? err : new Error(String(err)));
+      this._reportRenderError(err);
     } finally {
       this._bitmapInFlight.delete(i);
       // If a LIVE slot for page `i` still awaits its render (page `i` re-mounted
@@ -479,6 +526,7 @@ export class DocxScrollViewer {
    * owns its lifecycle. Per-slot worker ImageBitmaps are closed on recycle.
    */
   destroy(): void {
+    this._destroyed = true;
     if (this._scrollListener) {
       this._scrollHost.removeEventListener('scroll', this._scrollListener);
       this._scrollListener = null;

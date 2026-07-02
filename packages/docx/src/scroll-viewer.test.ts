@@ -1,8 +1,12 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { DocxScrollViewer } from './scroll-viewer.js';
+import { DocxDocument } from './document.js';
 import { installDom, makeContainer, FakeDocxEngine, type FakeEl } from './scroll-viewer-test-dom.js';
 
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => {
+  vi.unstubAllGlobals();
+  vi.restoreAllMocks();
+});
 
 describe('DocxScrollViewer — skeleton (T1)', () => {
   it('builds the wrapper → scrollHost → spacer DOM inside the container', () => {
@@ -253,6 +257,40 @@ describe('DocxScrollViewer — rendering (T3)', () => {
     v.destroy();
   });
 
+  it('main mode: passes each page its OWN px width for MIXED page sizes (uniform px-per-pt scale, §7)', () => {
+    installDom();
+    const container = makeContainer(200, 400);
+    // Mixed physical widths: page 0 is 100pt wide, page 1 is 200pt wide. The
+    // uniform document scale is fixed by fitting the FIRST page to the container
+    // (base scale = 200 / (100 * PT_TO_PX) = 1.5), so page 1 — twice as wide —
+    // must render at TWICE the px width, not the same fit-width. A vacuous impl
+    // that hands every page a constant fit-width would give [200, 200].
+    const engine = new FakeDocxEngine(2, [
+      { widthPt: 100, heightPt: 100 },
+      { widthPt: 200, heightPt: 100 },
+    ]);
+    const v = new DocxScrollViewer(container as unknown as HTMLElement, {
+      document: engine.asDoc(),
+      gap: 10,
+    });
+    const scrollHost = (container.children[0] as FakeEl).children[0] as FakeEl;
+    scrollHost.clientHeight = 400;
+    scrollHost.clientWidth = 200;
+    v.relayout();
+    // Both pages mount (page 0 height px = 100*PT_TO_PX*1.5 = 200; page 1 sits at
+    // top 210 and intersects the 400px viewport), so both get exactly one render.
+    const mounted = v.mountedPageIndicesForTest().sort((a, b) => a - b);
+    expect(mounted).toEqual([0, 1]);
+    // Per-page px widths in call order: page 0 → 200, page 1 → 400.
+    const widths = engine.renderCalls
+      .slice()
+      .sort((a, b) => a.page - b.page)
+      .map((c) => c.width ?? NaN);
+    expect(widths[0]).toBeCloseTo(200, 3);
+    expect(widths[1]).toBeCloseTo(400, 3);
+    v.destroy();
+  });
+
   it('does not re-render a mounted slot for the same page on a no-op scroll', () => {
     installDom();
     const container = makeContainer(200, 400);
@@ -414,6 +452,10 @@ describe('DocxScrollViewer — rendering (T3)', () => {
     scrollHost.scrollTop = 0;
     scrollHost.dispatch('scroll');
     expect(v.mountedPageIndicesForTest()).toContain(0);
+    // Coalescing pin: page 0's render is STILL in flight (initial deferred call
+    // not yet resolved), so the re-mount must NOT dispatch a second render for
+    // page 0 — the in-flight guard swallows it. Exactly one dispatch so far.
+    expect(dispatchesForPage0()).toBe(1);
     // The initial (now stale) render resolves — the orphan is dropped and the
     // re-mounted slot's render is (re-)dispatched.
     page0Initial!.resolve();
@@ -430,6 +472,60 @@ describe('DocxScrollViewer — rendering (T3)', () => {
     expect(slot0).toBeDefined();
     const canvas0 = slot0!.children.find((k) => k.tag === 'canvas') as FakeEl;
     expect(canvas0._bitmapCtx?.lastBitmap).toBeTruthy(); // painted, not blank
+    v.destroy();
+  });
+
+  it('worker mode: destroy() mid-flight closes the resolving bitmap and does not fire onError post-destroy', async () => {
+    installDom();
+    const container = makeContainer(200, 400);
+    // Deferred so a render is genuinely in flight when we destroy the viewer.
+    const engine = new FakeDocxEngine(50, [{ widthPt: 100, heightPt: 200 }], 'worker', true);
+    const onError = vi.fn();
+    const v = new DocxScrollViewer(container as unknown as HTMLElement, {
+      document: engine.asDoc(),
+      gap: 10,
+      onError,
+    });
+    const scrollHost = (container.children[0] as FakeEl).children[0] as FakeEl;
+    scrollHost.clientHeight = 400;
+    scrollHost.clientWidth = 200;
+    v.relayout();
+    const page0 = engine.bitmapCalls.find((c) => c.page === 0);
+    expect(page0).toBeDefined();
+    // Tear down while page 0's render is still in flight. destroy() recycles the
+    // slot (no bitmap held yet — none received), so the on-resolution stale-check
+    // must close the orphan; the identity guard fails (slot no longer live).
+    v.destroy();
+    const bmp0 = engine.createdBitmaps[engine.bitmapCalls.indexOf(page0!)];
+    page0!.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(bmp0.close.mock.calls.length).toBeGreaterThan(0); // orphan closed, no leak
+    expect(onError).not.toHaveBeenCalled(); // no error surfaced after teardown
+  });
+});
+
+describe('DocxScrollViewer — self-load path (T7 story)', () => {
+  it('load(url) lays out and mounts the first window (relayout wired into load)', async () => {
+    installDom();
+    const container = makeContainer(200, 400);
+    // Mock the static loader so load() resolves to a fake engine WITHOUT touching
+    // a real Worker / WASM. The viewer must call relayout() after assignment so a
+    // self-loaded (non-injected) viewer is not left blank (I-2).
+    const engine = new FakeDocxEngine(10, [{ widthPt: 100, heightPt: 200 }]);
+    const loadSpy = vi.spyOn(DocxDocument, 'load').mockResolvedValue(engine.asDoc());
+    const v = new DocxScrollViewer(container as unknown as HTMLElement, { gap: 10 });
+    const scrollHost = (container.children[0] as FakeEl).children[0] as FakeEl;
+    scrollHost.clientHeight = 400;
+    scrollHost.clientWidth = 200;
+    await v.load('sample.docx');
+    expect(loadSpy).toHaveBeenCalledTimes(1);
+    // Layout happened: slots mounted and the spacer was sized.
+    expect(v.mountedPageIndicesForTest().length).toBeGreaterThan(0);
+    const spacer = scrollHost.children[0] as FakeEl;
+    expect(parseFloat(spacer.style.height)).toBeGreaterThan(0);
+    // The mounted pages were actually rendered (main mode → renderPage).
+    expect(engine.renderCalls.length).toBeGreaterThan(0);
     v.destroy();
   });
 });

@@ -155,7 +155,12 @@ pub struct HeaderFooter {
 /// `orient` is intentionally omitted: Word swaps `w`/`h` for a landscape page,
 /// so the verbatim `w`/`h` already give the correct dims — no orientation flag
 /// is needed to size the page.
-#[derive(Serialize, Debug, Clone, Default)]
+///
+/// No `Default` derive on purpose: zeros ≠ spec defaults; a derived default is an
+/// all-zeros geometry (0×0 page, zero margins), which is NOT the ECMA-376 spec
+/// default (US Letter portrait, 1" margins, 0.5" header/footer). Use
+/// `spec_default_geom()` (parser.rs) when a spec-default geometry is needed.
+#[derive(Serialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct SectionGeom {
     /// page width in pt (converted from twips)

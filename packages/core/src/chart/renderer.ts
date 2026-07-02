@@ -1462,21 +1462,22 @@ function renderRadarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: C
   const cats = chartCategories(chart);
   const n = cats.length; if (n < 3) return;
 
-  const titleFontPx = chart.title ? chartTitleFontPx(chart, h, ptToPx) : 0;
-  const titleTopPad    = chart.title ? h * 0.035 : 0;
-  const titleBottomPad = chart.title ? h * 0.035 : 0;
-  const titleH  = chart.title ? titleFontPx + titleTopPad + titleBottomPad : 0;
-  const leg = legendLayout(chart, w, h);
-  const legRightW  = leg?.side === 'r' ? leg.reserveW : 0;
-  const legLeftW   = leg?.side === 'l' ? leg.reserveW : 0;
-  const legTopH    = leg?.side === 't' ? leg.reserveH : 0;
-  const legBottomH = leg?.side === 'b' ? leg.reserveH : 0;
-  drawChartTitle(ctx, chart, x, y + titleTopPad, w, titleFontPx);
+  // Shared frame (radial form). Radar uses title pads 0.035 / 0.035 and the
+  // default 0.22 side-legend reserve (unlike pie's 0.28). Params keep pixels
+  // unchanged.
+  const frame = computeChartFrame(chart, x, y, w, h, ptToPx, {
+    titleTopPadFrac: 0.035,
+    titleBottomPadFrac: 0.035,
+    legendSideReserveFrac: 0.22,
+    radialGapFrac: 0.02,
+  });
+  const leg = frame.legend;
+  const titleFontPx = frame.title.fontPx;
+  drawChartTitle(ctx, chart, x, y + frame.title.topPad, w, titleFontPx);
 
-  const pw = w - legRightW - legLeftW;
-  const ph = h - titleH - legTopH - legBottomH - h * 0.02;
-  const cx2 = x + legLeftW + pw / 2;
-  const cy2 = y + titleH + legTopH + h * 0.02 + ph / 2;
+  const { px0: plotLeft, py0: plotTop, pw, ph } = frame.plotRect;
+  const cx2 = frame.center.cx;
+  const cy2 = frame.center.cy;
   const rd  = Math.min(pw, ph) * 0.38;
 
   let dataMax = 0;
@@ -1608,7 +1609,7 @@ function renderRadarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: C
   drawLegendForLayout(
     ctx, chart, leg,
     x, y, w, h,
-    cx2 - pw / 2, cy2 - ph / 2, pw, ph, titleH + 2,
+    plotLeft, plotTop, pw, ph, frame.title.bandH + 2,
   );
 }
 

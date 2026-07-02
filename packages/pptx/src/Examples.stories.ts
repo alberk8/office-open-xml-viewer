@@ -137,10 +137,12 @@ export const ScrollViewer: LayoutStory = {
       gap: 16,
       paddingTop: 24, // desk margin above the first slide (defaults to gap when omitted)
       paddingBottom: 24, // desk margin below the last slide
+      paddingLeft: 24, // horizontal desk gutter left of the slides
+      paddingRight: 24, // horizontal desk gutter right of the slides
       overscan: 1,
       enableTextSelection: true,
       useGoogleFonts: true,
-      background: '#525659', // desk gray behind/between slides (like a slide viewer)
+      background: '#f5f5f5', // light desk behind/between slides (matches the ScrollView recipe)
       onVisibleSlideChange: (top, total) => {
         status.textContent = `Slide ${top + 1} / ${total}`;
       },

@@ -6774,38 +6774,52 @@ export function renderShapeText(
     b: ShapeText,
     familyEa?: string | null | undefined,
   ): { lineH: number; baselineOffset: number } => {
-    ctx.font = buildFont(bold, italic, fontPx, family ?? null, fontFamilyClasses);
+    // Floor the single-line box by the TALLEST design line among the run's
+    // declared faces (ascii §17.3.2.26 + eastAsia). The common Japanese encoding
+    // sets Meiryo (1.596×em) / Sakkal Majalla (1.3965×em) ONLY on
+    // `<w:rFonts w:eastAsia>` while `<w:rFonts w:ascii>` stays an untabled Latin
+    // default, so an ascii-only floor would leave the box flat
+    // (intendedSingleLinePx(untabledAscii)=0). This is a FLOOR, not a replace —
+    // intendedSingleLinePx returns 0 for every untabled face, so non-Meiryo/
+    // Sakkal text boxes are unchanged. Mirrors the xlsx shape-text floor
+    // (PR #646) and the docx BODY per-eastAsia-segment floor. It is NOT per-glyph
+    // CJK font switching (a larger change deferred here).
+    const asciiIntended = intendedSingleLinePx(family ?? null, fontPx);
+    const eaIntended = intendedSingleLinePx(familyEa ?? null, fontPx);
+    const intended = Math.max(asciiIntended, eaIntended);
+    // Measure the glyph metrics on the RENDERING face — the one whose design line
+    // wins the floor. When the eastAsia face is tabled and taller than the ascii
+    // box (the CJK glyphs are the tallest ink on the line), read c.ascent/descent
+    // from `familyEa`, not the untabled ascii default, so the baseline is placed
+    // relative to the CJK ink — mirroring the body's `line.ascent` being the
+    // eastAsia-resolved corrected ascent. If the ascii face wins (Latin line, or
+    // both untabled) keep measuring ascii, so an all-untabled line is byte-for-
+    // byte unchanged from before this change.
+    const measureFamily = eaIntended > asciiIntended ? (familyEa ?? null) : (family ?? null);
+    ctx.font = buildFont(bold, italic, fontPx, measureFamily, fontFamilyClasses);
     const m = ctx.measureText('Mg');
     const rawAsc = m.fontBoundingBoxAscent ?? m.actualBoundingBoxAscent ?? fontPx * 0.8;
     const rawDesc = m.fontBoundingBoxDescent ?? m.actualBoundingBoxDescent ?? fontPx * 0.2;
-    const c = correctLineMetrics(family ?? null, fontPx, rawAsc, rawDesc);
-    // Floor the single-line box by the TALLEST design line among the run's
-    // declared faces (ascii §17.3.2.26 + eastAsia). The canvas measurement /
-    // correctLineMetrics above stay on the ascii `family` (the substituted-face
-    // natural box), but the line box must fit whichever face renders the glyphs:
-    // the common Japanese encoding sets Meiryo (1.596×em) / Sakkal Majalla
-    // (1.3965×em) ONLY on `<w:rFonts w:eastAsia>` while `<w:rFonts w:ascii>`
-    // stays an untabled Latin default, so an ascii-only floor would leave the
-    // box flat (intendedSingleLinePx(untabledAscii)=0). This is a FLOOR, not a
-    // replace — intendedSingleLinePx returns 0 for every untabled face, so
-    // non-Meiryo/Sakkal text boxes are unchanged. Mirrors the xlsx shape-text
-    // floor (PR #646) and the docx BODY per-eastAsia-segment floor. It is NOT
-    // per-glyph CJK font switching (a larger change deferred here).
-    const intended = Math.max(
-      intendedSingleLinePx(family ?? null, fontPx),
-      intendedSingleLinePx(familyEa ?? null, fontPx),
-    );
-    const natural = Math.max(c.ascent + c.descent, intended);
+    const c = correctLineMetrics(measureFamily, fontPx, rawAsc, rawDesc);
+    // The glyph box (measured, corrected) is kept SEPARATE from the floored line
+    // box: `intended` may inflate `lineH` above the glyph box, and Word centers
+    // the glyph box within that expanded box (half-leading) rather than pinning
+    // the ink to the top. Mirrors the body's `glyphNatural = ascent + descent`
+    // (lineBoxHeight) vs the floor-inflated `natural`.
+    const glyphNatural = c.ascent + c.descent;
     const ls: LineSpacing | null = b.lineSpacingRule
       ? { value: b.lineSpacingVal ?? 0, rule: b.lineSpacingRule as 'auto' | 'exact' | 'atLeast' }
       : null;
     const lineH = lineBoxHeight(ls, c.ascent, c.descent, scale, undefined, false, intended, false);
-    // Word centers the font's natural line within the expanded line box
-    // (half-leading): when line-spacing grows the box (auto 1.15×, atLeast,
-    // exact taller than natural) the extra space is split above and below, so
-    // the baseline is (lineH − natural)/2 below the box top plus the ascent.
-    // With no expansion (natural == lineH) this reduces to c.ascent.
-    const baselineOffset = (lineH - natural) / 2 + c.ascent;
+    // Word centers the font's GLYPH box within the (possibly expanded) line box
+    // (half-leading): when line-spacing or the design-line floor grows the box
+    // the extra space is split above and below the glyph box, so the baseline is
+    // (lineH − glyphNatural)/2 below the box top plus the ascent. With no
+    // expansion (glyphNatural == lineH) this reduces to c.ascent. This is the
+    // SAME math as the body draw baseline (naturalLineH = ascent+descent, NOT
+    // floor-inflated) — so an inflated box floats the glyphs centered with real
+    // half-leading instead of top-pinning them.
+    const baselineOffset = (lineH - glyphNatural) / 2 + c.ascent;
     return { lineH, baselineOffset };
   };
   const layouts: BlockLayout[] = blocks.map((b) => {

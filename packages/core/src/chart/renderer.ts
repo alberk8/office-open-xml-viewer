@@ -4,6 +4,14 @@
 // extensions (valMin-aware axis, plotAreaBg, dataPointColors, waterfall).
 
 import type { ChartModel, ChartRect, ChartSeries } from '../types/chart';
+import {
+  computeChartFrame,
+  chartTitleBand,
+  chartTitleFontPx as chartTitleFontPxShared,
+  chartLegendReserve,
+  chartLegendBands,
+  chartAxisTitleBands,
+} from './layout.js';
 import { niceStep, valueAxisScale } from './axis-scale.js';
 import { axisLineWidthPx, resolveAxisLine, isCrossBetween } from './axis-style.js';
 import { formatChartVal, formatChartValWithCode } from './chart-number-format.js';
@@ -548,19 +556,23 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
   // Honor the XML-specified title font size when present; otherwise fall back
   // to the proportional heuristic. Reserve the title band based on the actual
   // drawn height so the plot shrinks to avoid overlap.
-  const titleFontPx = chart.title ? chartTitleFontPx(chart, h, ptToPx) : 0;
-  const titleTopPad    = chart.title ? h * 0.02 : 0;
-  const titleBottomPad = chart.title ? h * 0.025 : 0;
-  const titleH   = chart.title ? titleFontPx + titleTopPad + titleBottomPad : 0;
-  const leg = legendLayout(chart, w, h);
-  const legRightW  = leg?.side === 'r' ? leg.reserveW : 0;
-  const legLeftW   = leg?.side === 'l' ? leg.reserveW : 0;
-  const legTopH    = leg?.side === 't' ? leg.reserveH : 0;
-  const legBottomH = leg?.side === 'b' ? leg.reserveH : 0;
+  // Shared frame bands (title / legend / axis-title). The bar family's title
+  // pad fractions (0.02 / 0.025) and default 0.22 side-legend reserve are passed
+  // as params, so the pixels are unchanged from the old inline math.
+  const titleBand = chartTitleBand(chart, h, ptToPx, 0.02, 0.025);
+  const titleFontPx = titleBand.fontPx;
+  const titleTopPad = titleBand.topPad;
+  const titleH = titleBand.bandH;
+  const leg = chartLegendReserve(chart, w, h, 0.22);
+  const { legRightW, legLeftW, legTopH, legBottomH } = chartLegendBands(leg);
   // Axis-title bands sized from the *actual* title font (honoring XML @sz, e.g.
   // sample-30's 18pt) plus a small gap, so big titles get a wide enough gutter
   // and never collide with the tick labels.
-  const { catTitlePx, valTitlePx, catTitleH, valTitleW } = axisTitleLayout(chart, w, h, ptToPx);
+  const axBands = chartAxisTitleBands(chart, w, h, ptToPx);
+  const catTitlePx = axBands.catFontPx;
+  const valTitlePx = axBands.valFontPx;
+  const catTitleH = axBands.catBandH;
+  const valTitleW = axBands.valBandW;
   // Value-axis scales are computed up-front (before `pad`) so the side gutters
   // can be sized to the actual tick-label widths instead of a fixed fraction of
   // the chart width — short numeric labels otherwise leave a big empty gap
@@ -674,18 +686,15 @@ function renderBarChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Cha
   // and the explicit `x=0.184, w=0.797` keeps the actual bars on the left.
   // `layoutTarget="inner"` (default) means the rectangle covers the inner
   // data region; "outer" includes axes/labels. We treat both identically
-  // because the inner padding stays the same either way.
-  const pml = chart.plotAreaManualLayout;
-  let px0: number, py0: number, pw: number, ph: number;
-  if (pml && pml.w != null && pml.h != null) {
-    px0 = x + pml.x * w;
-    py0 = y + pml.y * h;
-    pw  = pml.w * w;
-    ph  = pml.h * h;
-  } else {
-    px0 = x + pad.l; py0 = y + pad.t;
-    pw  = w - pad.l - pad.r; ph = h - pad.t - pad.b;
-  }
+  // because the inner padding stays the same either way. computeChartFrame
+  // applies the pad → plot rect and the manual-layout override.
+  const { plotRect: { px0, py0, pw, ph } } = computeChartFrame(chart, x, y, w, h, ptToPx, {
+    titleTopPadFrac: 0.02,
+    titleBottomPadFrac: 0.025,
+    legendSideReserveFrac: 0.22,
+    pad,
+    honorPlotAreaManualLayout: true,
+  });
   if (pw <= 0 || ph <= 0) return;
 
   if (chart.plotAreaBg) {

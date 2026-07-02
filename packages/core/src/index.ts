@@ -41,6 +41,11 @@ export type {
 } from './types/chart';
 export type { LoadOptions } from './types/load-options';
 export { preloadGoogleFonts, type FontPreloadEntry } from './fonts/preload';
+// Shared Office-font → Google-Fonts substitute registry (Calibri → Carlito,
+// Cambria → Caladea, popular web fonts, Arabic Noto fallbacks). Each package
+// spreads this into its own map; script-fallback Noto faces live in
+// SCRIPT_GOOGLE_FONTS below.
+export { GOOGLE_FONT_SUBSTITUTES } from './fonts/google-fonts';
 export {
   classifyCjkFont,
   classifyFontGeneric,
@@ -115,6 +120,11 @@ export {
   metafileRasterSize,
   type SrcRect,
 } from './image/crop';
+// Shared vector-vs-raster blip gate: prefer the Microsoft asvg:svgBlip vector
+// original except when an <a:srcRect> crop is present (then the raster's native
+// pixel grid is required for the fractional crop math). Used by all three
+// renderers' picture-decode paths.
+export { preferVectorBlip } from './image/blip-gate';
 // ECMA-376 §20.1.9 spec-driven preset geometry engine (presets.json from
 // presetShapeDefinitions.xml). Coexists with the legacy hand-rolled
 // `buildShapePath` above, which the pptx renderer still uses as a silhouette /
@@ -218,6 +228,10 @@ export {
   getDefaultBidiEngine,
   setBidiEngine,
   resetBidiEngine,
+  RTL_GATE,
+  hasStrongRtl,
+  OBJECT_PLACEHOLDER,
+  buildVisualOrder,
   type BidiEngine,
   type BaseDirection,
   type BidiClass,

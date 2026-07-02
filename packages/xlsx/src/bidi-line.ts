@@ -7,7 +7,13 @@
 // string is drawn in one fillText, so Canvas resolves any residual
 // intra-run bidi.
 
-import { getDefaultBidiEngine, resolveBaseDirection } from '@silurus/ooxml-core';
+import {
+  getDefaultBidiEngine,
+  resolveBaseDirection,
+  hasStrongRtl,
+  OBJECT_PLACEHOLDER,
+  buildVisualOrder,
+} from '@silurus/ooxml-core';
 
 /**
  * Resolve a cell's base direction from its xf @readingOrder
@@ -18,14 +24,6 @@ export function cellBaseRtl(readingOrder: number | undefined, text: string): boo
   if (readingOrder === 1) return false;
   return resolveBaseDirection(undefined, text) === 'rtl';
 }
-
-/** Strong-RTL scripts (Hebrew, Arabic, Syriac, Thaana, NKo, Samaritan, …) +
- *  Arabic presentation forms. Used only as a cheap gate to decide whether a
- *  line needs the (exact) bidi pass at all — never for ordering itself. */
-const RTL_GATE =
-  // strong-RTL blocks incl. presentation forms, Plane-1 RTL blocks, and
-  // RTL-implicating controls (RLM/RLE/RLO/RLI).
-  /[\u0590-\u08FF\uFB1D-\uFDFF\uFE70-\uFEFF\u200F\u202B\u202E\u2067]|[\u{10800}-\u{10FFF}\u{1E800}-\u{1EFFF}]/u;
 
 /** A laid-out segment as seen here: only its optional text matters for bidi.
  *  Typed as `unknown` element so the renderer's LayoutSeg union (whose image /
@@ -39,7 +37,7 @@ const segText = (s: unknown): string | undefined => {
 export function segmentsHaveRtl(segments: readonly unknown[]): boolean {
   for (const s of segments) {
     const t = segText(s);
-    if (t !== undefined && RTL_GATE.test(t)) return true;
+    if (t !== undefined && hasStrongRtl(t)) return true;
   }
   return false;
 }
@@ -57,7 +55,7 @@ export function resolveCellBidi(
   readingOrder: number | undefined,
   text: string,
 ): { needBidi: boolean; baseRtl: boolean } {
-  const needBidi = readingOrder === 2 || RTL_GATE.test(text);
+  const needBidi = readingOrder === 2 || hasStrongRtl(text);
   return { needBidi, baseRtl: needBidi && cellBaseRtl(readingOrder, text) };
 }
 
@@ -67,8 +65,6 @@ export interface LineVisualOrder {
   /** Per-LOGICAL-index resolved direction (true = RTL) for `ctx.direction`. */
   rtl: boolean[];
 }
-
-const OBJECT_PLACEHOLDER = '￼'; // OBJECT REPLACEMENT CHARACTER (bidi class ON)
 
 /**
  * Compute the visual draw order of a line's segments under `baseRtl`. Text
@@ -93,19 +89,13 @@ export function computeLineVisualOrder(
     full += t.length > 0 ? t : OBJECT_PLACEHOLDER;
   }
 
-  const engine = getDefaultBidiEngine();
-  const { levels, paragraphLevel } = engine.computeLevels(full, baseRtl ? 'rtl' : 'ltr');
+  const { levels, paragraphLevel } = getDefaultBidiEngine().computeLevels(
+    full,
+    baseRtl ? 'rtl' : 'ltr',
+  );
 
-  const segLevels = new Uint8Array(n);
-  for (let i = 0; i < n; i++) {
-    const lvl = levels[segStart[i]];
-    // 255 = removed by X9 (no glyph); fall back to the paragraph level.
-    segLevels[i] = lvl === 255 ? paragraphLevel : lvl;
-  }
-
-  const order = engine.reorderVisual(segLevels, 0, n);
+  const { order, segLevels } = buildVisualOrder(levels, paragraphLevel, segStart);
   const rtl: boolean[] = new Array(n);
   for (let i = 0; i < n; i++) rtl[i] = (segLevels[i] & 1) === 1;
   return { order, rtl };
 }
-

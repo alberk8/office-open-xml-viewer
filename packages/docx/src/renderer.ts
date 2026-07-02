@@ -6773,6 +6773,14 @@ export function renderShapeText(
     fontPx: number,
     b: ShapeText,
     familyEa?: string | null | undefined,
+    // Explicit design-line floor (px). The body floors the line box by the MAX
+    // intendedSingleLinePx across ALL segments on the line (~5684), not just the
+    // tallest one, because a shorter-but-tabled face (e.g. a small Meiryo run
+    // after a large untabled-ascii run) still raises the box. The rich call site
+    // passes that all-runs max here; when omitted (the single-format path) the
+    // floor falls back to this run's own ascii+eastAsia faces. Either way it is a
+    // FLOOR (0 for all-untabled lines ⇒ unchanged).
+    lineFloorPx?: number,
   ): { lineH: number; baselineOffset: number } => {
     // Floor the single-line box by the TALLEST design line among the run's
     // declared faces (ascii §17.3.2.26 + eastAsia). The common Japanese encoding
@@ -6786,7 +6794,10 @@ export function renderShapeText(
     // CJK font switching (a larger change deferred here).
     const asciiIntended = intendedSingleLinePx(family ?? null, fontPx);
     const eaIntended = intendedSingleLinePx(familyEa ?? null, fontPx);
-    const intended = Math.max(asciiIntended, eaIntended);
+    // Use the explicit all-runs floor when provided (rich path); else fall back
+    // to this run's own faces (single-format path). Both are a floor, so the
+    // per-run ascii/eastAsia max is still folded in for the fallback.
+    const intended = lineFloorPx ?? Math.max(asciiIntended, eaIntended);
     // Measure the glyph metrics on the RENDERING face — the one whose design line
     // wins the floor. When the eastAsia face is tabled and taller than the ascii
     // box (the CJK glyphs are the tallest ink on the line), read c.ascent/descent
@@ -6842,17 +6853,33 @@ export function renderShapeText(
         );
         const run = tallest?.run;
         const fontPx = (run?.fontSizePt ?? b.fontSizePt) * scale;
+        // Design-line floor is the MAX intendedSingleLinePx over EVERY run on the
+        // line — both its ascii AND eastAsia face (§17.3.2.26), each at that run's
+        // own size — not just the tallest run's faces. The tallest run may be an
+        // untabled Latin face while a shorter-but-equal-or-smaller Meiryo run
+        // still raises the box to Meiryo's design line; flooring on the tallest
+        // run alone missed that. Mirrors the body's per-segment max (~5684-5685).
+        // 0 for an all-untabled line ⇒ unchanged.
+        const lineFloorPx = toks.reduce((floor, t) => {
+          const runPx = t.run.fontSizePt * scale;
+          return Math.max(
+            floor,
+            intendedSingleLinePx(t.run.fontFamily ?? null, runPx),
+            intendedSingleLinePx(t.run.fontFamilyEastAsia ?? null, runPx),
+          );
+        }, 0);
         return shapeLineMetrics(
           run?.fontFamily ?? b.fontFamily,
           run?.bold ?? false,
           run?.italic ?? false,
           fontPx,
           b,
-          // eastAsia axis (§17.3.2.26) of the tallest run — floors the line box
-          // to Meiryo/Sakkal's design line even when only `<w:rFonts w:eastAsia>`
-          // names a tabled face (ascii left default). Rich runs carry this on the
-          // model (ShapeTextRun.fontFamilyEastAsia); no parser change needed.
+          // eastAsia axis (§17.3.2.26) of the TALLEST run selects the measurement
+          // face inside shapeLineMetrics (the glyph box read for the baseline).
+          // The design-line FLOOR, however, is the all-runs max computed above and
+          // passed explicitly — so a shorter tabled run still raises the box.
           run?.fontFamilyEastAsia,
+          lineFloorPx,
         );
       });
       return {

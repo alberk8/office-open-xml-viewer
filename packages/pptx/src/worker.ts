@@ -1,3 +1,4 @@
+import { decodeDataUrl } from '@silurus/ooxml-core';
 import type { WorkerRequest, WorkerResponse } from './types';
 import init, { PptxArchive } from './wasm/pptx_parser.js';
 
@@ -15,16 +16,6 @@ function disposeArchive(): void {
     archive.free();
     archive = null;
   }
-}
-
-function decodeDataUrl(url: string): ArrayBuffer | null {
-  if (!url.startsWith('data:')) return null;
-  const comma = url.indexOf(',');
-  if (comma === -1) return null;
-  const binary = atob(url.slice(comma + 1));
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-  return bytes.buffer;
 }
 
 async function initWasm(wasmUrl: string) {

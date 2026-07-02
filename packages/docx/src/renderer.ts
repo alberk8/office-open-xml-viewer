@@ -5825,8 +5825,25 @@ function layoutLines(
 
   const effectiveFontPx = (s: LayoutTextSeg): number => calcEffectiveFontPx(s, scale);
 
+  // Measure-loop font guard: line wrapping calls measureText / strAdvance many
+  // times in a row for the SAME segment (fit search, split prefixes/tails), so
+  // the built font string is usually identical to the previous one. Skip the
+  // redundant `ctx.font =` in that case. This tracker is written by EVERY font
+  // assignment on the measure path (both helpers below route through it), so it
+  // always reflects the context's current measure font — no stale skip. The
+  // draw-path `ctx.font =` sites are separate and left untouched. `buildFont` is
+  // now cheap (normalizeFontFamily is memoized per-doc), so this only elides the
+  // setter call itself.
+  let lastMeasureFont: string | null = null;
+  const setMeasureFont = (font: string): void => {
+    if (font !== lastMeasureFont) {
+      ctx.font = font;
+      lastMeasureFont = font;
+    }
+  };
+
   const measureText = (s: LayoutTextSeg): TextMetrics => {
-    ctx.font = buildFont(s.bold, s.italic, effectiveFontPx(s), s.fontFamily, fontFamilyClasses);
+    setMeasureFont(buildFont(s.bold, s.italic, effectiveFontPx(s), s.fontFamily, fontFamilyClasses));
     return ctx.measureText(s.text);
   };
 
@@ -5839,7 +5856,7 @@ function layoutLines(
   // Grid advance of an arbitrary string under a segment's font (for split
   // prefixes/tails). Selects the font, then applies the same gridWidth model.
   const strAdvance = (s: LayoutTextSeg, text: string): number => {
-    ctx.font = buildFont(s.bold, s.italic, effectiveFontPx(s), s.fontFamily, fontFamilyClasses);
+    setMeasureFont(buildFont(s.bold, s.italic, effectiveFontPx(s), s.fontFamily, fontFamilyClasses));
     return gridWidth(ctx.measureText(text).width, text, gridDeltaPx);
   };
 
@@ -8577,9 +8594,44 @@ function serifTail(cjk: ReturnType<typeof classifyCjkFont>): string {
  *     where fontTable says "auto"). Retained as a safety net for theme fonts
  *     and system fonts that OOXML docs do not list in fontTable.xml.
  */
+/**
+ * Per-document memo for {@link normalizeFontFamily}. The regex/classifier work
+ * inside is a pure function of `(family, fontFamilyClasses)`, and
+ * `fontFamilyClasses` is a stable per-document object (RenderState threads
+ * `doc.fontFamilyClasses` — one identity per render). Keying the outer WeakMap on
+ * that object identity gives per-doc caching with zero call-site churn (both
+ * callers already pass `fontFamilyClasses`) and no leak: the inner
+ * family→result Map is collected with the document's classes object. Same idiom
+ * as `sheetAxisCache` / `mathRenders`. Chosen over threading an explicit cache
+ * param through buildFont because both call sites already carry the classes
+ * object, so identity-keying needs no signature changes anywhere.
+ */
+const fontFamilyNormalizeCache = new WeakMap<Record<string, string>, Map<string, string>>();
+
 export function normalizeFontFamily(
   family: string | null,
   fontFamilyClasses: Record<string, string> = {},
+): string {
+  const perDoc =
+    fontFamilyNormalizeCache.get(fontFamilyClasses) ??
+    (() => {
+      const m = new Map<string, string>();
+      fontFamilyNormalizeCache.set(fontFamilyClasses, m);
+      return m;
+    })();
+  // `family` may be null; use a distinct sentinel key so a null lookup never
+  // collides with a real family named "null".
+  const key = family ?? '\0null';
+  const cached = perDoc.get(key);
+  if (cached !== undefined) return cached;
+  const result = normalizeFontFamilyUncached(family, fontFamilyClasses);
+  perDoc.set(key, result);
+  return result;
+}
+
+function normalizeFontFamilyUncached(
+  family: string | null,
+  fontFamilyClasses: Record<string, string>,
 ): string {
   if (!family) return sansTail(null);
 

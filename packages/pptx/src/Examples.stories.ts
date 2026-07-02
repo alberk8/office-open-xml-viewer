@@ -138,6 +138,7 @@ export const ScrollViewer: LayoutStory = {
       overscan: 1,
       enableTextSelection: true,
       useGoogleFonts: true,
+      background: '#525659', // desk gray behind/between slides (like a slide viewer)
       onVisibleSlideChange: (top, total) => {
         status.textContent = `Slide ${top + 1} / ${total}`;
       },

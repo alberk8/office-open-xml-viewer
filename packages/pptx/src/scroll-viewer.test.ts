@@ -103,6 +103,33 @@ describe('PptxScrollViewer — skeleton (T1)', () => {
     // Injected engine is caller-owned: destroy() must not tear it down.
     expect(engine.destroyed).toBe(false);
   });
+
+  // `background` paints the scroll surface (the "desk") visible behind/between
+  // slides. It applies to the viewer-owned scrollHost; slides keep their own white.
+  it('applies opts.background to the scrollHost element', () => {
+    installDom();
+    const container = makeContainer();
+    const engine = new FakePptxEngine(1, 1000, 600);
+    const v = new PptxScrollViewer(container as unknown as HTMLElement, {
+      presentation: engine.asPres(),
+      background: '#525659',
+    });
+    const scrollHost = container.children[0].children[0]; // wrapper → scrollHost
+    expect(scrollHost.style.background).toBe('#525659');
+    v.destroy();
+  });
+
+  it('sets no background on the scrollHost by default (transparent — container shows through)', () => {
+    installDom();
+    const container = makeContainer();
+    const engine = new FakePptxEngine(1, 1000, 600);
+    const v = new PptxScrollViewer(container as unknown as HTMLElement, {
+      presentation: engine.asPres(),
+    });
+    const scrollHost = container.children[0].children[0];
+    expect(scrollHost.style.background).toBe('');
+    v.destroy();
+  });
 });
 
 describe('PptxScrollViewer — layout + virtualization (T2)', () => {

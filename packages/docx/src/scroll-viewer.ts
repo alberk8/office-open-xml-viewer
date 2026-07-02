@@ -29,6 +29,18 @@ export interface DocxScrollViewerOptions extends Omit<RenderPageOptions, 'onText
   /** Desk padding (px) BELOW the LAST page — the margin below the final sheet.
    *  Default: `gap`. Pass `0` for a flush-bottom layout. */
   paddingBottom?: number;
+  /** Desk gutter (px) to the LEFT of the pages — the horizontal margin between the
+   *  left edge of the scroll surface and a page sitting flush-left (i.e. once
+   *  zoomed wide enough that centering no longer applies). Default: `gap` (uniform
+   *  desk rhythm — the horizontal gutters match the vertical ones). It also shrinks
+   *  the container-derived FIT width so a page sits inside the gutters at 100%
+   *  (an EXPLICIT `opts.width` is the page's CSS-width contract and is NOT reduced;
+   *  the gutters still apply around placement). Pass `0` for a flush-left layout. */
+  paddingLeft?: number;
+  /** Desk gutter (px) to the RIGHT of the pages. Default: `gap`. Shrinks the
+   *  container-derived fit width symmetrically with `paddingLeft`. Pass `0` for a
+   *  flush-right layout. */
+  paddingRight?: number;
   /** Pages kept mounted beyond the viewport on each side. Default 1. */
   overscan?: number;
   /** Per-page transparent text-selection overlay. MAIN render mode only:
@@ -283,11 +295,19 @@ export class DocxScrollViewer {
     return this._doc!.pageSize(i).heightPt * PT_TO_PX * this._scale;
   }
 
-  /** The container (fit) width, deferring when the container is unlaid-out. */
+  /** The fit width (px), deferring when the container is unlaid-out. An EXPLICIT
+   *  `opts.width` is the page's CSS-width contract and is returned UNCHANGED (the
+   *  gutters still apply around placement, not to the width). The container-derived
+   *  default instead targets `containerWidth − padL − padR` so a page sits INSIDE
+   *  the horizontal gutters at 100%. A non-positive result (gutters wider than the
+   *  container) is treated as unlaid-out — the same deferral as a zero-width box. */
   private _fitWidthPx(): number {
     if (this._opts.width && this._opts.width > 0) return this._opts.width;
     const cw = this._container.clientWidth || this._scrollHost.clientWidth;
-    return cw > 0 ? cw : 0; // 0 ⇒ defer (design §11 zero-width deferral)
+    if (cw <= 0) return 0; // 0 ⇒ defer (design §11 zero-width deferral)
+    const { left, right } = this._padH();
+    const fit = cw - left - right;
+    return fit > 0 ? fit : 0; // gutters ≥ container ⇒ defer (same as zero-width)
   }
 
   /** Base scale: first page's width fit to the fit-width. Returns 0 when the
@@ -359,6 +379,16 @@ export class DocxScrollViewer {
     return { leading: this._opts.paddingTop ?? gap, trailing: this._opts.paddingBottom ?? gap };
   }
 
+  /** Horizontal desk gutters: `paddingLeft`/`paddingRight`, each defaulting to
+   *  `gap` (uniform rhythm — the horizontal gutters match the vertical padding).
+   *  Consumed by `_fitWidthPx` (to shrink the container-derived fit), by
+   *  `_positionSlot` (the flush-left floor), and by `_syncSpacer` (the spacer
+   *  width). Resolved here (not stored) to mirror `_gap()`/`_pad()`. */
+  private _padH(): { left: number; right: number } {
+    const gap = this._gap();
+    return { left: this._opts.paddingLeft ?? gap, right: this._opts.paddingRight ?? gap };
+  }
+
   private _range(): VisibleRange {
     return computeVisibleRange(
       this._heights,
@@ -374,6 +404,25 @@ export class DocxScrollViewer {
     const r = this._range();
     this._lastRange = r;
     this._spacer.style.height = `${r.totalHeight}px`;
+    this._syncSpacerWidth();
+  }
+
+  /** Horizontal scroll extent: the widest page (docx pages can differ in width)
+   *  plus both gutters. A spacer NARROWER than the container never creates a
+   *  scrollbar (scrollWidth = max(clientWidth, content)), so it is always safe to
+   *  set — it only matters when a zoomed-in page grows past the viewport, where it
+   *  gives the gutters something to scroll to on either side. Max over per-page
+   *  widths so the extent covers the widest page in the document. Called from
+   *  `_syncSpacer` and after every scale change (zoom / resize re-fit) so the
+   *  extent tracks the current page px width. */
+  private _syncSpacerWidth(): void {
+    const { left, right } = this._padH();
+    let maxW = 0;
+    for (let i = 0; i < this._heights.length; i++) {
+      const w = this._pageWidthPx(i);
+      if (w > maxW) maxW = w;
+    }
+    this._spacer.style.width = `${maxW + left + right}px`;
   }
 
   private _onScroll(): void {
@@ -422,8 +471,11 @@ export class DocxScrollViewer {
       this._scrollHost.appendChild(reused.wrapper);
       return reused;
     }
+    // `left` is set explicitly per mount by `_positionSlot` (JS centering with a
+    // left-gutter floor), so no CSS auto-centering (`left:0;right:0;margin:0 auto`)
+    // here — it would fight the explicit `left`.
     const wrapper = document.createElement('div');
-    wrapper.style.cssText = 'position:absolute;left:0;right:0;margin:0 auto;';
+    wrapper.style.cssText = 'position:absolute;';
     const canvas = document.createElement('canvas');
     canvas.style.cssText = 'display:block;background:#fff;';
     wrapper.appendChild(canvas);
@@ -463,6 +515,16 @@ export class DocxScrollViewer {
     const hpx = this._pageHeightPx(i);
     slot.wrapper.style.width = `${wpx}px`;
     slot.wrapper.style.height = `${hpx}px`;
+    // Horizontal placement (replaces the old CSS `left:0;right:0;margin:0 auto`
+    // auto-centering, which cannot honour a left gutter). Centre the page in the
+    // scroll viewport, but never let its left edge cross the left gutter: when the
+    // page is narrower than the viewport it is centred (`(cw − pw)/2 > padL`); once
+    // zoomed wider than the viewport the centre would go negative, so the floor
+    // pins it at `padL` and the overflow scrolls right. Formula deliberately
+    // duplicated per viewer (one line; not hoisted to core).
+    const { left: padL } = this._padH();
+    const cw = this._scrollHost.clientWidth;
+    slot.wrapper.style.left = `${Math.max(padL, (cw - wpx) / 2)}px`;
   }
 
   /** Device-pixel ratio for a render (opts override → window → 1). */
@@ -727,6 +789,8 @@ export class DocxScrollViewer {
       this._pad(),
     );
     this._spacer.style.height = `${r1.totalHeight}px`;
+    // The page px width changed with the scale, so the horizontal extent moves too.
+    this._syncSpacerWidth();
 
     // Pin the same fractional position of the same page under the viewport top.
     const maxTop = Math.max(0, r1.totalHeight - this._scrollHost.clientHeight);

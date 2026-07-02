@@ -1321,14 +1321,11 @@ struct TileInfo {
     algn: String,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
-#[serde(rename_all = "camelCase")]
-struct GradStop {
-    /// 0.0–1.0
-    position: f64,
-    /// hex color (6 chars = opaque, 8 chars = RRGGBBAA with alpha)
-    color: String,
-}
+/// A gradient color stop. The owned type + `<a:gs>` parse now live in
+/// `ooxml_common::fill` (shared DrawingML fill grammar); re-exported here under
+/// the former name so `Fill::Gradient { stops: Vec<GradStop> }` and its
+/// byte-identical `{"position":..,"color":".."}` JSON are unchanged.
+use ooxml_common::fill::GradStop;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -2333,51 +2330,28 @@ fn parse_fill(node: roxmltree::Node<'_, '_>, theme: &HashMap<String, String>) ->
             "noFill" => return Some(Fill::None),
             "pattFill" => {
                 // ECMA-376 §20.1.8.40 — preset pattern with fg/bg colours.
-                let preset = attr(&c, "prst").unwrap_or_else(|| "pct50".to_owned());
-                let fg = child(c, "fgClr")
-                    .and_then(|n| parse_color_node(n, theme))
-                    .unwrap_or_else(|| "000000".to_owned());
-                let bg = child(c, "bgClr")
-                    .and_then(|n| parse_color_node(n, theme))
-                    .unwrap_or_else(|| "ffffff".to_owned());
+                // Shared parse (ooxml_common::fill); colors resolve with pptx's
+                // PowerPointLinear tint via PptxSchemeResolver.
+                let ooxml_common::fill::PatternFill { fg, bg, preset } =
+                    ooxml_common::fill::parse_patt_fill(
+                        c,
+                        &PptxSchemeResolver { theme },
+                        ooxml_common::color::TintMode::PowerPointLinear,
+                    );
                 return Some(Fill::Pattern { fg, bg, preset });
             }
             "gradFill" => {
-                let mut stops: Vec<GradStop> = child(c, "gsLst")
-                    .map(|gs_lst| {
-                        gs_lst
-                            .children()
-                            .filter(|n| n.is_element() && n.tag_name().name() == "gs")
-                            .filter_map(|gs| {
-                                let position = attr_f64(&gs, "pos").unwrap_or(0.0) / 100_000.0;
-                                let color = parse_color_node(gs, theme)?;
-                                Some(GradStop { position, color })
-                            })
-                            .collect()
-                    })
-                    .unwrap_or_default();
-
-                if stops.is_empty() {
-                    // No valid stops — continue scanning other fill elements
-                } else {
-                    stops.sort_by(|a, b| {
-                        a.position
-                            .partial_cmp(&b.position)
-                            .unwrap_or(std::cmp::Ordering::Equal)
-                    });
-                    let (grad_type, angle) = if let Some(lin) = child(c, "lin") {
-                        // OOXML ang: 60000ths of degree, 0 = left→right, 5400000 = top→bottom
-                        let ang = attr_f64(&lin, "ang").unwrap_or(0.0) / 60_000.0;
-                        ("linear".to_owned(), ang)
-                    } else if child(c, "path").is_some() {
-                        ("radial".to_owned(), 0.0)
-                    } else {
-                        ("linear".to_owned(), 0.0)
-                    };
+                // Shared parse (ooxml_common::fill). Returns None when there are
+                // no resolvable stops, so we keep scanning sibling fill elements.
+                if let Some(g) = ooxml_common::fill::parse_grad_fill(
+                    c,
+                    &PptxSchemeResolver { theme },
+                    ooxml_common::color::TintMode::PowerPointLinear,
+                ) {
                     return Some(Fill::Gradient {
-                        stops,
-                        angle,
-                        grad_type,
+                        stops: g.stops,
+                        angle: g.angle,
+                        grad_type: g.grad_type,
                     });
                 }
             }

@@ -361,6 +361,20 @@ export class XlsxViewer {
    */
   private _rafId: number | null = null;
   /**
+   * Monotonic render-request counter for worker-mode stale-frame dropping.
+   * Every {@link renderCurrentSheet} bumps it and captures the value before it
+   * awaits the worker's bitmap; on resolution a captured value below the current
+   * one means a newer render was requested meanwhile (scroll moved on, the sheet
+   * switched, a zoom changed), so that bitmap is stale and must be closed and
+   * dropped instead of painted over the fresher frame. The WorkerBridge already
+   * correlates each request↔response by id, but requests overlap — a slow bitmap
+   * for an old scroll position can resolve after a newer one — so the viewer
+   * needs this generation guard, the single-canvas analogue of the pptx
+   * scroll-viewer's per-slot render epoch (PR #663). The main-thread path renders
+   * synchronously and cannot interleave, so it needs no guard.
+   */
+  private _renderSeq = 0;
+  /**
    * Start-anchored horizontal scroll position (the {@link effectiveScrollLeft}
    * value last produced by a real user scroll or a programmatic reset), kept
    * as the source of truth across container size changes. The native
@@ -2171,6 +2185,10 @@ export class XlsxViewer {
     const h = this.canvasArea.clientHeight;
     if (w <= 0 || h <= 0) return;
 
+    // Claim a render generation up front so a later render started while this one
+    // awaits the worker can mark this frame stale (worker mode only; see below).
+    const seq = ++this._renderSeq;
+
     const cs = this.opts.cellScale ?? 1;
     const dpr = window.devicePixelRatio ?? 1;
 
@@ -2244,6 +2262,15 @@ export class XlsxViewer {
       // Render the viewport off the main thread and paint the returned bitmap.
       // The selection overlay (geometry-based, from getCellRect) is unaffected.
       const bmp = await this.workbook.renderViewportToBitmap(this.currentSheet, viewport, renderOpts);
+      // Drop a stale frame: if a newer render was requested while this bitmap was
+      // in flight (scroll moved on, the sheet switched, a zoom changed), painting
+      // it would overwrite the fresher frame. Close it to free the GPU memory
+      // (PR #659/#663 flow) and return without painting. The freshest render owns
+      // the canvas.
+      if (seq !== this._renderSeq) {
+        bmp.close();
+        return;
+      }
       // Resize the canvas only when the bitmap dimensions actually change.
       // Re-assigning canvas.width/height re-allocates the GPU backing store even
       // when the value is identical, which on a steady scroll stream (same size
@@ -2331,6 +2358,10 @@ export class XlsxViewer {
       cancelAnimationFrame(this._rafId);
       this._rafId = null;
     }
+    // Advance the render generation so any worker bitmap still in flight is
+    // treated as stale on resolution (closed + not painted), never touching the
+    // torn-down canvas.
+    this._renderSeq++;
     this.hideCommentPopup();
     this.hideValidationPanel();
     if (this.keydownHandler) {

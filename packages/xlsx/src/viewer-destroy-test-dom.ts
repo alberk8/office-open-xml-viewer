@@ -34,6 +34,10 @@ export interface FakeEl {
   classList: { add(...c: string[]): void; remove(...c: string[]): void; contains(c: string): boolean };
   _attrs: Map<string, string>;
   _listeners: Map<string, Array<(e: unknown) => void>>;
+  /** Persisted bitmaprenderer context (worker mode). Records the last painted
+   *  bitmap so tests can assert which frame reached the canvas. Lazily created
+   *  by {@link getContext}('bitmaprenderer'); null until then. */
+  _bitmapCtx: { lastBitmap: unknown; transferFromImageBitmap(bmp: unknown): void } | null;
   // geometry (constructor reads a few; 0 is fine — no events are fired)
   scrollTop: number;
   scrollLeft: number;
@@ -109,6 +113,7 @@ export function makeEl(tag: string): FakeEl {
     dataset: {},
     _attrs: new Map(),
     _listeners: new Map(),
+    _bitmapCtx: null,
     scrollTop: 0,
     scrollLeft: 0,
     clientWidth: 0,
@@ -205,7 +210,16 @@ export function makeEl(tag: string): FakeEl {
     releasePointerCapture() {},
     getContext(kind: string) {
       if (kind === 'bitmaprenderer') {
-        return { transferFromImageBitmap() {}, lastBitmap: null };
+        // Persist one bitmaprenderer context per canvas (a real canvas holds a
+        // single context type for its lifetime) and record the last painted
+        // bitmap, so worker-mode tests can assert which frame reached the canvas.
+        this._bitmapCtx ??= {
+          lastBitmap: null,
+          transferFromImageBitmap(bmp: unknown) {
+            this.lastBitmap = bmp;
+          },
+        };
+        return this._bitmapCtx;
       }
       return {};
     },

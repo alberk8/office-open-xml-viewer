@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { sniffCfb } from './cfb-sniff';
+import { buildCfbFixture } from '../testing/cfb-fixture';
 
 /**
  * Minimal synthetic-CFB builder for the sniffer tests. Emits a version-3
@@ -11,7 +12,6 @@ import { sniffCfb } from './cfb-sniff';
 const SECTOR = 512;
 const HEADER = 512;
 const ENTRY = 128; // directory entry size
-const ENTRIES_PER_SECTOR = SECTOR / ENTRY; // 4
 const FREESECT = 0xffffffff;
 const ENDOFCHAIN = 0xfffffffe;
 const FATSECT = 0xfffffffd;
@@ -103,7 +103,6 @@ function buildCfb(opts: BuildOpts): Uint8Array {
     const off = HEADER + logicalSector * sectorSize + within * ENTRY;
     writeEntry(view, off, entries[idx]);
   }
-  void ENTRIES_PER_SECTOR;
 
   return bytes;
 }
@@ -218,6 +217,19 @@ describe('sniffCfb — classification', () => {
     ];
     expect(sniffCfb(buildCfb({ entries: filler }))).toBe('encrypted');
   });
+
+  it('detects an encrypted container built as a major-version-4 (4096-byte sector) CFB', () => {
+    // [MS-CFB] §2.2: major version 4 uses SectorShift 0x000C (4096-byte
+    // sectors); the 512-byte header is followed by 3584 bytes of padding
+    // before sector 0 begins. Uses the shared `buildCfbFixture` (also used by
+    // the docx/pptx/xlsx load-guard suites) rather than this file's local
+    // `buildCfb`, so the v4 layout is exercised the same way production
+    // callers' fixtures are built.
+    const cfb = buildCfbFixture(['Root Entry', 'EncryptionInfo', 'EncryptedPackage'], {
+      majorVersion: 4,
+    });
+    expect(sniffCfb(new Uint8Array(cfb))).toBe('encrypted');
+  });
 });
 
 describe('sniffCfb — robustness (malicious / corrupt input)', () => {
@@ -276,5 +288,102 @@ describe('sniffCfb — robustness (malicious / corrupt input)', () => {
     // sectors; the walk should bail to cfb-unknown, never throw.
     const result = sniffCfb(buf);
     expect(result === 'cfb-unknown' || result === null).toBe(true);
+  });
+});
+
+describe('sniffCfb — deterministic seeded fuzz', () => {
+  /**
+   * mulberry32: a tiny, fast, deterministic PRNG (public-domain algorithm).
+   * Used instead of `Math.random()` so a failure is exactly reproducible from
+   * the fixed `FUZZ_SEED` below — no flakiness, no need to capture the failing
+   * input separately.
+   */
+  function mulberry32(seed: number): () => number {
+    let a = seed >>> 0;
+    return () => {
+      a = (a + 0x6d2b79f5) | 0;
+      let t = a;
+      t = Math.imul(t ^ (t >>> 15), t | 1);
+      t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+
+  const FUZZ_SEED = 0xc5b_51ff; // arbitrary, fixed for reproducibility
+  const FUZZ_ITERATIONS = 20_000;
+  const VALID_CFB_KINDS: ReadonlySet<string> = new Set([
+    'encrypted',
+    'legacy-binary-format',
+    'cfb-unknown',
+  ]);
+
+  function randomBytes(rand: () => number, length: number): Uint8Array {
+    const bytes = new Uint8Array(length);
+    for (let i = 0; i < length; i++) bytes[i] = Math.floor(rand() * 256);
+    return bytes;
+  }
+
+  /** Category A: pure random bytes, random length (mostly not a CFB at all). */
+  function genRandomBytes(rand: () => number): Uint8Array {
+    const length = Math.floor(rand() * 4096); // 0 .. 4095 bytes
+    return randomBytes(rand, length);
+  }
+
+  /**
+   * Category B: the 8-byte CFB signature forced at offset 0, everything else
+   * (including the rest of the header and an arbitrary-length random body)
+   * random. Exercises the header-parse and FAT-walk paths on garbage that
+   * nonetheless passes the initial signature check.
+   */
+  function genForcedSignature(rand: () => number): Uint8Array {
+    const length = HEADER + Math.floor(rand() * 8192); // >= one full header
+    const bytes = randomBytes(rand, length);
+    for (let i = 0; i < SIGNATURE.length; i++) bytes[i] = SIGNATURE[i];
+    return bytes;
+  }
+
+  /**
+   * Category C: a structurally-valid CFB (via `buildCfb`) with `sectorShift`
+   * and/or `firstDirSector` mutated to out-of-range / adversarial values —
+   * targets the exact fields the sniffer validates defensively.
+   */
+  function genAnomalousFields(rand: () => number): Uint8Array {
+    const cfb = buildCfb({
+      entries: [
+        { name: 'Root Entry', objType: 5 },
+        { name: rand() < 0.5 ? 'EncryptionInfo' : 'WordDocument', objType: 2 },
+      ],
+    });
+    const view = new DataView(cfb.buffer);
+    if (rand() < 0.5) {
+      // Anomalous sector shift: full 16-bit range, including the valid {9,
+      // 12} values (so some fraction of this category still parses cleanly).
+      view.setUint16(0x1e, Math.floor(rand() * 65536), true);
+    }
+    if (rand() < 0.5) {
+      // Anomalous first directory sector: full 32-bit range, including
+      // FREESECT/ENDOFCHAIN/FATSECT/DIFSECT and far-past-EOF values.
+      view.setUint32(0x30, Math.floor(rand() * 0x1_0000_0000), true);
+    }
+    return cfb;
+  }
+
+  it(`never throws and always returns CfbKind | null over ${FUZZ_ITERATIONS} deterministic-seed inputs`, () => {
+    const rand = mulberry32(FUZZ_SEED);
+    for (let i = 0; i < FUZZ_ITERATIONS; i++) {
+      const category = i % 3;
+      const input =
+        category === 0
+          ? genRandomBytes(rand)
+          : category === 1
+            ? genForcedSignature(rand)
+            : genAnomalousFields(rand);
+
+      let result: ReturnType<typeof sniffCfb>;
+      expect(() => {
+        result = sniffCfb(input);
+      }).not.toThrow();
+      expect(result! === null || VALID_CFB_KINDS.has(result!)).toBe(true);
+    }
   });
 });

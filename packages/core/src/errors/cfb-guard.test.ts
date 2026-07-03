@@ -1,43 +1,15 @@
 import { describe, it, expect } from 'vitest';
 import { assertNotCfbContainer } from './cfb-guard';
 import { OoxmlError } from './ooxml-error';
+import { buildCfbFixture } from '../testing/cfb-fixture';
 
-const SIGNATURE = [0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1];
-
-/** Build a tiny CFB whose single directory sector contains the given entries.
- *  Mirrors the builder in cfb-sniff.test.ts but inline + minimal. */
+/** Build a tiny CFB whose single directory sector contains the given entries,
+ *  as a `Uint8Array` (the shared fixture returns an `ArrayBuffer`). Reuses the
+ *  shared `buildCfbFixture` builder so this suite and cfb-sniff.test.ts /
+ *  the docx/pptx/xlsx load-guard suites all construct CFB bytes the same way,
+ *  rather than maintaining a third parallel inline implementation. */
 function cfbWith(names: string[]): Uint8Array {
-  const SECTOR = 512;
-  const HEADER = 512;
-  const ENTRY = 128;
-  const FREESECT = 0xffffffff;
-  const ENDOFCHAIN = 0xfffffffe;
-  const FATSECT = 0xfffffffd;
-  const buf = new ArrayBuffer(HEADER + 2 * SECTOR);
-  const view = new DataView(buf);
-  const bytes = new Uint8Array(buf);
-  for (let i = 0; i < 8; i++) bytes[i] = SIGNATURE[i];
-  view.setUint16(0x1a, 3, true); // major version
-  view.setUint16(0x1e, 9, true); // sector shift => 512
-  view.setUint16(0x20, 6, true);
-  view.setUint32(0x2c, 1, true); // FAT sectors
-  view.setUint32(0x30, 1, true); // first dir sector = 1
-  view.setUint32(0x3c, ENDOFCHAIN, true);
-  view.setUint32(0x44, ENDOFCHAIN, true);
-  view.setUint32(0x4c, 0, true); // DIFAT[0] = FAT at sector 0
-  for (let i = 1; i < 109; i++) view.setUint32(0x4c + i * 4, FREESECT, true);
-  const fatOff = HEADER;
-  for (let i = 0; i < SECTOR / 4; i++) view.setUint32(fatOff + i * 4, FREESECT, true);
-  view.setUint32(fatOff, FATSECT, true);
-  view.setUint32(fatOff + 4, ENDOFCHAIN, true); // dir sector 1 ends the chain
-  names.forEach((name, idx) => {
-    const off = HEADER + 1 * SECTOR + idx * ENTRY;
-    const units = Math.min(name.length, 31);
-    for (let i = 0; i < units; i++) view.setUint16(off + i * 2, name.charCodeAt(i), true);
-    view.setUint16(off + 0x40, (units + 1) * 2, true);
-    view.setUint8(off + 0x42, idx === 0 ? 5 : 2);
-  });
-  return bytes;
+  return new Uint8Array(buildCfbFixture(names));
 }
 
 describe('assertNotCfbContainer', () => {

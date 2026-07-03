@@ -2470,6 +2470,48 @@ mod pie_doughnut_tests {
         assert_eq!(m.chart_type, "line");
         assert!(m.series[0].categories.is_none());
     }
+
+    /// `<c:date1904/>` as a direct child of `<c:chartSpace>` (ECMA-376
+    /// §21.2.2.38) must surface as `ChartModel.date1904 = true`, threaded from
+    /// `parse_chart_xml` through the `ChartData → ChartModel` adapter. Absence
+    /// of the element leaves it at the default 1900 system (false).
+    #[test]
+    fn adapter_chart_space_date1904_element() {
+        let with = format!(
+            r#"<c:chartSpace xmlns:c="{c}" xmlns:a="{a}">
+  <c:date1904/>
+  <c:chart><c:plotArea><c:lineChart>
+    <c:ser><c:idx val="0"/><c:order val="0"/>
+      <c:val><c:numRef><c:numCache><c:pt idx="0"><c:v>1</c:v></c:pt></c:numCache></c:numRef></c:val>
+    </c:ser>
+  </c:lineChart></c:plotArea></c:chart>
+</c:chartSpace>"#,
+            c = C_NS,
+            a = A_NS,
+        );
+        let m = ChartModel::from(parse_chart_xml(&with, C_NS, A_NS, &theme()).expect("parses"));
+        assert!(
+            m.date1904,
+            "<c:date1904/> must set ChartModel.date1904 = true"
+        );
+
+        let without = format!(
+            r#"<c:chartSpace xmlns:c="{c}" xmlns:a="{a}">
+  <c:chart><c:plotArea><c:lineChart>
+    <c:ser><c:idx val="0"/><c:order val="0"/>
+      <c:val><c:numRef><c:numCache><c:pt idx="0"><c:v>1</c:v></c:pt></c:numCache></c:numRef></c:val>
+    </c:ser>
+  </c:lineChart></c:plotArea></c:chart>
+</c:chartSpace>"#,
+            c = C_NS,
+            a = A_NS,
+        );
+        let m0 = ChartModel::from(parse_chart_xml(&without, C_NS, A_NS, &theme()).expect("parses"));
+        assert!(
+            !m0.date1904,
+            "absent <c:date1904> must leave the 1900 default"
+        );
+    }
 }
 
 #[cfg(test)]

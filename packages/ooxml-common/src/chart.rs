@@ -1434,6 +1434,12 @@ mod tests {
         let zero = format!(r#"<c:chartSpace xmlns:c="{ns}"><c:date1904 val="0"/></c:chartSpace>"#);
         assert!(!extract_chart_date1904(root_of(&zero).root_element()));
 
+        // Word form of the falsey value: `val="false"` also disables the 1904
+        // system (CT_Boolean accepts both "0" and "false").
+        let false_word =
+            format!(r#"<c:chartSpace xmlns:c="{ns}"><c:date1904 val="false"/></c:chartSpace>"#);
+        assert!(!extract_chart_date1904(root_of(&false_word).root_element()));
+
         // Absent element ⇒ false (default 1900 system).
         let absent = format!(r#"<c:chartSpace xmlns:c="{ns}"/>"#);
         assert!(!extract_chart_date1904(root_of(&absent).root_element()));

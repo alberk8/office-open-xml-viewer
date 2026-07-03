@@ -2749,3 +2749,54 @@ mod date1904_tests {
         assert!(!parse(xml));
     }
 }
+
+#[cfg(test)]
+mod date1904_wire_shape_tests {
+    // Wire-parity guard for the `date1904` field on `Workbook` / `Worksheet`:
+    // it must be dropped from the JSON when false (default 1900 system, keeps
+    // existing snapshots byte-stable) and present when true. Mirrors the
+    // `chart_model_serializes_canonical_shape` approach in ooxml-common.
+    use super::*;
+
+    fn workbook(date1904: bool) -> Workbook {
+        Workbook {
+            sheets: Vec::new(),
+            date1904,
+        }
+    }
+
+    fn worksheet(date1904: bool) -> Worksheet {
+        // Parse a minimal sheet so every non-date1904 field is default-populated
+        // (robust to future field additions), then set the flag under test.
+        let xml = r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData/></worksheet>"#;
+        let (mut ws, _) = parse_worksheet(xml, &[], &[], "Sheet1").expect("worksheet parses");
+        ws.date1904 = date1904;
+        ws
+    }
+
+    #[test]
+    fn workbook_date1904_false_is_omitted_from_wire() {
+        let v = serde_json::to_value(workbook(false)).unwrap();
+        let obj = v.as_object().unwrap();
+        assert!(!obj.contains_key("date1904"));
+    }
+
+    #[test]
+    fn workbook_date1904_true_is_serialized() {
+        let v = serde_json::to_value(workbook(true)).unwrap();
+        assert_eq!(v.get("date1904").and_then(|d| d.as_bool()), Some(true));
+    }
+
+    #[test]
+    fn worksheet_date1904_false_is_omitted_from_wire() {
+        let v = serde_json::to_value(worksheet(false)).unwrap();
+        let obj = v.as_object().unwrap();
+        assert!(!obj.contains_key("date1904"));
+    }
+
+    #[test]
+    fn worksheet_date1904_true_is_serialized() {
+        let v = serde_json::to_value(worksheet(true)).unwrap();
+        assert_eq!(v.get("date1904").and_then(|d| d.as_bool()), Some(true));
+    }
+}

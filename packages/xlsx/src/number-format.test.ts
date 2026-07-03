@@ -123,6 +123,14 @@ describe('General format — 11 significant digit rounding (XL2)', () => {
     expect(fmt(100, 'General')).toBe('100');
     expect(fmt(0.5, 'General')).toBe('0.5');
   });
+  it('handles the rounding-carry boundary: an 11-digit value that rounds up to a 12-digit exponent', () => {
+    // 99999999999.6 rounds to 11 significant digits as 100000000000, whose
+    // decimal exponent (11) crosses the fixed→exponential threshold. The
+    // exponent must be derived from the *rounded* form (this is exactly the
+    // non-obvious case the code comment cites), so it renders "1E+11" rather
+    // than a spurious "99999999999" or "100000000000".
+    expect(fmt(99999999999.6, 'General')).toBe('1E+11');
+  });
 });
 
 describe('non-numeric cells', () => {
@@ -183,5 +191,68 @@ describe('date formats — 1904 date system (§18.2.28 / §18.17.4.1)', () => {
 
   it('serial 1 is 1904-01-02 (no 1900 leap-year bug in the 1904 system)', () => {
     expect(fmt1904(1, 'yyyy-mm-dd')).toBe('1904-01-02');
+  });
+});
+
+describe('volatile TODAY()/NOW() exemption from date1904 (§18.17.4.1)', () => {
+  // TODAY()/NOW() cells carry a cached <v> from the last save that the viewer
+  // recomputes at render time. `todaySerial`/`nowSerial` always emit a
+  // 1900-system serial (they encode "today" as a calendar concept), so even in
+  // a 1904 workbook the recomputed volatile must be formatted against the 1900
+  // epoch — otherwise it would render 1462 days LATE. This pins the
+  // `effectiveDate1904` branch that forces date1904=false for recomputed cells.
+
+  /** Local calendar date as YYYY-MM-DD — matches how `todaySerial` derives the
+   *  serial (Date.UTC of the local Y/M/D). Returns the set of dates that are
+   *  acceptable across a possible midnight tick during the test. */
+  function acceptableTodayStrings(): Set<string> {
+    const iso = (d: Date): string =>
+      `${d.getFullYear().toString().padStart(4, '0')}-${(d.getMonth() + 1)
+        .toString()
+        .padStart(2, '0')}-${d.getDate().toString().padStart(2, '0')}`;
+    // Capture both the local "today" at the start and end of the assertion so a
+    // midnight rollover between the two clock reads does not make the test flaky.
+    return new Set([iso(new Date()), iso(new Date(Date.now()))]);
+  }
+
+  function volatileCell(formula: string): Cell {
+    // The cached <v> is a stale 1900-system serial (its exact value is
+    // irrelevant — the volatile path recomputes it) and the style is a date
+    // format. We deliberately store a serial that would misrender if the flag
+    // were NOT overridden.
+    return { row: 1, col: 1, colRef: 'A1', value: { type: 'number', number: 0 }, styleIndex: 0, formula };
+  }
+
+  it('TODAY() in a 1904 workbook renders the correct 1900-system today (not 1462 days off)', () => {
+    const before = acceptableTodayStrings();
+    const rendered = formatCellValue(volatileCell('TODAY()'), styles('yyyy-mm-dd'), null, true);
+    const after = acceptableTodayStrings();
+    const acceptable = new Set([...before, ...after]);
+    expect(acceptable.has(rendered)).toBe(true);
+  });
+
+  it('tolerates a leading = and whitespace in the recomputed formula', () => {
+    const before = acceptableTodayStrings();
+    const rendered = formatCellValue(volatileCell(' = TODAY() '), styles('yyyy-mm-dd'), null, true);
+    const after = acceptableTodayStrings();
+    const acceptable = new Set([...before, ...after]);
+    expect(acceptable.has(rendered)).toBe(true);
+  });
+
+  it('NOW() in a 1904 workbook renders the correct 1900-system date portion', () => {
+    const before = acceptableTodayStrings();
+    // NOW() carries a time fraction; the date portion must still be today's
+    // 1900-system calendar date, not the 1904-shifted one.
+    const rendered = formatCellValue(volatileCell('NOW()'), styles('yyyy-mm-dd'), null, true);
+    const after = acceptableTodayStrings();
+    const acceptable = new Set([...before, ...after]);
+    expect(acceptable.has(rendered)).toBe(true);
+  });
+
+  it('a non-volatile stored serial in a 1904 workbook still honors the 1904 epoch', () => {
+    // Contrast: without a volatile formula the stored serial uses the workbook
+    // date system. 1904-system serial 43830 = 2024-01-01.
+    const cell: Cell = { row: 1, col: 1, colRef: 'A1', value: { type: 'number', number: 43830 }, styleIndex: 0 };
+    expect(formatCellValue(cell, styles('yyyy-mm-dd'), null, true)).toBe('2024-01-01');
   });
 });

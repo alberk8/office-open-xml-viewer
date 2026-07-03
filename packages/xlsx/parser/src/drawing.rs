@@ -1660,7 +1660,11 @@ pub(crate) fn parse_ole_object_anchors(
             to_col_off,
             to_row,
             to_row_off,
-            // OLE previews always place via the two-cell anchor.
+            // OLE previews always place via the two-cell `<anchor>`. Note this
+            // "twoCell" is a convenience default in the ST_EditAs value space
+            // (§20.5.3.3), not a faithful conversion of the anchor's own
+            // moveWithCells/sizeWithCells booleans (CT_ObjectAnchor); those live
+            // in a different value space and are not mapped here.
             edit_as: Some("twoCell".to_string()),
             native_ext_cx: 0,
             native_ext_cy: 0,

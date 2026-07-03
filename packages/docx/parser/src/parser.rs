@@ -4273,6 +4273,11 @@ fn extract_simple_paragraph_text(
 /// paragraph's leading (top-left) corner — VML `position:relative` text boxes
 /// flow with their anchor paragraph, which Word places at the left margin just
 /// below the preceding content.
+///
+/// Note: a bare `<w:pict>` carrying a `<v:imagedata>` (a non-OLE inline VML
+/// image, not a text box) is not resolved here — that remains an existing gap.
+/// The OLE-object case (`<w:object>` with a VML preview) is handled separately;
+/// see `parse_object_ole_image`.
 fn parse_vml_pict(
     style_map: &StyleMap,
     pict: roxmltree::Node,
@@ -4387,6 +4392,12 @@ fn parse_vml_pict(
 /// omits explicit dimensions. Returns `None` when there is no drawable
 /// `<v:imagedata>` (an icon-only or link-only object), preserving the prior
 /// silent-skip rather than emitting a zero-sized or path-less image.
+///
+/// Note: CT_Object (§17.3.3.19) may hold a modern `<w:drawing>` as its first
+/// child instead of (or beside) the VML fallback; Word's real output is
+/// back-compat and VML-dominant, so only the VML preview path is handled here.
+/// Delegating a `<w:drawing>`-first CT_Object to the DrawingML picture path is a
+/// follow-up.
 fn parse_object_ole_image(
     object: roxmltree::Node,
     media_map: &HashMap<String, String>,
@@ -10822,5 +10833,34 @@ mod ole_object_tests {
         );
         let imgs = image_runs(&body, &HashMap::new());
         assert!(imgs.is_empty(), "no imagedata ⇒ no image run");
+    }
+
+    /// A `<w:object>` whose `<v:imagedata r:id>` is present but whose rId is not
+    /// in the media map (a dangling relationship) emits nothing — the preview
+    /// part cannot be located, so the object is silently skipped rather than
+    /// producing a path-less image.
+    #[test]
+    fn object_with_dangling_imagedata_rid_emits_nothing() {
+        let body = format!(
+            r##"<w:document{ns}><w:body>
+              <w:p><w:r><w:object w:dxaOrig="2000" w:dyaOrig="1000">
+                <v:shape id="s4" type="#_x0000_t75" style="width:100pt;height:50pt">
+                  <v:imagedata r:id="rIdMissing" o:title=""/>
+                </v:shape>
+                <o:OLEObject Type="Embed" ProgID="Excel.Sheet.12" ShapeID="s4" r:id="rIdData"/>
+              </w:object></w:r></w:p>
+            </w:body></w:document>"##,
+            ns = OLE_NS,
+        );
+        // media map deliberately lacks "rIdMissing".
+        let mut media = HashMap::new();
+        media.insert("rIdOther".to_string(), "word/media/image9.emf".to_string());
+
+        let imgs = image_runs(&body, &media);
+        assert!(
+            imgs.is_empty(),
+            "a dangling v:imagedata rId ⇒ no image run, got {}",
+            imgs.len()
+        );
     }
 }

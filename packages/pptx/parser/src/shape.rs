@@ -555,6 +555,81 @@ pub(crate) fn svg_blip_path(
     Some(svg_path)
 }
 
+/// Resolved drawable source of a `<*:blipFill><a:blip>` — the winning image
+/// part plus, when present, the Microsoft-2016 SVG twin surfaced separately so
+/// the renderer can prefer the vector original.
+pub(crate) struct BlipSource {
+    /// Zip path of the raster (preferred) or, when no raster is embedded, of the
+    /// SVG part itself, so the element is always drawable.
+    pub image_path: String,
+    /// MIME of whichever source wins (`image/svg+xml` for the SVG-only case).
+    pub mime_type: String,
+    /// Intrinsic PNG size for ink-fallback centering (`None` for non-PNG).
+    pub intrinsic_width_px: Option<u32>,
+    pub intrinsic_height_px: Option<u32>,
+    /// The SVG twin's zip path when the blip carries an `asvg:svgBlip`.
+    pub svg_image_path: Option<String>,
+}
+
+/// Resolve a `<a:blip>`'s drawable source from its parent `blip_fill` node.
+///
+/// Microsoft 2016 SVG extension: the real vector image rides inside
+/// `<a:blip><a:extLst>`, while `<a:blip r:embed>` carries a raster (PNG/JPEG)
+/// *fallback* for SVG-incapable clients. Resolve the SVG first so a picture that
+/// carries ONLY the svgBlip — with no raster `r:embed`, e.g. an icon inserted as
+/// a pure SVG — still parses instead of being dropped. The raster is optional; a
+/// pure-SVG picture omits it. A picture needs at least one drawable source: the
+/// raster is preferred as `image_path` (the renderer's srcRect / SVG-decode-
+/// failure fallback path); when no raster is embedded, fall back to the SVG part
+/// itself. Returns `None` when neither source resolves.
+///
+/// Shared by `parse_picture` and `parse_ole_preview_picture` so the ordinary and
+/// OLE-preview picture paths resolve blips identically.
+pub(crate) fn resolve_blip_source(
+    blip_fill: roxmltree::Node<'_, '_>,
+    slide_dir: &str,
+    rels: &HashMap<String, String>,
+    zip: &mut PptxZip,
+) -> Option<BlipSource> {
+    let blip = child(blip_fill, "blip")?;
+
+    let svg_image_path = svg_blip_path(blip, slide_dir, rels, zip);
+
+    // Raster blip (`<a:blip r:embed>` → zip path + intrinsic PNG size).
+    let raster: Option<(String, Option<(u32, u32)>)> = (|| {
+        let r_id = attr_r(&blip, "embed")?;
+        let rel_target = rels.get(&r_id)?;
+        let path = resolve_path(slide_dir, rel_target);
+        let image_bytes = ooxml_common::zip::read_zip_bytes(zip, &path).ok()?;
+        // Intrinsic PNG size for the ink-fallback centering (None for non-PNG,
+        // unchanged from the former png_size_from_data_url semantics).
+        let size = png_size_from_bytes(&image_bytes);
+        Some((path, size))
+    })();
+
+    let (image_path, mime_type, intrinsic_width_px, intrinsic_height_px) =
+        match (raster, svg_image_path.as_ref()) {
+            (Some((path, size)), _) => {
+                let mime = mime_from_ext(&path).to_owned();
+                let (w, h) = match size {
+                    Some((w, h)) => (Some(w), Some(h)),
+                    None => (None, None),
+                };
+                (path, mime, w, h)
+            }
+            (None, Some(svg)) => (svg.clone(), "image/svg+xml".to_owned(), None, None),
+            (None, None) => return None,
+        };
+
+    Some(BlipSource {
+        image_path,
+        mime_type,
+        intrinsic_width_px,
+        intrinsic_height_px,
+        svg_image_path,
+    })
+}
+
 pub(crate) fn parse_picture(
     pic_node: roxmltree::Node<'_, '_>,
     slide_dir: &str,
@@ -571,48 +646,14 @@ pub(crate) fn parse_picture(
     }
 
     let blip_fill = child(pic_node, "blipFill")?;
-    let blip = child(blip_fill, "blip")?;
-
-    // Microsoft 2016 SVG extension: the real vector image rides inside
-    // `<a:blip><a:extLst>`, while `<a:blip r:embed>` carries a raster (PNG/JPEG)
-    // *fallback* for SVG-incapable clients. Resolve the SVG first so a picture
-    // that carries ONLY the svgBlip — with no raster `r:embed`, e.g. an icon
-    // inserted as a pure SVG — still parses instead of being dropped. Surfaced
-    // separately so the renderer can prefer the vector original and fall back to
-    // the raster on decode error.
-    let svg_image_path = svg_blip_path(blip, slide_dir, rels, zip);
-
-    // Raster blip (`<a:blip r:embed>` → zip path + intrinsic PNG size). Optional:
-    // a pure-SVG picture omits it, so this is no longer a hard requirement for
-    // the element.
-    let raster: Option<(String, Option<(u32, u32)>)> = (|| {
-        let r_id = attr_r(&blip, "embed")?;
-        let rel_target = rels.get(&r_id)?;
-        let path = resolve_path(slide_dir, rel_target);
-        let image_bytes = ooxml_common::zip::read_zip_bytes(zip, &path).ok()?;
-        // Intrinsic PNG size for the ink-fallback centering (None for non-PNG,
-        // unchanged from the former png_size_from_data_url semantics).
-        let size = png_size_from_bytes(&image_bytes);
-        Some((path, size))
-    })();
-
-    // A picture needs at least one drawable source. Prefer the raster as
-    // `image_path` (the renderer's srcRect / SVG-decode-failure fallback path);
-    // when no raster is embedded, fall back to the SVG part itself so the
-    // element is always drawable. `mime_type` matches whichever source wins.
-    let (image_path, mime_type, intrinsic_width_px, intrinsic_height_px) =
-        match (raster, svg_image_path.as_ref()) {
-            (Some((path, size)), _) => {
-                let mime = mime_from_ext(&path).to_owned();
-                let (w, h) = match size {
-                    Some((w, h)) => (Some(w), Some(h)),
-                    None => (None, None),
-                };
-                (path, mime, w, h)
-            }
-            (None, Some(svg)) => (svg.clone(), "image/svg+xml".to_owned(), None, None),
-            (None, None) => return None,
-        };
+    // Resolve the drawable blip source (raster preferred, SVG twin surfaced).
+    let BlipSource {
+        image_path,
+        mime_type,
+        intrinsic_width_px,
+        intrinsic_height_px,
+        svg_image_path,
+    } = resolve_blip_source(blip_fill, slide_dir, rels, zip)?;
 
     // ECMA-376 §20.1.9.8 — `<p:pic>` may carry `<a:custGeom>` inside `<p:spPr>`,
     // in which case the bitmap is clipped to that custom path (e.g. a laptop
@@ -683,34 +724,15 @@ pub(crate) fn parse_ole_preview_picture(
         return None; // no drawable box
     }
     let blip_fill = child(pic_node, "blipFill")?;
-    let blip = child(blip_fill, "blip")?;
-
-    // MS 2016 SVG extension: prefer the vector original when present.
-    let svg_image_path = svg_blip_path(blip, slide_dir, rels, zip);
-
-    // Raster fallback (`<a:blip r:embed>` → zip path + intrinsic PNG size).
-    let raster: Option<(String, Option<(u32, u32)>)> = (|| {
-        let r_id = attr_r(&blip, "embed")?;
-        let rel_target = rels.get(&r_id)?;
-        let path = resolve_path(slide_dir, rel_target);
-        let image_bytes = ooxml_common::zip::read_zip_bytes(zip, &path).ok()?;
-        let size = png_size_from_bytes(&image_bytes);
-        Some((path, size))
-    })();
-
-    let (image_path, mime_type, intrinsic_width_px, intrinsic_height_px) =
-        match (raster, svg_image_path.as_ref()) {
-            (Some((path, size)), _) => {
-                let mime = mime_from_ext(&path).to_owned();
-                let (w, h) = match size {
-                    Some((w, h)) => (Some(w), Some(h)),
-                    None => (None, None),
-                };
-                (path, mime, w, h)
-            }
-            (None, Some(svg)) => (svg.clone(), "image/svg+xml".to_owned(), None, None),
-            (None, None) => return None,
-        };
+    // Same blip resolution as the ordinary picture path (raster preferred, SVG
+    // twin surfaced), shared via `resolve_blip_source`.
+    let BlipSource {
+        image_path,
+        mime_type,
+        intrinsic_width_px,
+        intrinsic_height_px,
+        svg_image_path,
+    } = resolve_blip_source(blip_fill, slide_dir, rels, zip)?;
 
     Some(PictureElement {
         x: gf.x,

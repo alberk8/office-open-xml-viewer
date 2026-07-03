@@ -1812,15 +1812,22 @@ pub(crate) fn parse_sp_tree_node(
             {
                 let uri = attr(&gd, "uri").unwrap_or_default();
                 if uri == "http://schemas.openxmlformats.org/presentationml/2006/ole" {
-                    // `<p:oleObj>` is frequently wrapped in `mc:AlternateContent`
-                    // where BOTH `mc:Choice` and `mc:Fallback` carry an identical
-                    // preview `<p:pic>`. Taking the FIRST oleObj in document order
-                    // (the Choice's, or the sole direct one) yields exactly one
-                    // picture — never a double-draw.
+                    // `<p:oleObj>` is commonly wrapped in `mc:AlternateContent`.
+                    // PowerPoint's canonical output puts a spid-only oleObj in the
+                    // `mc:Choice Requires="v"` (VML) branch and the drawable
+                    // `<p:pic>`-carrying oleObj in `mc:Fallback` — the `spid`
+                    // attribute and a `<p:pic>` child are mutually exclusive on
+                    // CT_OleObject (ECMA-376 Part 3 §B.1). Since we do not
+                    // understand the `v` (VML) namespace, MCE §9.3 says to take the
+                    // representation we can render, i.e. the Fallback's pic. Rather
+                    // than depend on document order or Choice/Fallback wrapping,
+                    // select the first oleObj that actually carries a `<p:pic>`
+                    // (the capability predicate "has something drawable"). This also
+                    // makes a bare, unwrapped `<p:oleObj><p:pic/>` work unchanged.
                     let ole_pic = gd
                         .descendants()
-                        .find(|n| n.is_element() && n.tag_name().name() == "oleObj")
-                        .and_then(|ole| child(ole, "pic"));
+                        .filter(|n| n.is_element() && n.tag_name().name() == "oleObj")
+                        .find_map(|ole| child(ole, "pic"));
                     if let Some(pic_node) = ole_pic {
                         // The preview pic's own `<a:xfrm>` is 0,0-relative (or
                         // absent), so the graphicFrame's `<p:xfrm>` is authoritative
@@ -2318,11 +2325,70 @@ mod ole_tests {
         out
     }
 
-    /// An OLE graphicFrame wrapped in mc:AlternateContent (Choice + Fallback both
-    /// carry a `<p:oleObj>` with a preview `<p:pic>`) must emit exactly ONE
-    /// PictureElement — the Choice's — never a second from the Fallback.
+    /// PowerPoint's canonical OLE output: `mc:Choice Requires="v"` holds a
+    /// spid-only `<p:oleObj>` (no `<p:pic>` — spid and pic are mutually exclusive,
+    /// ECMA-376 Part 3 §B.1) and `mc:Fallback` holds the drawable pic-carrying
+    /// oleObj. Because we do not understand the `v` (VML) namespace, MCE §9.3 says
+    /// to render the Fallback. Selecting the first oleObj that actually has a
+    /// `<p:pic>` must emit exactly ONE preview picture from the Fallback, even
+    /// though the Choice's spid-only oleObj comes first in document order.
     #[test]
-    fn ole_object_emits_single_preview_picture() {
+    fn ole_object_canonical_choice_spid_fallback_pic_emits_single_picture() {
+        let mut rels = HashMap::new();
+        rels.insert("rIdImg".to_string(), "../media/oleImage1.png".to_string());
+        let mut zip = zip_with(&[("ppt/media/oleImage1.png", &tiny_png())]);
+
+        // Choice: spid-only oleObj (VML shape reference, no drawable pic).
+        let choice = r#"<p:oleObj spid="_x0000_s1026" r:id="rIdOle" progId="Excel.Sheet.12"><p:embed/></p:oleObj>"#;
+        // Fallback: the pic-carrying oleObj we can actually render.
+        let fallback = r#"<p:oleObj r:id="rIdOle" progId="Excel.Sheet.12"><p:embed/>
+                 <p:pic>
+                  <p:nvPicPr><p:cNvPr id="5" name="Object"/><p:cNvPicPr/><p:nvPr/></p:nvPicPr>
+                  <p:blipFill><a:blip r:embed="rIdImg"/><a:stretch><a:fillRect/></a:stretch></p:blipFill>
+                  <p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="1828800" cy="914400"/></a:xfrm>
+                   <a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr>
+                 </p:pic>
+                </p:oleObj>"#;
+        let xml = format!(
+            r#"<p:graphicFrame {ns}>
+              <p:xfrm><a:off x="1000000" y="2000000"/><a:ext cx="1828800" cy="914400"/></p:xfrm>
+              <a:graphic><a:graphicData uri="{uri}">
+                <mc:AlternateContent>
+                  <mc:Choice Requires="v">{choice}</mc:Choice>
+                  <mc:Fallback>{fallback}</mc:Fallback>
+                </mc:AlternateContent>
+              </a:graphicData></a:graphic>
+            </p:graphicFrame>"#,
+            ns = ns(),
+            uri = OLE_URI,
+            choice = choice,
+            fallback = fallback,
+        );
+
+        let out = run(&xml, &mut zip, &rels);
+        let pics: Vec<_> = out
+            .iter()
+            .filter(|e| matches!(e, SlideElement::Picture(_)))
+            .collect();
+        assert_eq!(
+            pics.len(),
+            1,
+            "canonical Choice(spid)/Fallback(pic) must yield exactly one preview picture, got {}",
+            pics.len()
+        );
+        // Position must be the graphicFrame's (the inner pic xfrm is 0,0-relative).
+        if let SlideElement::Picture(p) = pics[0] {
+            assert_eq!((p.x, p.y), (1_000_000, 2_000_000));
+            assert_eq!((p.width, p.height), (1_828_800, 914_400));
+        }
+    }
+
+    /// A constructed case where BOTH Choice and Fallback carry a pic-bearing
+    /// oleObj (not PowerPoint's real output, but a robustness guard): selecting
+    /// the *first* pic-carrying oleObj must still emit exactly ONE picture, never
+    /// a double-draw from the second.
+    #[test]
+    fn ole_object_both_branches_have_pic_emits_single_picture() {
         let mut rels = HashMap::new();
         rels.insert("rIdImg".to_string(), "../media/oleImage1.png".to_string());
         let mut zip = zip_with(&[("ppt/media/oleImage1.png", &tiny_png())]);
@@ -2363,14 +2429,9 @@ mod ole_tests {
         assert_eq!(
             pics.len(),
             1,
-            "OLE Choice+Fallback must yield exactly one preview picture, got {}",
+            "two pic-carrying oleObjs must still yield exactly one preview picture, got {}",
             pics.len()
         );
-        // Position must be the graphicFrame's (the inner pic xfrm is 0,0-relative).
-        if let SlideElement::Picture(p) = pics[0] {
-            assert_eq!((p.x, p.y), (1_000_000, 2_000_000));
-            assert_eq!((p.width, p.height), (1_828_800, 914_400));
-        }
     }
 
     /// A direct (un-wrapped) `<p:oleObj>` whose inner `<p:pic>` has NO xfrm must

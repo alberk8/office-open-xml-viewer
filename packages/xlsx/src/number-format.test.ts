@@ -78,6 +78,53 @@ describe('General format code (§18.8.30 / LibreOffice custom numFmt)', () => {
   });
 });
 
+describe('General format — 11 significant digit rounding (XL2)', () => {
+  // Excel's General format is not raw float round-trip: the display engine
+  // rounds to 11 significant digits (15-digit internal precision minus the
+  // ~4 digits Excel reserves for display robustness), so binary floating
+  // point noise from arithmetic (e.g. 0.1 + 0.2) never surfaces to the user.
+  // This table pins the rounding + trailing-zero-trim + exponential-switch
+  // rules against `formatGeneralNumber` (see number-format.ts for the exact
+  // exponent thresholds and their rationale).
+  it('rounds binary floating point noise away', () => {
+    expect(fmt(0.1 + 0.2, 'General')).toBe('0.3');
+    expect(fmt(-(0.1 + 0.2), 'General')).toBe('-0.3');
+  });
+  it('rounds a repeating decimal to 11 significant digits', () => {
+    expect(fmt(1 / 3, 'General')).toBe('0.33333333333');
+  });
+  it('leaves an 11-digit integer untouched', () => {
+    expect(fmt(12345678901, 'General')).toBe('12345678901');
+  });
+  it('switches a 12-digit integer to Excel exponential notation', () => {
+    // Mantissa capped at 6 significant digits (5 decimal places) once the
+    // General format has already committed to scientific notation.
+    expect(fmt(123456789012, 'General')).toBe('1.23457E+11');
+  });
+  it('rounds a many-decimal value to 11 significant digits', () => {
+    expect(fmt(1234.5678901234, 'General')).toBe('1234.5678901');
+  });
+  it('applies the same rounding to negative numbers, sign excluded from digit count', () => {
+    expect(fmt(-0.30000000000000004, 'General')).toBe('-0.3');
+  });
+  it('renders negative zero as "0"', () => {
+    expect(fmt(-0, 'General')).toBe('0');
+  });
+  it('switches a very small number to exponential once fixed-point would bury it past 11 significant digits', () => {
+    expect(fmt(0.000000001234567890123, 'General')).toBe('1.23457E-09');
+  });
+  it('keeps a small-but-not-tiny decimal in fixed-point form', () => {
+    expect(fmt(0.00001, 'General')).toBe('0.00001');
+  });
+  it('switches at the documented exponent boundary (1e-6 range)', () => {
+    expect(fmt(0.000001, 'General')).toBe('1E-06');
+  });
+  it('trims trailing zeros from an exact decimal', () => {
+    expect(fmt(100, 'General')).toBe('100');
+    expect(fmt(0.5, 'General')).toBe('0.5');
+  });
+});
+
 describe('non-numeric cells', () => {
   it('passes text through when no 4th section', () => {
     const cell: Cell = { row: 1, col: 1, colRef: 'A1', value: { type: 'text', text: 'hello' }, styleIndex: 0 };

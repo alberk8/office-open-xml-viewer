@@ -378,6 +378,87 @@ function isDateFormatCode(code: string): boolean {
   return /[yd]/i.test(stripped) || /a{3,}/i.test(stripped);
 }
 
+// Excel's General format does not round-trip the raw IEEE-754 double: the
+// display engine rounds to 11 significant digits (of the 15-17 significant
+// digits a double can carry), which is what keeps binary floating point
+// noise from arithmetic (e.g. 0.1 + 0.2 === 0.30000000000000004) from ever
+// reaching the screen. See "Floating-point arithmetic may give inaccurate
+// results in Excel" (Microsoft KB78113) for the 15-digit internal precision
+// this display rounding sits on top of.
+const GENERAL_SIGNIFICANT_DIGITS = 11;
+// Once General has committed to scientific notation (see thresholds below),
+// Excel caps the mantissa at 6 significant digits (1 integer + 5 decimal),
+// e.g. 123456789012 -> "1.23457E+11", independent of the 11-digit budget
+// used for fixed-point display.
+const GENERAL_EXPONENTIAL_MANTISSA_DIGITS = 6;
+
+/** Strips trailing fractional zeros (and a dangling ".") from a fixed-point
+ *  digit string. No-op for strings without a decimal point. */
+function trimTrailingZeros(digits: string): string {
+  if (!digits.includes('.')) return digits;
+  return digits.replace(/0+$/, '').replace(/\.$/, '');
+}
+
+/** Formats `exponent` the way Excel's General exponential notation does:
+ *  always signed, at least two digits (E+05, E+11, E-09, ...). */
+function formatExcelExponent(exponent: number): string {
+  const sign = exponent >= 0 ? '+' : '-';
+  const digits = Math.abs(exponent).toString().padStart(2, '0');
+  return `${sign}${digits}`;
+}
+
+/** Renders a finite, non-zero, non-negative number in Excel's General
+ *  exponential style: mantissa trimmed to `GENERAL_EXPONENTIAL_MANTISSA_DIGITS`
+ *  significant digits with trailing zeros dropped, uppercase `E`, signed
+ *  2+-digit exponent (e.g. 123456789012 -> "1.23457E+11"). */
+function formatGeneralExponential(abs: number): string {
+  const [mantissa, exponent] = abs.toExponential(GENERAL_EXPONENTIAL_MANTISSA_DIGITS - 1).split('e');
+  return `${trimTrailingZeros(mantissa)}E${formatExcelExponent(Number(exponent))}`;
+}
+
+/**
+ * Formats a number the way Excel's "General" cell format does: round to 11
+ * significant digits (hiding binary floating-point round-trip noise like
+ * 0.1 + 0.2), trim trailing fractional zeros, and switch to Excel-style
+ * exponential notation ("1.23457E+11") once the value's decimal exponent
+ * falls outside the fixed-point display budget.
+ *
+ * Thresholds:
+ * - Integer part >= 12 digits (decimal exponent >= 11): Excel General is
+ *   documented to switch 12+ digit numbers to scientific notation.
+ * - Decimal exponent < -5 (value would need 6+ leading fractional zeros
+ *   before the first significant digit): mirrors the same "11 significant
+ *   digits must fit in the fixed-point budget" rule on the small-number
+ *   side — not a numerically-documented Microsoft threshold, but the
+ *   consistent extrapolation of the documented large-number rule.
+ *
+ * Column-width-dependent narrowing of the *displayed* precision (Excel
+ * shrinks General further to fit a narrow column) is intentionally not
+ * modeled here; this function always targets the "standard column width"
+ * output, matching how the rest of this renderer treats layout as
+ * independent of formatting.
+ */
+function formatGeneralNumber(num: number): string {
+  if (!Number.isFinite(num)) return String(num);
+  if (num === 0) return '0'; // canonicalizes -0 to "0"
+
+  const negative = num < 0;
+  const abs = Math.abs(num);
+
+  // Decimal exponent of the value once rounded to the target significant
+  // digits, derived from the (already-rounded) exponential form so a
+  // rounding carry that bumps the digit count (e.g. 99999999999.6 -> 1E+11)
+  // is reflected before the fixed-vs-exponential branch is chosen.
+  const exponent = Number(abs.toExponential(GENERAL_SIGNIFICANT_DIGITS - 1).split('e')[1]);
+  const useExponential = exponent >= GENERAL_SIGNIFICANT_DIGITS || exponent < -5;
+
+  const body = useExponential
+    ? formatGeneralExponential(abs)
+    : trimTrailingZeros(abs.toPrecision(GENERAL_SIGNIFICANT_DIGITS));
+
+  return negative ? `-${body}` : body;
+}
+
 function applyFormat(num: number, numFmtId: number, formatCode: string | null, date1904 = false): string {
   // Built-in date/time numFmtIds (ECMA-376 §18.8.30 table)
   const builtinFmt = BUILTIN_DATE_FMT[numFmtId];
@@ -386,13 +467,13 @@ function applyFormat(num: number, numFmtId: number, formatCode: string | null, d
   // of numFmtId. LibreOffice writes a custom numFmt (id ≥ 164) with
   // formatCode="General"; tokenizing it as a literal pattern would render the
   // word "General" instead of the value (issue #358).
-  if (formatCode && formatCode.trim().toLowerCase() === 'general') return String(num);
+  if (formatCode && formatCode.trim().toLowerCase() === 'general') return formatGeneralNumber(num);
   if (formatCode) {
     if (isDateFormatCode(formatCode)) return formatExcelDateCode(num, formatCode, date1904);
     return applyFormatCode(num, formatCode);
   }
   switch (numFmtId) {
-    case 0: return String(num);
+    case 0: return formatGeneralNumber(num);
     case 1: return Math.round(num).toString();
     case 2: return num.toFixed(2);
     case 3: return formatThousands(num, 0);
@@ -403,7 +484,7 @@ function applyFormat(num: number, numFmtId: number, formatCode: string | null, d
     case 37: case 38: return formatThousands(num, 0);
     case 39: case 40: return formatThousands(num, 2);
     case 49: return String(num);
-    default: return String(num);
+    default: return formatGeneralNumber(num);
   }
 }
 

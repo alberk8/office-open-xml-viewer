@@ -1532,6 +1532,176 @@ pub(crate) fn load_sheet_images(
     all_anchors
 }
 
+/// Parse worksheet `<oleObjects>` (the collection element, ECMA-376
+/// §18.3.1.60) into preview `ImageAnchor`s. An embedded OLE object we can't run
+/// still needs a visible on-sheet representation, placed by the
+/// `<objectPr><anchor>` two-cell markers (§18.3.1.56 / §18.3.1.59).
+///
+/// **Caveat on `objectPr@r:id` (§18.3.1.56):** the ECMA-376 text says this
+/// relationship "targets the Embedded Object Part … of type `oleObject`", i.e.
+/// the object *data* part (a `.bin`), NOT a preview image. Empirically, Excel
+/// does not reference the on-sheet preview image from `objectPr@r:id` either —
+/// the preview EMF/BMP is carried by a legacy VML drawing (`v:imagedata r:id`
+/// in the sheet's `vmlDrawingN.vml`, connected via `oleObject@shapeId` ↔ the
+/// VML `v:shape@id`), exactly like Word's `<w:object><v:shape><v:imagedata>`
+/// path (see docx `parse_object_ole_image`). So `objectPr@r:id`, when present,
+/// points at object data, and resolving it as an image would push a `.bin` into
+/// the image pipeline.
+///
+/// Guard: after resolving `objectPr@r:id` to a part we require its MIME (via
+/// `mime_from_ext`) to be `image/*`; a non-image target (`.bin`,
+/// `application/octet-stream`) is skipped. This structurally prevents feeding
+/// object data to the renderer. The VML-drawing preview path is a follow-up;
+/// until then a `.bin`-only object silently skips (== main's "not drawn").
+///
+/// `<oleObject>` is commonly wrapped in `mc:AlternateContent` where the Choice
+/// carries the full objectPr/anchor and the Fallback a bare oleObject; we skip
+/// any oleObject nested in an `mc:Fallback` so each object contributes exactly
+/// one anchor (no double-draw). An oleObject without a resolvable image-typed
+/// objectPr preview is skipped (icon-only / data-only / link-only), matching
+/// the prior silent-skip.
+pub(crate) fn parse_ole_object_anchors(
+    sheet_xml: &str,
+    sheet_rels: &HashMap<String, String>,
+    sheet_dir: &str,
+    archive: &mut crate::XlsxZip,
+) -> Vec<ImageAnchor> {
+    let Ok(doc) = roxmltree::Document::parse(sheet_xml) else {
+        return Vec::new();
+    };
+    let mut anchors: Vec<ImageAnchor> = Vec::new();
+
+    for ole in doc
+        .descendants()
+        .filter(|n| n.is_element() && n.tag_name().name() == "oleObject")
+    {
+        // Skip the AlternateContent Fallback twin so a Choice+Fallback pair
+        // yields one anchor, not two.
+        if ole
+            .ancestors()
+            .any(|a| a.is_element() && a.tag_name().name() == "Fallback")
+        {
+            continue;
+        }
+        // The preview image + placement live in `<objectPr r:id><anchor>`.
+        let Some(object_pr) = ole
+            .children()
+            .find(|n| n.is_element() && n.tag_name().name() == "objectPr")
+        else {
+            continue;
+        };
+        let Some(rid) = object_pr
+            .attribute((
+                "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
+                "id",
+            ))
+            .or_else(|| object_pr.attribute("id"))
+        else {
+            continue;
+        };
+        // Resolve rId → media zip path, verifying the entry exists (a dangling
+        // rId is dropped, matching parse_drawing_anchors).
+        let Some(target) = sheet_rels.get(rid) else {
+            continue;
+        };
+        let media_path = resolve_zip_path(sheet_dir, target);
+        if archive.index_for_name(&media_path).is_none() {
+            continue;
+        }
+        let mime_type = mime_from_ext(&media_path).to_string();
+        // §18.3.1.56: objectPr@r:id nominally targets the *object data* part, not
+        // an image. Only route genuine image parts into the picture pipeline; a
+        // non-image target (e.g. a `.bin` ⇒ application/octet-stream) is skipped
+        // so object data can never reach the renderer as a bitmap.
+        if !mime_type.starts_with("image/") {
+            continue;
+        }
+
+        // `<anchor><from>/<to>` two-cell markers (same CT_Marker grammar as a
+        // drawing anchor; children matched by local name, namespace-tolerant).
+        let Some(anchor) = object_pr
+            .children()
+            .find(|n| n.is_element() && n.tag_name().name() == "anchor")
+        else {
+            continue;
+        };
+        let (mut from_col, mut from_col_off, mut from_row, mut from_row_off) =
+            (0u32, 0i64, 0u32, 0i64);
+        let (mut to_col, mut to_col_off, mut to_row, mut to_row_off) = (0u32, 0i64, 0u32, 0i64);
+        for marker in anchor.children().filter(|n| n.is_element()) {
+            let is_from = match marker.tag_name().name() {
+                "from" => true,
+                "to" => false,
+                _ => continue,
+            };
+            let (mut col, mut col_off, mut row, mut row_off) = (0u32, 0i64, 0u32, 0i64);
+            for c in marker.children() {
+                match (c.tag_name().name(), c.text()) {
+                    ("col", Some(t)) => col = t.trim().parse().unwrap_or(0),
+                    ("colOff", Some(t)) => col_off = t.trim().parse().unwrap_or(0),
+                    ("row", Some(t)) => row = t.trim().parse().unwrap_or(0),
+                    ("rowOff", Some(t)) => row_off = t.trim().parse().unwrap_or(0),
+                    _ => {}
+                }
+            }
+            if is_from {
+                (from_col, from_col_off, from_row, from_row_off) = (col, col_off, row, row_off);
+            } else {
+                (to_col, to_col_off, to_row, to_row_off) = (col, col_off, row, row_off);
+            }
+        }
+
+        anchors.push(ImageAnchor {
+            from_col,
+            from_col_off,
+            from_row,
+            from_row_off,
+            to_col,
+            to_col_off,
+            to_row,
+            to_row_off,
+            // OLE previews always place via the two-cell `<anchor>`. Note this
+            // "twoCell" is a convenience default in the ST_EditAs value space
+            // (§20.5.3.3), not a faithful conversion of the anchor's own
+            // moveWithCells/sizeWithCells booleans (CT_ObjectAnchor); those live
+            // in a different value space and are not mapped here.
+            edit_as: Some("twoCell".to_string()),
+            native_ext_cx: 0,
+            native_ext_cy: 0,
+            image_path: media_path,
+            mime_type,
+            svg_image_path: None,
+            src_rect: None,
+        });
+    }
+    anchors
+}
+
+/// Load a sheet's OLE-object preview images (the `<oleObjects>` collection,
+/// §18.3.1.60) as `ImageAnchor`s,
+/// wiring the worksheet XML + its rels. Sibling of `load_sheet_images`; the
+/// caller appends the result to `ws.images` so previews draw through the same
+/// pipeline as ordinary pictures.
+pub(crate) fn load_sheet_ole_images(
+    archive: &mut crate::XlsxZip,
+    sheet_path: &str, // e.g. "worksheets/sheet1.xml"
+    sheet_xml: &str,
+) -> Vec<ImageAnchor> {
+    let Some((sheet_dir, sheet_file)) = sheet_path.rsplit_once('/') else {
+        return Vec::new();
+    };
+    let sheet_rels_path = format!("xl/{}/_rels/{}.rels", sheet_dir, sheet_file);
+    let sheet_rels = read_zip_string(archive, &sheet_rels_path)
+        .ok()
+        .map(|xml| parse_rels_map(&xml))
+        .unwrap_or_default();
+    if sheet_rels.is_empty() {
+        return Vec::new();
+    }
+    let base_dir = format!("xl/{}", sheet_dir);
+    parse_ole_object_anchors(sheet_xml, &sheet_rels, &base_dir, archive)
+}
+
 #[cfg(test)]
 mod math_tests {
     use super::*;
@@ -2622,5 +2792,173 @@ mod src_rect_tests {
         );
         let doc = roxmltree::Document::parse(&xml).unwrap();
         assert!(parse_src_rect(doc.root_element()).is_none());
+    }
+}
+
+#[cfg(test)]
+mod ole_object_tests {
+    use super::*;
+    use std::io::{Cursor, Write};
+
+    // A minimal EMF-signature blob is unnecessary here — `parse_ole_object_anchors`
+    // only needs the media part to EXIST in the archive (index_for_name), the
+    // renderer decodes lazily. Any bytes suffice.
+    fn archive_with(parts: &[(&str, &[u8])]) -> crate::XlsxZip {
+        use zip::write::SimpleFileOptions;
+        let mut buf = Vec::new();
+        {
+            let mut zw = zip::ZipWriter::new(Cursor::new(&mut buf));
+            let o = SimpleFileOptions::default();
+            for (path, bytes) in parts {
+                zw.start_file(*path, o).unwrap();
+                zw.write_all(bytes).unwrap();
+            }
+            zw.finish().unwrap();
+        }
+        zip::ZipArchive::new(Cursor::new(buf)).unwrap()
+    }
+
+    const OLE_NS: &str = concat!(
+        r#"xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" "#,
+        r#"xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" "#,
+        r#"xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006""#,
+    );
+
+    /// A worksheet `<oleObjects>` wrapped in `mc:AlternateContent` where the
+    /// Choice carries `<oleObject><objectPr r:id><anchor><from>/<to>>` and the
+    /// Fallback carries a bare `<oleObject>` (no objectPr). Exactly ONE preview
+    /// ImageAnchor must be emitted — the Choice's — never a second from Fallback.
+    #[test]
+    fn ole_object_emits_single_preview_anchor_from_choice() {
+        let sheet_xml = format!(
+            r#"<worksheet {ns}><sheetData/>
+              <oleObjects>
+                <mc:AlternateContent>
+                  <mc:Choice Requires="x14">
+                    <oleObject progId="Excel.Sheet.12" shapeId="1025" r:id="rIdData">
+                      <objectPr defaultSize="0" r:id="rIdPrev">
+                        <anchor moveWithCells="1">
+                          <from><xdr:col>1</xdr:col><xdr:colOff>10</xdr:colOff><xdr:row>2</xdr:row><xdr:rowOff>20</xdr:rowOff></from>
+                          <to><xdr:col>4</xdr:col><xdr:colOff>30</xdr:colOff><xdr:row>7</xdr:row><xdr:rowOff>40</xdr:rowOff></to>
+                        </anchor>
+                      </objectPr>
+                    </oleObject>
+                  </mc:Choice>
+                  <mc:Fallback>
+                    <oleObject progId="Excel.Sheet.12" shapeId="1025" r:id="rIdData"/>
+                  </mc:Fallback>
+                </mc:AlternateContent>
+              </oleObjects>
+            </worksheet>"#,
+            ns = OLE_NS,
+        );
+        let mut rels = HashMap::new();
+        rels.insert("rIdPrev".to_string(), "../media/image1.emf".to_string());
+        let mut archive = archive_with(&[("xl/media/image1.emf", b"emfbytes")]);
+
+        let anchors = parse_ole_object_anchors(&sheet_xml, &rels, "xl/worksheets", &mut archive);
+        assert_eq!(
+            anchors.len(),
+            1,
+            "Choice+Fallback must yield exactly one preview anchor, got {}",
+            anchors.len()
+        );
+        let a = &anchors[0];
+        assert_eq!(a.image_path, "xl/media/image1.emf");
+        assert_eq!(a.mime_type, "image/emf");
+        assert_eq!((a.from_col, a.from_row), (1, 2));
+        assert_eq!((a.from_col_off, a.from_row_off), (10, 20));
+        assert_eq!((a.to_col, a.to_row), (4, 7));
+        assert_eq!((a.to_col_off, a.to_row_off), (30, 40));
+    }
+
+    /// A bare `<oleObjects>` (not wrapped in AlternateContent) with a single
+    /// `<oleObject>` whose `objectPr@r:id` resolves is emitted directly.
+    #[test]
+    fn unwrapped_ole_object_emits_anchor() {
+        let sheet_xml = format!(
+            r#"<worksheet {ns}><sheetData/>
+              <oleObjects>
+                <oleObject progId="Equation.3" shapeId="2" r:id="rIdData">
+                  <objectPr r:id="rIdPrev">
+                    <anchor>
+                      <from><xdr:col>0</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>0</xdr:row><xdr:rowOff>0</xdr:rowOff></from>
+                      <to><xdr:col>2</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>2</xdr:row><xdr:rowOff>0</xdr:rowOff></to>
+                    </anchor>
+                  </objectPr>
+                </oleObject>
+              </oleObjects>
+            </worksheet>"#,
+            ns = OLE_NS,
+        );
+        let mut rels = HashMap::new();
+        rels.insert("rIdPrev".to_string(), "../media/image2.wmf".to_string());
+        let mut archive = archive_with(&[("xl/media/image2.wmf", b"wmf")]);
+
+        let anchors = parse_ole_object_anchors(&sheet_xml, &rels, "xl/worksheets", &mut archive);
+        assert_eq!(anchors.len(), 1);
+        assert_eq!(anchors[0].image_path, "xl/media/image2.wmf");
+        assert_eq!(anchors[0].mime_type, "image/wmf");
+    }
+
+    /// An `<oleObject>` whose `<objectPr>` is absent, or whose `r:id` doesn't
+    /// resolve, is skipped (no zero-sized / path-less anchor).
+    #[test]
+    fn ole_object_without_objectpr_or_resolvable_rid_is_skipped() {
+        let sheet_xml = format!(
+            r#"<worksheet {ns}><sheetData/>
+              <oleObjects>
+                <oleObject shapeId="3" r:id="rIdData"/>
+                <oleObject shapeId="4" r:id="rIdData2">
+                  <objectPr r:id="rIdMissing">
+                    <anchor><from><xdr:col>0</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>0</xdr:row><xdr:rowOff>0</xdr:rowOff></from>
+                    <to><xdr:col>1</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>1</xdr:row><xdr:rowOff>0</xdr:rowOff></to></anchor>
+                  </objectPr>
+                </oleObject>
+              </oleObjects>
+            </worksheet>"#,
+            ns = OLE_NS,
+        );
+        let rels = HashMap::new(); // rIdMissing not present
+        let mut archive = archive_with(&[]);
+        let anchors = parse_ole_object_anchors(&sheet_xml, &rels, "xl/worksheets", &mut archive);
+        assert!(anchors.is_empty(), "no resolvable preview ⇒ no anchor");
+    }
+
+    /// Defensive guard (§18.3.1.56): when `objectPr@r:id` resolves to the object
+    /// *data* part (a `.bin` ⇒ `application/octet-stream`) rather than an image,
+    /// it must be skipped so object data never enters the picture pipeline.
+    #[test]
+    fn ole_object_pointing_at_bin_data_part_is_skipped() {
+        let sheet_xml = format!(
+            r#"<worksheet {ns}><sheetData/>
+              <oleObjects>
+                <oleObject progId="Excel.Sheet.12" shapeId="5" r:id="rIdData">
+                  <objectPr r:id="rIdBin">
+                    <anchor>
+                      <from><xdr:col>0</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>0</xdr:row><xdr:rowOff>0</xdr:rowOff></from>
+                      <to><xdr:col>2</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>2</xdr:row><xdr:rowOff>0</xdr:rowOff></to>
+                    </anchor>
+                  </objectPr>
+                </oleObject>
+              </oleObjects>
+            </worksheet>"#,
+            ns = OLE_NS,
+        );
+        let mut rels = HashMap::new();
+        // objectPr@r:id points at the embedded object data (.bin), which is what
+        // the ECMA-376 §18.3.1.56 text actually says this relationship targets.
+        rels.insert(
+            "rIdBin".to_string(),
+            "../embeddings/oleObject1.bin".to_string(),
+        );
+        let mut archive = archive_with(&[("xl/embeddings/oleObject1.bin", b"\x00\x01datablob")]);
+
+        let anchors = parse_ole_object_anchors(&sheet_xml, &rels, "xl/worksheets", &mut archive);
+        assert!(
+            anchors.is_empty(),
+            "a .bin (non-image) objectPr target must be skipped, got {} anchor(s)",
+            anchors.len()
+        );
     }
 }

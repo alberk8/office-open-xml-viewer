@@ -9,7 +9,7 @@ message: >-
   bridge in a `types.ts`) so a mismatch is caught at compile time.
 note: |
   Tripwire (severity: warning) — `ast-grep scan` reports it but does NOT fail
-  CI, so the ~116 pre-existing production double-casts are surfaced without
+  CI, so the ~110 pre-existing production double-casts are surfaced without
   turning the build red. The goal is to stop NEW ones from creeping in: when a
   reviewer sees a fresh warning here, the cast should be replaced with a real
   type rather than added to the pile.

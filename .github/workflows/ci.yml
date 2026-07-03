@@ -190,6 +190,7 @@ jobs:
       # Chrome is handled by the guarded step above (system Google Chrome), so we
       # install only the two bundled engines here.
       - name: Install Playwright WebKit + Firefox
+        timeout-minutes: 5
         run: pnpm exec playwright install webkit firefox --with-deps
       - name: Smoke tests
         run: pnpm smoke

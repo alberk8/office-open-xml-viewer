@@ -26,6 +26,7 @@ import type {
   AgileEncryptionDescriptor,
   AgileCipherParams,
   PasswordKeyEncryptor,
+  Bytes,
 } from './encryption-info';
 
 /** blockKey constants — [MS-OFFCRYPTO] §2.3.4.13 / §2.3.4.14. */
@@ -110,7 +111,7 @@ function assertSupportedCipher(p: AgileCipherParams): void {
   }
 }
 
-function concat(...parts: Uint8Array[]): Uint8Array {
+function concat(...parts: Uint8Array[]): Bytes {
   const total = parts.reduce((n, p) => n + p.length, 0);
   const out = new Uint8Array(total);
   let o = 0;
@@ -121,32 +122,31 @@ function concat(...parts: Uint8Array[]): Uint8Array {
   return out;
 }
 
-function le32(n: number): Uint8Array {
+function le32(n: number): Bytes {
   const b = new Uint8Array(4);
   new DataView(b.buffer).setUint32(0, n >>> 0, true);
   return b;
 }
 
 /** UTF-16LE bytes of a JS string (each code unit little-endian). */
-function utf16le(s: string): Uint8Array {
+function utf16le(s: string): Bytes {
   const out = new Uint8Array(s.length * 2);
   const view = new DataView(out.buffer);
   for (let i = 0; i < s.length; i++) view.setUint16(i * 2, s.charCodeAt(i), true);
   return out;
 }
 
-async function digest(hash: string, data: Uint8Array): Promise<Uint8Array> {
+async function digest(hash: string, data: Bytes): Promise<Bytes> {
   return new Uint8Array(await subtle().digest(hash, data));
 }
 
 /** Truncate or right-pad (0x36) `data` to exactly `len` bytes (§2.3.4.11 /
  *  §2.3.4.12 fitting rule). */
-function fitTo(data: Uint8Array, len: number): Uint8Array {
-  if (data.length === len) return data;
+function fitTo(data: Uint8Array, len: number): Bytes {
   if (data.length > len) return data.slice(0, len);
   const out = new Uint8Array(len);
   out.set(data);
-  out.fill(PAD_BYTE, data.length);
+  if (data.length < len) out.fill(PAD_BYTE, data.length);
   return out;
 }
 
@@ -164,7 +164,7 @@ export async function deriveAgileKey(
   params: AgileCipherParams,
   spinCount: number,
   blockKey: Uint8Array,
-): Promise<Uint8Array> {
+): Promise<Bytes> {
   const hash = webCryptoHash(params.hashAlgorithm);
   let h = await digest(hash, concat(params.saltValue, utf16le(password)));
   for (let i = 0; i < spinCount; i++) {
@@ -179,7 +179,7 @@ export async function deriveIv(
   params: AgileCipherParams,
   salt: Uint8Array,
   blockKey: Uint8Array | null,
-): Promise<Uint8Array> {
+): Promise<Bytes> {
   const iv = blockKey ? await digest(webCryptoHash(params.hashAlgorithm), concat(salt, blockKey)) : salt;
   return fitTo(iv, params.blockSize);
 }
@@ -201,10 +201,10 @@ export async function deriveIv(
  * AES-CBC encrypt with a zero IV (CBC with IV=0 over a single block == ECB).
  */
 async function aesCbcDecryptNoPad(
-  key: Uint8Array,
-  iv: Uint8Array,
+  key: Bytes,
+  iv: Bytes,
   ciphertext: Uint8Array,
-): Promise<Uint8Array> {
+): Promise<Bytes> {
   const blockSize = iv.length;
   if (ciphertext.length === 0) return new Uint8Array(0);
   if (ciphertext.length % blockSize !== 0) {
@@ -232,7 +232,7 @@ async function aesCbcDecryptNoPad(
   return decrypted.length >= ciphertext.length ? decrypted.subarray(0, ciphertext.length) : decrypted;
 }
 
-function xorBytes(a: Uint8Array, b: Uint8Array): Uint8Array {
+function xorBytes(a: Uint8Array, b: Uint8Array): Bytes {
   const out = new Uint8Array(a.length);
   for (let i = 0; i < a.length; i++) out[i] = a[i] ^ b[i];
   return out;
@@ -277,7 +277,7 @@ function timingSafeEqual(a: Uint8Array, b: Uint8Array): boolean {
 export async function deriveIntermediateKey(
   password: string,
   pke: PasswordKeyEncryptor,
-): Promise<Uint8Array> {
+): Promise<Bytes> {
   const key = await deriveAgileKey(password, pke, pke.spinCount, BLOCK_KEY.keyValue);
   const iv = await deriveIv(pke, pke.saltValue, null);
   const intermediate = await aesCbcDecryptNoPad(key, iv, pke.encryptedKeyValue);
@@ -294,8 +294,8 @@ export async function deriveIntermediateKey(
 export async function decryptPackage(
   encryptedPackage: Uint8Array,
   keyData: AgileCipherParams,
-  intermediateKey: Uint8Array,
-): Promise<Uint8Array> {
+  intermediateKey: Bytes,
+): Promise<Bytes> {
   assertSupportedCipher(keyData);
   if (encryptedPackage.length < 8) {
     throw new AgileDecryptError('corrupt', 'EncryptedPackage is shorter than its size prefix');
@@ -340,7 +340,7 @@ export async function decryptAgilePackage(
   descriptor: AgileEncryptionDescriptor,
   encryptedPackage: Uint8Array,
   password: string,
-): Promise<Uint8Array> {
+): Promise<Bytes> {
   const { keyData, passwordKeyEncryptor } = descriptor;
   assertSupportedCipher(keyData);
   assertSupportedCipher(passwordKeyEncryptor);

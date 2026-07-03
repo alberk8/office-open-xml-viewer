@@ -19,6 +19,16 @@
  * This is not a general XML reader — it targets exactly this schema.
  */
 
+/**
+ * Byte buffer backed by a plain `ArrayBuffer` (not `SharedArrayBuffer`). The
+ * WebCrypto `SubtleCrypto` methods require a `BufferSource` over an
+ * `ArrayBuffer`, and TypeScript's strict `Uint8Array<ArrayBufferLike>` default
+ * would otherwise not satisfy that. All byte values in this module come from
+ * fresh `new Uint8Array(n)` allocations (via base64 decoding), which are
+ * `Uint8Array<ArrayBuffer>`, so this alias is accurate.
+ */
+export type Bytes = Uint8Array<ArrayBuffer>;
+
 /** Discriminates the version of the EncryptionInfo stream. */
 export type EncryptionInfoKind =
   | { kind: 'agile'; descriptor: AgileEncryptionDescriptor }
@@ -37,21 +47,21 @@ export interface AgileCipherParams {
   cipherChaining: string; // "ChainingModeCBC" | "ChainingModeCFB"
   hashAlgorithm: string; // "SHA512" | "SHA384" | "SHA256" | "SHA1" | ...
   /** Decoded `saltValue` (base64 in the XML). */
-  saltValue: Uint8Array;
+  saltValue: Bytes;
 }
 
 /** The `<p:encryptedKey>` password key encryptor (§2.3.4.10). */
 export interface PasswordKeyEncryptor extends AgileCipherParams {
   spinCount: number;
-  encryptedVerifierHashInput: Uint8Array;
-  encryptedVerifierHashValue: Uint8Array;
-  encryptedKeyValue: Uint8Array;
+  encryptedVerifierHashInput: Bytes;
+  encryptedVerifierHashValue: Bytes;
+  encryptedKeyValue: Bytes;
 }
 
 /** Optional `<dataIntegrity>` (§2.3.4.10 / verification §2.3.4.14). */
 export interface DataIntegrity {
-  encryptedHmacKey: Uint8Array;
-  encryptedHmacValue: Uint8Array;
+  encryptedHmacKey: Bytes;
+  encryptedHmacValue: Bytes;
 }
 
 /** The parsed Agile descriptor. */
@@ -62,7 +72,7 @@ export interface AgileEncryptionDescriptor {
 }
 
 /** Decode standard base64 to bytes (no atob dependency — works in Node too). */
-function base64ToBytes(b64: string): Uint8Array {
+function base64ToBytes(b64: string): Bytes {
   // atob exists in browsers and in modern Node globals; Buffer is the Node
   // fallback. Guard both so this runs anywhere.
   if (typeof atob === 'function') {

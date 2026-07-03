@@ -9,7 +9,12 @@ import {
   AgileDecryptError,
   BLOCK_KEY,
 } from './agile';
-import { parseEncryptionInfo, type AgileCipherParams, type PasswordKeyEncryptor } from './encryption-info';
+import {
+  parseEncryptionInfo,
+  type AgileCipherParams,
+  type PasswordKeyEncryptor,
+  type Bytes,
+} from './encryption-info';
 import { readCfbStream } from '../errors/cfb-read';
 import { encryptedDocxSpin0 } from '../testing/encrypted-fixture';
 
@@ -31,7 +36,7 @@ function hex(bytes: Uint8Array): string {
 }
 
 /** Minimal SHA512/AES-CBC/256 params sharing the fixed salts above. */
-function params(salt: Uint8Array): AgileCipherParams {
+function params(salt: Bytes): AgileCipherParams {
   return {
     saltSize: 16,
     blockSize: 16,
@@ -60,10 +65,16 @@ describe('deriveAgileKey — §2.3.4.11 spin loop (pinned vectors)', () => {
     expect(hex(key)).toBe('cdfed59d5986a51270695235bc3df0ab81bb67400fa5174fdf6084d5c801f3c1');
   });
 
-  it('derives the keyValue key at the real-world spinCount 100000', async () => {
-    const key = await deriveAgileKey(PW, params(PW_SALT), 100000, BLOCK_KEY.keyValue);
-    expect(hex(key)).toBe('e68661b7e2a2d211e6a0ecad75de1ac49fc02c7db6ddeb882d5379e32fcee03c');
-  });
+  it(
+    'derives the keyValue key at the real-world spinCount 100000',
+    async () => {
+      // ~1.2 s of awaited subtle.digest on its own; give it headroom so the
+      // full suite (running in parallel, contending for CPU) never flakes.
+      const key = await deriveAgileKey(PW, params(PW_SALT), 100000, BLOCK_KEY.keyValue);
+      expect(hex(key)).toBe('e68661b7e2a2d211e6a0ecad75de1ac49fc02c7db6ddeb882d5379e32fcee03c');
+    },
+    20_000,
+  );
 });
 
 describe('deriveIv — §2.3.4.12', () => {

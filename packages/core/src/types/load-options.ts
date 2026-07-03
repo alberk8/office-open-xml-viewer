@@ -22,6 +22,24 @@ export interface LoadOptions {
    */
   useGoogleFonts?: boolean;
   /**
+   * Password for an encrypted OOXML file ([MS-OFFCRYPTO] Agile Encryption).
+   *
+   * Password-protected Office documents are CFB (OLE2) containers, not ZIPs.
+   * When this is set and the input is Agile-encrypted, `load()` decrypts it on
+   * the main thread (via WebCrypto) and parses the recovered plaintext ZIP.
+   *
+   * Errors (thrown as {@link import('../errors/ooxml-error').OoxmlError}):
+   *   - no `password` on an encrypted file → code `'encrypted'`
+   *   - wrong `password`                   → code `'invalid-password'`
+   *   - a non-Agile scheme (Standard / Extensible / legacy) → code
+   *     `'unsupported-encryption'`
+   *
+   * Note: Agile Encryption uses a high password-hash spin count (commonly
+   * 100,000), so decryption of a protected file adds roughly a second of
+   * WebCrypto work before parsing begins.
+   */
+  password?: string;
+  /**
    * Override the URL the parser worker fetches the WebAssembly module from.
    *
    * By default each format resolves the `.wasm` asset that ships next to its

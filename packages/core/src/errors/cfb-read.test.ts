@@ -107,7 +107,7 @@ describe('readCfbStream — robustness (never throws, returns null on corruption
       const bytes = randomBytes(rand, len);
       const sig = [0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1];
       for (let j = 0; j < sig.length; j++) bytes[j] = sig[j];
-      let result: Uint8Array | null = null;
+      let result: Uint8Array | null | undefined;
       expect(() => {
         result = readCfbStream(bytes, 'EncryptionInfo');
       }).not.toThrow();

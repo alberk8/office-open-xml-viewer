@@ -2691,6 +2691,17 @@ fn parse_run_inner(
                     runs.push(DocRun::Shape(Box::new(shp)));
                 }
             }
+            "object" => {
+                // Embedded OLE object (§17.3.3.19 CT_Object). We can't run the
+                // embedded application, but Word bakes a preview image into a
+                // legacy VML `<v:shape><v:imagedata r:id>` for exactly this case.
+                // Surface that preview through the ordinary inline-image pipeline
+                // (the preview is usually EMF/WMF, which core already rasterizes)
+                // instead of silently dropping the object.
+                if let Some(img) = parse_object_ole_image(child, media_map) {
+                    runs.push(DocRun::Image(img));
+                }
+            }
             _ => {}
         }
     }
@@ -4363,6 +4374,89 @@ fn parse_vml_pict(
         text_inset_r: 91440.0 / 12700.0,
         text_inset_b: 45720.0 / 12700.0,
         ..Default::default()
+    })
+}
+
+/// Extract the preview image from an embedded OLE object (`<w:object>`,
+/// §17.3.3.19 CT_Object). Word represents the object's on-page appearance as a
+/// legacy VML `<v:shape>` (or `<v:rect>`/`<v:roundrect>`/`<v:oval>`) carrying a
+/// `<v:imagedata r:id>` — the rId of a rasterized preview part (usually
+/// EMF/WMF). Resolve that part through the media map and return it as an inline
+/// `ImageRun` sized from the VML shape's CSS `style` (pt), falling back to the
+/// object's `w:dxaOrig`/`w:dyaOrig` (twentieths of a point) when the shape
+/// omits explicit dimensions. Returns `None` when there is no drawable
+/// `<v:imagedata>` (an icon-only or link-only object), preserving the prior
+/// silent-skip rather than emitting a zero-sized or path-less image.
+fn parse_object_ole_image(
+    object: roxmltree::Node,
+    media_map: &HashMap<String, String>,
+) -> Option<ImageRun> {
+    // The preview lives in the first VML shape's `<v:imagedata r:id>`.
+    let imagedata = object
+        .descendants()
+        .find(|n| n.is_element() && n.tag_name().name() == "imagedata")?;
+    let rid = imagedata
+        .attribute((R_NS, "id"))
+        .or_else(|| imagedata.attribute("id"))?;
+    let image_path = media_map.get(rid)?.clone();
+    let mime_type = mime_from_ext(&image_path).to_string();
+
+    // Size: prefer the VML shape's CSS `style` width/height (pt); else the
+    // object's `w:dxaOrig`/`w:dyaOrig` (1/20 pt). VML CSS lengths default to pt.
+    let shape = object.descendants().find(|n| {
+        n.is_element() && matches!(n.tag_name().name(), "shape" | "rect" | "roundrect" | "oval")
+    });
+    let style = shape.and_then(|s| s.attribute("style")).unwrap_or("");
+    let css_pt = |prop: &str| -> Option<f64> {
+        for decl in style.split(';') {
+            let mut kv = decl.splitn(2, ':');
+            let k = kv.next()?.trim();
+            let v = kv.next()?.trim();
+            if k.eq_ignore_ascii_case(prop) {
+                return v.trim_end_matches("pt").trim().parse::<f64>().ok();
+            }
+        }
+        None
+    };
+    let dxa_pt = |name: &str| -> Option<f64> {
+        object
+            .attribute((W_NS, name))
+            .or_else(|| object.attribute(name))
+            .and_then(|v| v.trim().parse::<f64>().ok())
+            .map(|twentieths| twentieths / 20.0)
+    };
+    let width_pt = css_pt("width").or_else(|| dxa_pt("dxaOrig")).unwrap_or(0.0);
+    let height_pt = css_pt("height")
+        .or_else(|| dxa_pt("dyaOrig"))
+        .unwrap_or(0.0);
+    if width_pt <= 0.0 || height_pt <= 0.0 {
+        return None;
+    }
+
+    Some(ImageRun {
+        image_path,
+        mime_type,
+        svg_image_path: None,
+        src_rect: None,
+        width_pt,
+        height_pt,
+        anchor: false,
+        anchor_x_pt: 0.0,
+        anchor_y_pt: 0.0,
+        anchor_x_from_margin: false,
+        anchor_y_from_para: false,
+        color_replace_from: None,
+        wrap_mode: None,
+        dist_top: 0.0,
+        dist_bottom: 0.0,
+        dist_left: 0.0,
+        dist_right: 0.0,
+        wrap_side: None,
+        allow_overlap: true,
+        anchor_x_align: None,
+        anchor_y_align: None,
+        anchor_x_relative_from: None,
+        anchor_y_relative_from: None,
     })
 }
 
@@ -10597,5 +10691,136 @@ mod numbering_marker_font_tests {
         assert_eq!(bottom.color.as_deref(), Some("ff0000"));
         // The cell left no insideH inline ⇒ it comes from the firstRow condition (nil).
         assert_eq!(b.inside_h.as_ref().map(|x| x.style.as_str()), Some("nil"));
+    }
+}
+
+#[cfg(test)]
+mod ole_object_tests {
+    use super::*;
+
+    const OLE_NS: &str = concat!(
+        r#" xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main""#,
+        r#" xmlns:v="urn:schemas-microsoft-com:vml""#,
+        r#" xmlns:o="urn:schemas-microsoft-com:office:office""#,
+        r#" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships""#
+    );
+
+    fn image_runs(body_xml: &str, media: &HashMap<String, String>) -> Vec<ImageRun> {
+        let doc = roxmltree::Document::parse(body_xml).unwrap();
+        let body = doc
+            .root_element()
+            .descendants()
+            .find(|n| n.tag_name().name() == "body")
+            .unwrap();
+        let mut num_map = NumberingMap::default();
+        let elems = parse_body_elements(
+            body,
+            &StyleMap::default(),
+            &mut num_map,
+            media,
+            &HashMap::new(),
+            &ThemeColors::default(),
+            &HashMap::new(),
+        );
+        elems
+            .into_iter()
+            .filter_map(|e| match e {
+                BodyElement::Paragraph(p) => Some(p),
+                _ => None,
+            })
+            .flat_map(|p| p.runs.into_iter())
+            .filter_map(|r| match r {
+                DocRun::Image(img) => Some(img),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A `<w:object>` (§17.3.3.19) wraps a legacy VML `<v:shape>` whose
+    /// `<v:imagedata r:id>` is the OLE preview image. It must surface as an
+    /// inline ImageRun sized from the shape's CSS `style` (pt), resolved through
+    /// the media map — not be silently dropped.
+    #[test]
+    fn object_vml_imagedata_emits_inline_image() {
+        let body = format!(
+            r##"<w:document{ns}><w:body>
+              <w:p><w:r><w:object w:dxaOrig="3000" w:dyaOrig="1500">
+                <v:shape id="_x0000_i1026" type="#_x0000_t75" style="width:150pt;height:75pt" o:ole="">
+                  <v:imagedata r:id="rIdPrev" o:title=""/>
+                </v:shape>
+                <o:OLEObject Type="Embed" ProgID="Excel.Sheet.12" ShapeID="_x0000_i1026"
+                  DrawAspect="Content" ObjectID="_1234" r:id="rIdData"/>
+              </w:object></w:r></w:p>
+            </w:body></w:document>"##,
+            ns = OLE_NS,
+        );
+        let mut media = HashMap::new();
+        media.insert("rIdPrev".to_string(), "word/media/image1.emf".to_string());
+
+        let imgs = image_runs(&body, &media);
+        assert_eq!(imgs.len(), 1, "one preview image from the OLE object");
+        assert_eq!(imgs[0].image_path, "word/media/image1.emf");
+        assert!(!imgs[0].anchor, "OLE preview is inline");
+        assert!(
+            (imgs[0].width_pt - 150.0).abs() < 1e-6,
+            "width from style width:150pt, got {}",
+            imgs[0].width_pt
+        );
+        assert!(
+            (imgs[0].height_pt - 75.0).abs() < 1e-6,
+            "height from style height:75pt, got {}",
+            imgs[0].height_pt
+        );
+    }
+
+    /// When the `<v:shape>` carries no CSS `style` dimensions, the size falls
+    /// back to `<w:object w:dxaOrig / w:dyaOrig>` (twentieths of a point,
+    /// §17.3.3.19), so the image is never zero-sized.
+    #[test]
+    fn object_falls_back_to_dxa_orig_size() {
+        let body = format!(
+            r##"<w:document{ns}><w:body>
+              <w:p><w:r><w:object w:dxaOrig="2880" w:dyaOrig="1440">
+                <v:shape id="s2" type="#_x0000_t75">
+                  <v:imagedata r:id="rIdPrev" o:title=""/>
+                </v:shape>
+                <o:OLEObject Type="Embed" ProgID="Equation.3" ShapeID="s2" r:id="rIdData"/>
+              </w:object></w:r></w:p>
+            </w:body></w:document>"##,
+            ns = OLE_NS,
+        );
+        let mut media = HashMap::new();
+        media.insert("rIdPrev".to_string(), "word/media/image2.wmf".to_string());
+
+        let imgs = image_runs(&body, &media);
+        assert_eq!(imgs.len(), 1);
+        // 2880 twentieths / 20 = 144pt, 1440 / 20 = 72pt.
+        assert!(
+            (imgs[0].width_pt - 144.0).abs() < 1e-6,
+            "dxaOrig 2880 → 144pt, got {}",
+            imgs[0].width_pt
+        );
+        assert!(
+            (imgs[0].height_pt - 72.0).abs() < 1e-6,
+            "dyaOrig 1440 → 72pt, got {}",
+            imgs[0].height_pt
+        );
+    }
+
+    /// A `<w:object>` whose shape has no `<v:imagedata>` (unresolvable preview)
+    /// emits nothing, preserving the prior silent-skip.
+    #[test]
+    fn object_without_imagedata_emits_nothing() {
+        let body = format!(
+            r#"<w:document{ns}><w:body>
+              <w:p><w:r><w:object w:dxaOrig="100" w:dyaOrig="100">
+                <v:shape id="s3" style="width:50pt;height:50pt"/>
+                <o:OLEObject Type="Embed" ProgID="Package" ShapeID="s3" r:id="rIdData"/>
+              </w:object></w:r></w:p>
+            </w:body></w:document>"#,
+            ns = OLE_NS,
+        );
+        let imgs = image_runs(&body, &HashMap::new());
+        assert!(imgs.is_empty(), "no imagedata ⇒ no image run");
     }
 }

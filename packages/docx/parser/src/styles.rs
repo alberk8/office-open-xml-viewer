@@ -8,6 +8,18 @@ pub struct RunFmt {
     pub bold: Option<bool>,
     pub italic: Option<bool>,
     pub underline: Option<bool>,
+    /// ECMA-376 §17.3.2.40 `<w:u w:val>` — the raw ST_Underline (§17.18.99)
+    /// style value: `single` / `double` / `thick` / `dotted` / `dottedHeavy` /
+    /// `dash` / `dashedHeavy` / `dashLong` / `dashLongHeavy` / `dotDash` /
+    /// `dashDotHeavy` / `dotDotDash` / `dashDotDotHeavy` / `wave` / `wavyHeavy` /
+    /// `wavyDouble` / `words`. `None` for absent or `none`/`single` (the default
+    /// single rule needs no style hint; the renderer draws single from
+    /// `underline` alone). The renderer normalizes this WordprocessingML
+    /// vocabulary to the shared DrawingML ST_TextUnderlineType (§20.1.10.82).
+    pub underline_style: Option<String>,
+    /// ECMA-376 §17.3.2.40 `<w:u w:color>` — an underline-only colour (hex 6, or
+    /// the literal `auto`). `None` means the underline follows the glyph colour.
+    pub underline_color: Option<String>,
     pub strikethrough: Option<bool>,
     pub font_size: Option<f64>, // pt
     pub color: Option<String>,  // hex 6
@@ -711,6 +723,17 @@ pub(crate) fn apply_run(dst: &mut RunFmt, src: &RunFmt) {
     if src.underline.is_some() {
         dst.underline = src.underline;
     }
+    // §17.3.2.40 underline style / colour merge with the same set-value-wins rule
+    // as `highlight` (an Option<String>): a level that names a style/colour wins,
+    // absence inherits. A `<w:u w:val="none"/>` clears `underline` (drawn off) but
+    // leaves a stale inherited style/colour — harmless because the renderer never
+    // draws an underline whose `underline` bool is false.
+    if src.underline_style.is_some() {
+        dst.underline_style = src.underline_style.clone();
+    }
+    if src.underline_color.is_some() {
+        dst.underline_color = src.underline_color.clone();
+    }
     if src.strikethrough.is_some() {
         dst.strikethrough = src.strikethrough;
     }
@@ -1077,10 +1100,26 @@ pub fn parse_run_fmt(rpr: roxmltree::Node) -> RunFmt {
         ..Default::default()
     };
 
-    // Underline
+    // Underline (§17.3.2.40). `w:u@val` is ST_Underline (§17.18.99); the bool
+    // stays true for any non-"none" value so existing single-line paths keep
+    // working, and the raw value is carried for the renderer's style dispatch
+    // (skipping "single"/"none", which need no hint). `w:u@color` (§17.18.99 note)
+    // is an underline-only colour override (hex 6 or the literal "auto").
     if let Some(u) = child_w(rpr, "u") {
         let val = attr_w(u, "val").unwrap_or_else(|| "single".to_string());
         fmt.underline = Some(val != "none");
+        fmt.underline_style = if val == "none" || val == "single" {
+            None
+        } else {
+            Some(val)
+        };
+        if let Some(color) = attr_w(u, "color") {
+            // Lowercase like the sibling `color` field below: the renderer's
+            // `underlineColor !== 'auto'` check (§17.3.2.40's `color="auto"`
+            // sentinel) is a strict-case comparison, so a producer that emits
+            // "Auto" must still be normalized to the lowercase sentinel here.
+            fmt.underline_color = Some(color.to_lowercase());
+        }
     }
 
     // Font size — w:sz (§17.3.2.38) governs Latin and East Asian (CJK) text
@@ -1566,6 +1605,26 @@ mod tests {
     fn explicit_hex_color_is_lowercased() {
         let fmt = run_fmt_from(r#"<w:color w:val="FF0000"/>"#);
         assert_eq!(fmt.color.as_deref(), Some("ff0000"));
+    }
+
+    #[test]
+    fn underline_color_is_lowercased_like_sibling_color() {
+        // §17.3.2.40 w:u@color, hex case — must lowercase the same as the
+        // sibling w:color@val field above.
+        let fmt = run_fmt_from(r#"<w:u w:val="single" w:color="FF0000"/>"#);
+        assert_eq!(fmt.underline_color.as_deref(), Some("ff0000"));
+    }
+
+    #[test]
+    fn underline_color_auto_is_lowercased_so_renderer_sentinel_check_matches() {
+        // A producer that writes the capitalized "Auto" sentinel must still
+        // normalize to lowercase "auto": the TS renderer's underline-color
+        // override guard (`underlineColor !== 'auto'`) is a strict-case
+        // comparison, so an un-lowercased "Auto" would slip past it and be
+        // treated as a literal (invalid) hex color instead of "follow the
+        // glyph color".
+        let fmt = run_fmt_from(r#"<w:u w:val="single" w:color="Auto"/>"#);
+        assert_eq!(fmt.underline_color.as_deref(), Some("auto"));
     }
 
     #[test]

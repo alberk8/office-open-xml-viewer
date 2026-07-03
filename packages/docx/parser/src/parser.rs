@@ -2363,6 +2363,20 @@ fn parse_run_inner(
     let bold = fmt.bold.unwrap_or(false);
     let italic = fmt.italic.unwrap_or(false);
     let underline = fmt.underline.unwrap_or(false);
+    // §17.3.2.40 underline style / colour. Only carried when the run is actually
+    // underlined (a stale inherited style behind a `w:u val="none"` must not
+    // surface). `underline_style` stays raw ST_Underline (§17.18.99); the
+    // renderer maps it to DrawingML §20.1.10.82 for `core::drawUnderline`.
+    let underline_style = if underline {
+        fmt.underline_style.clone()
+    } else {
+        None
+    };
+    let underline_color = if underline {
+        fmt.underline_color.clone()
+    } else {
+        None
+    };
     let strikethrough = fmt.strikethrough.unwrap_or(false);
     let font_size = fmt.font_size.unwrap_or(DEFAULT_FONT_SIZE);
     let color = fmt.color.clone();
@@ -2418,6 +2432,8 @@ fn parse_run_inner(
                         bold,
                         italic,
                         underline,
+                        underline_style: underline_style.clone(),
+                        underline_color: underline_color.clone(),
                         strikethrough,
                         font_size,
                         color: color.clone(),
@@ -2470,6 +2486,8 @@ fn parse_run_inner(
                         bold,
                         italic,
                         underline,
+                        underline_style: underline_style.clone(),
+                        underline_color: underline_color.clone(),
                         strikethrough,
                         font_size,
                         color: color.clone(),
@@ -2510,6 +2528,8 @@ fn parse_run_inner(
                     bold,
                     italic,
                     underline,
+                    underline_style: underline_style.clone(),
+                    underline_color: underline_color.clone(),
                     strikethrough,
                     font_size,
                     color: color.clone(),
@@ -2645,6 +2665,8 @@ fn parse_run_inner(
                     bold,
                     italic,
                     underline,
+                    underline_style: underline_style.clone(),
+                    underline_color: underline_color.clone(),
                     strikethrough,
                     font_size,
                     color: color.clone(),
@@ -2802,6 +2824,48 @@ fn resolve_inline_blip(
     })
 }
 
+/// True when a WordprocessingML drawing container (`<wp:inline>` /
+/// `<wp:anchor>`) carries a `<wp:docPr hidden="1">`. `docPr` is the
+/// DrawingML `CT_NonVisualDrawingProps` (ECMA-376 §20.4.2.5, the `cNvPr`
+/// equivalent for a Word drawing), whose `hidden` (`xsd:boolean`, default
+/// `false`) marks the whole drawing as not-to-be-rendered. Only the container's
+/// *direct* `docPr` child is inspected. A hidden drawing emits nothing (image
+/// and shape alike) — the minimal skip; the surrounding text-wrap path operates
+/// on emitted runs, so suppressing the drawing also removes its wrap band,
+/// matching how pptx/xlsx drop a hidden shape entirely.
+fn drawing_container_hidden(container: roxmltree::Node) -> bool {
+    container
+        .children()
+        .find(|n| n.is_element() && n.tag_name().name() == "docPr")
+        .map(ooxml_common::drawing::nv_props_hidden)
+        .unwrap_or(false)
+}
+
+/// True when a group member — a `<wps:wsp>` shape, a `<pic:pic>` picture, or a
+/// nested `<wpg:grpSp>` — carries a `hidden="1"` on its OWN non-visual
+/// properties (`wps:cNvPr` / `pic:cNvPr` / `wpg:cNvPr` inside its `nv*Pr`
+/// wrapper; ECMA-376 §20.1.2.2.8). Only the node's direct wrapper is inspected,
+/// never a descendant, so a group's own props are not confused with a nested
+/// member's. A hidden member is not rendered (a hidden `grpSp` elides its
+/// subtree). The top-level `<wp:docPr>` covers the whole drawing; this covers
+/// individual members of a `<wpg:wgp>` graphics group.
+fn group_member_hidden(node: roxmltree::Node) -> bool {
+    for wrapper in &["nvSpPr", "nvPicPr", "nvGrpSpPr", "nvCxnSpPr"] {
+        if let Some(nv) = node
+            .children()
+            .find(|n| n.is_element() && n.tag_name().name() == *wrapper)
+        {
+            if let Some(cnv) = nv
+                .children()
+                .find(|n| n.is_element() && n.tag_name().name() == "cNvPr")
+            {
+                return ooxml_common::drawing::nv_props_hidden(cnv);
+            }
+        }
+    }
+    false
+}
+
 fn parse_inline_drawing(
     style_map: &StyleMap,
     node: roxmltree::Node,
@@ -2816,6 +2880,10 @@ fn parse_inline_drawing(
             Some(c) => c,
             None => return vec![],
         };
+        // §20.4.2.5 — a `<wp:docPr hidden="1">` inline drawing is not rendered.
+        if drawing_container_hidden(container) {
+            return vec![];
+        }
         // Resolve the picture's blip + `<wp:extent>` natural size. The Microsoft
         // 2016 SVG extension is handled inside `resolve_inline_blip` →
         // `resolve_blip_urls` (prefer the vector original, keep the raster as a
@@ -2869,6 +2937,12 @@ fn parse_inline_drawing(
         Some(c) => c,
         None => return vec![],
     };
+    // §20.4.2.5 — a `<wp:docPr hidden="1">` anchored drawing is not rendered.
+    // Suppressing it also drops its wrap band (the minimal skip; matching how a
+    // hidden pptx/xlsx shape simply does not exist).
+    if drawing_container_hidden(container) {
+        return vec![];
+    }
 
     // Parse positionH / positionV with relativeFrom
     let (pos_x, x_from_margin, x_align) = parse_anchor_pos_h(&container);
@@ -3310,6 +3384,10 @@ fn walk_group_images(
     results: &mut Vec<ImageRun>,
 ) {
     for child in group.children().filter(|n| n.is_element()) {
+        // §20.1.2.2.8 — skip a hidden group member (pic / nested grpSp).
+        if matches!(child.tag_name().name(), "pic" | "grpSp") && group_member_hidden(child) {
+            continue;
+        }
         match child.tag_name().name() {
             "pic" => {
                 if let Some(img) = parse_group_pic(
@@ -3629,6 +3707,11 @@ fn walk_group_children(
     results: &mut Vec<ShapeRun>,
 ) {
     for child in group.children().filter(|n| n.is_element()) {
+        // §20.1.2.2.8 — skip a group member (wsp / nested grpSp) whose own
+        // cNvPr is hidden. A hidden grpSp elides its whole subtree.
+        if matches!(child.tag_name().name(), "wsp" | "grpSp") && group_member_hidden(child) {
+            continue;
+        }
         match child.tag_name().name() {
             "wsp" => {
                 let idx = *z_order;
@@ -6674,6 +6757,124 @@ mod cs_toggle_tests {
         assert_eq!(run.cs, Some(true));
     }
 
+    /// §17.3.2.40 `<w:u w:val>` → ST_Underline (§17.18.99). All 18 enum values
+    /// must parse: `underline` stays true for every non-"none" value; the raw
+    /// value is carried through in `underline_style` EXCEPT for the plain single
+    /// rule (`single`), which needs no style hint (the renderer draws single from
+    /// the bool alone), and `none` (no underline at all).
+    #[test]
+    fn underline_val_all_st_underline_values_parse() {
+        // (val, expect_underline, expect_style)
+        let cases: &[(&str, bool, Option<&str>)] = &[
+            ("none", false, None),
+            ("single", true, None),
+            ("words", true, Some("words")),
+            ("double", true, Some("double")),
+            ("thick", true, Some("thick")),
+            ("dotted", true, Some("dotted")),
+            ("dottedHeavy", true, Some("dottedHeavy")),
+            ("dash", true, Some("dash")),
+            ("dashedHeavy", true, Some("dashedHeavy")),
+            ("dashLong", true, Some("dashLong")),
+            ("dashLongHeavy", true, Some("dashLongHeavy")),
+            ("dotDash", true, Some("dotDash")),
+            ("dashDotHeavy", true, Some("dashDotHeavy")),
+            ("dotDotDash", true, Some("dotDotDash")),
+            ("dashDotDotHeavy", true, Some("dashDotDotHeavy")),
+            ("wave", true, Some("wave")),
+            ("wavyHeavy", true, Some("wavyHeavy")),
+            ("wavyDouble", true, Some("wavyDouble")),
+        ];
+        for (val, exp_u, exp_s) in cases {
+            let body =
+                format!(r#"<w:p><w:r><w:rPr><w:u w:val="{val}"/></w:rPr><w:t>x</w:t></w:r></w:p>"#);
+            let run = run_of(&body);
+            assert_eq!(run.underline, *exp_u, "underline bool for val={val}");
+            assert_eq!(
+                run.underline_style.as_deref(),
+                *exp_s,
+                "underline_style for val={val}"
+            );
+        }
+    }
+
+    #[test]
+    fn underline_val_absent_leaves_style_none() {
+        // A run with no <w:u> at all: not underlined, no style.
+        let run = run_of(r#"<w:p><w:r><w:t>x</w:t></w:r></w:p>"#);
+        assert!(!run.underline);
+        assert_eq!(run.underline_style, None);
+        assert_eq!(run.underline_color, None);
+    }
+
+    #[test]
+    fn underline_color_hex_and_auto_parse() {
+        // §17.3.2.40 w:u@color — underline-only colour (hex 6 or literal "auto").
+        // Lowercased on parse like the sibling w:color@val field, so the
+        // renderer's `underlineColor !== 'auto'` sentinel check is reliable
+        // regardless of the source document's attribute casing.
+        let hex = run_of(
+            r#"<w:p><w:r><w:rPr><w:u w:val="single" w:color="FF0000"/></w:rPr><w:t>x</w:t></w:r></w:p>"#,
+        );
+        assert_eq!(hex.underline_color.as_deref(), Some("ff0000"));
+        let auto = run_of(
+            r#"<w:p><w:r><w:rPr><w:u w:val="wave" w:color="auto"/></w:rPr><w:t>x</w:t></w:r></w:p>"#,
+        );
+        assert_eq!(auto.underline_color.as_deref(), Some("auto"));
+        assert_eq!(auto.underline_style.as_deref(), Some("wave"));
+    }
+
+    #[test]
+    fn underline_none_drops_inherited_style_and_color() {
+        // A run that turns underline OFF must not surface any style/colour, even
+        // if a style chain set one earlier (drawn-off underline carries nothing).
+        let styles = r#"<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+            <w:style w:type="character" w:styleId="Wavy">
+                <w:rPr><w:u w:val="wave" w:color="00FF00"/></w:rPr>
+            </w:style>
+        </w:styles>"#;
+        let run = run_of_with_styles(
+            styles,
+            r#"<w:p><w:r><w:rPr><w:rStyle w:val="Wavy"/><w:u w:val="none"/></w:rPr><w:t>x</w:t></w:r></w:p>"#,
+        );
+        assert!(!run.underline, "explicit none turns underline off");
+        assert_eq!(run.underline_style, None);
+        assert_eq!(run.underline_color, None);
+    }
+
+    #[test]
+    fn character_style_underline_style_propagates_to_referencing_run() {
+        // §17.3.2.40 through the style chain (styles::apply_run): a character
+        // style's dotted underline + colour reaches a run that references it.
+        let styles = r#"<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+            <w:style w:type="character" w:styleId="Dotted">
+                <w:rPr><w:u w:val="dotted" w:color="0000FF"/></w:rPr>
+            </w:style>
+        </w:styles>"#;
+        let run = run_of_with_styles(
+            styles,
+            r#"<w:p><w:r><w:rPr><w:rStyle w:val="Dotted"/></w:rPr><w:t>x</w:t></w:r></w:p>"#,
+        );
+        assert!(run.underline);
+        assert_eq!(run.underline_style.as_deref(), Some("dotted"));
+        assert_eq!(run.underline_color.as_deref(), Some("0000ff"));
+    }
+
+    #[test]
+    fn direct_underline_style_overrides_style_chain() {
+        // A direct run rPr underline wins over the referenced character style's.
+        let styles = r#"<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+            <w:style w:type="character" w:styleId="Dotted">
+                <w:rPr><w:u w:val="dotted"/></w:rPr>
+            </w:style>
+        </w:styles>"#;
+        let run = run_of_with_styles(
+            styles,
+            r#"<w:p><w:r><w:rPr><w:rStyle w:val="Dotted"/><w:u w:val="wave"/></w:rPr><w:t>x</w:t></w:r></w:p>"#,
+        );
+        assert_eq!(run.underline_style.as_deref(), Some("wave"));
+    }
+
     #[test]
     fn rfonts_cs_attribute_does_not_set_the_toggle() {
         // rFonts@cs is only a font SLOT (§17.3.2.26) — it must not force cs.
@@ -8523,6 +8724,100 @@ mod anchor_image_relative_from_tests {
         let img = first_image(&doc);
         assert!(img.anchor_x_relative_from.is_none());
         assert!(img.anchor_y_relative_from.is_none());
+    }
+
+    fn count_drawing_runs(doc: &Document) -> usize {
+        doc.body
+            .iter()
+            .filter_map(|el| match el {
+                BodyElement::Paragraph(p) => Some(
+                    p.runs
+                        .iter()
+                        .filter(|r| matches!(r, DocRun::Image(_) | DocRun::Shape(_)))
+                        .count(),
+                ),
+                _ => None,
+            })
+            .sum()
+    }
+
+    /// §20.4.2.5 — an inline drawing whose `<wp:docPr hidden="1">` is set is not
+    /// rendered. `hidden="0"` / absent keeps the image.
+    #[test]
+    fn inline_drawing_hidden_docpr_is_skipped() {
+        let inline = |doc_pr: &str| {
+            format!(
+                r#"<w:p><w:r><w:drawing>
+  <wp:inline xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
+             xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+             xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+    <wp:extent cx="304800" cy="304800"/>
+    {doc_pr}
+    <a:graphic><a:graphicData>
+      <pic:pic xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">
+        <pic:blipFill><a:blip r:embed="rIdPng"/></pic:blipFill>
+      </pic:pic>
+    </a:graphicData></a:graphic>
+  </wp:inline>
+</w:drawing></w:r></w:p>"#
+            )
+        };
+        // hidden → dropped.
+        for dp in [
+            r#"<wp:docPr id="1" name="img" hidden="1"/>"#,
+            r#"<wp:docPr id="1" name="img" hidden="true"/>"#,
+        ] {
+            let doc = parse_from_bytes(&build_docx(&inline(dp))).expect("parse ok");
+            assert_eq!(
+                count_drawing_runs(&doc),
+                0,
+                "hidden inline not skipped: {dp}"
+            );
+        }
+        // visible → kept.
+        for dp in [
+            r#"<wp:docPr id="1" name="img"/>"#,
+            r#"<wp:docPr id="1" name="img" hidden="0"/>"#,
+            r#"<wp:docPr id="1" name="img" hidden="false"/>"#,
+        ] {
+            let doc = parse_from_bytes(&build_docx(&inline(dp))).expect("parse ok");
+            assert_eq!(count_drawing_runs(&doc), 1, "visible inline dropped: {dp}");
+        }
+    }
+
+    /// §20.4.2.5 — an anchored drawing whose `<wp:docPr hidden="1">` is set is
+    /// not rendered (and thus reserves no wrap band).
+    #[test]
+    fn anchor_drawing_hidden_docpr_is_skipped() {
+        let anchor = |doc_pr: &str| {
+            format!(
+                r#"<w:p><w:r><w:drawing>
+  <wp:anchor xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
+             xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+             xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+             behindDoc="0" distT="0" distB="0" distL="0" distR="0" allowOverlap="1" relativeHeight="1">
+    <wp:positionH relativeFrom="page"><wp:posOffset>0</wp:posOffset></wp:positionH>
+    <wp:positionV relativeFrom="page"><wp:posOffset>0</wp:posOffset></wp:positionV>
+    <wp:extent cx="304800" cy="304800"/>
+    <wp:wrapNone/>
+    {doc_pr}
+    <a:graphic><a:graphicData>
+      <pic:pic xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">
+        <pic:blipFill><a:blip r:embed="rIdPng"/></pic:blipFill>
+      </pic:pic>
+    </a:graphicData></a:graphic>
+  </wp:anchor>
+</w:drawing></w:r></w:p>"#
+            )
+        };
+        let hidden = parse_from_bytes(&build_docx(&anchor(
+            r#"<wp:docPr id="1" name="img" hidden="1"/>"#,
+        )))
+        .expect("parse ok");
+        assert_eq!(count_drawing_runs(&hidden), 0, "hidden anchor not skipped");
+        let visible =
+            parse_from_bytes(&build_docx(&anchor(r#"<wp:docPr id="1" name="img"/>"#))).expect("ok");
+        assert_eq!(count_drawing_runs(&visible), 1, "visible anchor dropped");
     }
 }
 

@@ -1266,6 +1266,26 @@ function renderAreaChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
   const cats = chartCategories(chart);
   const n = cats.length; if (n === 0) return;
   const stacked = chart.chartType === 'stackedArea' || chart.chartType === 'stackedAreaPct';
+  // stackedAreaPct (`<c:grouping val="percentStacked">`, ECMA-376 §21.2.2.75)
+  // normalizes each category to its Σ|v| so the stack always tops out at 100%,
+  // matching the stackedLine/stackedLinePct (renderLineChart) and bar/column
+  // percentStacked convention (sign-preserving per-value normalization against
+  // the per-category |v| sum).
+  const pct = chart.chartType === 'stackedAreaPct';
+  const pctTotals = pct
+    ? cats.map((_, ci) => {
+        let t = 0;
+        for (const s of chart.series) t += Math.abs(s.values[ci] ?? 0);
+        return t || 1;
+      })
+    : null;
+  // The stacked (normalized when pct) contribution of series `si` at category
+  // `ci` — what actually gets added to the running stack base/top. Un-stacked
+  // charts never call this (raw values are used directly below).
+  const stackedValue = (si: number, ci: number): number => {
+    const raw = chart.series[si].values[ci] ?? 0;
+    return pct && pctTotals ? (raw / pctTotals[ci]) * 100 : raw;
+  };
 
   // Shared frame bands. Area uses title pads 0.035 / 0.035 and default 0.22
   // side-legend reserve — params keep pixels unchanged.
@@ -1306,12 +1326,15 @@ function renderAreaChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
   for (let ci = 0; ci < n; ci++) {
     if (stacked) {
       let sum = 0;
-      for (const s of chart.series) sum += s.values[ci] ?? 0;
+      for (let si = 0; si < chart.series.length; si++) sum += stackedValue(si, ci);
       dataMax = Math.max(dataMax, sum);
     } else {
       for (const s of chart.series) dataMax = Math.max(dataMax, s.values[ci] ?? 0);
     }
   }
+  // percentStacked always tops out at exactly 100% (each category's Σ|v|
+  // normalizes to 100), matching the bar/line percentStacked axis convention.
+  if (pct) dataMax = dataMax > 0 ? 100 : 0;
   if (chart.valMax != null) dataMax = chart.valMax;
   if (dataMax === 0) dataMax = 1;
   // Area anchors the value axis at 0; ignore the returned min. Value axis is
@@ -1347,14 +1370,14 @@ function renderAreaChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
     ctx.beginPath();
     if (stacked && stackBase) {
       for (let ci = 0; ci < n; ci++) {
-        const v = (s.values[ci] ?? 0) + stackBase[ci];
+        const v = stackedValue(si, ci) + stackBase[ci];
         const px = toX(ci); const py = toY(v);
         if (ci === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
       }
       for (let ci = n - 1; ci >= 0; ci--) {
         ctx.lineTo(toX(ci), toY(stackBase[ci]));
       }
-      for (let ci = 0; ci < n; ci++) stackBase[ci] += s.values[ci] ?? 0;
+      for (let ci = 0; ci < n; ci++) stackBase[ci] += stackedValue(si, ci);
     } else {
       ctx.moveTo(toX(0), baseY);
       for (let ci = 0; ci < n; ci++) ctx.lineTo(toX(ci), toY(s.values[ci] ?? 0));

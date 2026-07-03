@@ -284,6 +284,48 @@ describe('CH2 — stackedLine / stackedLinePct stack cumulatively', () => {
   });
 });
 
+describe('CH4 — stackedAreaPct normalizes like the line/bar percentStacked convention', () => {
+  it('stackedAreaPct normalizes each category to 100%', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'stackedAreaPct',
+      categories: ['A', 'B'],
+      series: [
+        series({ name: 'S1', values: [10, 30] }),
+        series({ name: 'S2', values: [30, 10] }),
+      ],
+    }), RECT, 1);
+    const nums = rec.texts.map(t => Number(String(t.text).replace('%', '')))
+      .filter(v => Number.isFinite(v));
+    // The cumulative top series always reaches exactly 100% per category, so the
+    // axis carries a 100 gridline. Raw magnitudes (max cumulative 40) never
+    // appear — the axis is normalized, not driven by the raw sums (this was Red
+    // before the fix: stackedAreaPct was treated identically to stackedArea, so
+    // the axis topped out at the raw cumulative 40 instead of 100).
+    expect(nums).toContain(100);
+    expect(Math.max(...nums)).toBeGreaterThanOrEqual(100);
+    expect(Math.max(...nums)).toBeLessThanOrEqual(120);
+  });
+
+  it('stackedArea (non-percent) is unaffected — axis reflects the raw cumulative sum', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'stackedArea',
+      categories: ['A', 'B'],
+      series: [
+        series({ name: 'S1', values: [10, 30] }),
+        series({ name: 'S2', values: [30, 10] }),
+      ],
+    }), RECT, 1);
+    const nums = rec.texts.map(t => Number(String(t.text).replace('%', '')))
+      .filter(v => Number.isFinite(v));
+    // Raw cumulative max per category is 40 (10+30 / 30+10); the axis must scale
+    // to that magnitude, not be normalized to 100.
+    expect(Math.max(...nums)).toBeGreaterThanOrEqual(40);
+    expect(nums).not.toContain(100);
+  });
+});
+
 describe('CH3 — labels are locale-independent (§18.8.30)', () => {
   // `toLocaleString()` groups thousands in every common locale, so an explicit
   // no-separator format code ("0") is the discriminator: the §18.8.30 engine

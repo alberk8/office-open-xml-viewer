@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { renderDocumentToCanvas } from './renderer.js';
+import { renderDocumentToCanvas, type RenderState } from './renderer.js';
+import { splitTextForLayout, layoutLines, buildSegments, type LayoutTextSeg } from './line-layout.js';
 import type { DocParagraph, DocxDocumentModel, SectionProps, DocRun } from './types.js';
 
 // ECMA-376 §17.3.3 run-content elements that were previously dropped by the
@@ -178,12 +179,71 @@ describe('noBreakHyphen (§17.3.3.18) and softHyphen (§17.3.3.29)', () => {
     expect(drawn).toContain('99');
   });
 
-  it('softHyphen contributes no glyph (parser drops it) so the word is contiguous', async () => {
-    // The parser emits nothing for <w:softHyphen>, so a run authored as
-    // "br"+softHyphen+"eaking" reaches the renderer as just "br" | "eaking".
+  // §17.3.3.18: "without that hyphen being a line breaking position". The
+  // parser injects a real '-' (U+002D) into the run's text rather than a
+  // dedicated break-suppressing token, so the WHOLE non-breaking guarantee
+  // rests on `splitTextForLayout` (line-layout.ts) never treating '-' as a
+  // token boundary — it must open break opportunities at spaces ONLY. Pin
+  // that contract directly: if `splitTextForLayout` is ever changed to also
+  // split on '-' (e.g. to support ordinary-hyphen wrapping), this fails.
+  it('splitTextForLayout does not open a break opportunity at a hyphen', () => {
+    expect(splitTextForLayout('999-99-9999')).toEqual(['999-99-9999']);
+    // Trailing spaces travel WITH the preceding token (splitTextForLayout's
+    // documented behaviour), so "co-operative " keeps its space; the point
+    // here is that '-' inside the token never itself starts a new token.
+    expect(splitTextForLayout('co-operative society')).toEqual(['co-operative ', 'society']);
+  });
+
+  // End-to-end companion: run the exact single-token text a same-formatting
+  // noBreakHyphen merge produces (`text_runs_mergeable`/parser.rs — see the
+  // spec's own §17.3.3.18 example, "999-99-9999" split into three <w:r> at
+  // the hyphen positions and merged back into one DocRun::Text) through the
+  // REAL tokenizer (`buildSegments`, which calls `splitTextForLayout`) and
+  // then `layoutLines`, placed after a leading word so the line's REMAINING
+  // width is too small for the token but the token itself easily fits the
+  // full line width. This isolates the wrap decision from the (correct,
+  // separate) over-long-word char-break path — see line-layout.ts's
+  // "over-long-word" comment — which force-splits a token WIDER THAN THE
+  // WHOLE LINE and would otherwise be indistinguishable from an incorrect
+  // hyphen-triggered split. Assert the token moves to the next line WHOLE.
+  it('a merged noBreakHyphen token wraps to the next line whole, never splitting at the hyphen', () => {
+    const segs = buildSegments([textRun('lead 999-99')], {} as RenderState);
+    const { canvas } = makeRecordingCanvas();
+    const ctx = canvas.getContext('2d') as unknown as CanvasRenderingContext2D;
+    // Line width 100px. "lead " (5 glyphs * 10px = 50px) leaves 50px
+    // remaining — not enough for "999-99" (6 glyphs * 10px = 60px), but
+    // "999-99" alone is well under the full 100px line width, so this must
+    // hit the "does not fit the CURRENT line" wrap path, not the
+    // over-long-word char-break path.
+    const lines = layoutLines(ctx, segs, 100, 0, 1);
+    const allTexts = lines.map((l) => l.segments.map((s) => (s as LayoutTextSeg).text));
+    expect(allTexts).toEqual([['lead '], ['999-99']]);
+  });
+
+  // §17.3.3.29: a soft hyphen "shall have zero width" and "shall not change
+  // the normal display of text" unless it is the chosen break point; since
+  // this renderer performs no automatic hyphenation (§17.15.1.x), it is never
+  // chosen, so state (a) always applies. The parser reflects this by emitting
+  // NOTHING for <w:softHyphen/> (`soft_hyphen_is_invisible`, parser.rs) — this
+  // test exercises the RENDERER side of that same contract: given the exact
+  // shape the parser produces for "br"+softHyphen+"eaking" (two adjacent text
+  // runs, nothing in between), the renderer must draw a contiguous "breaking"
+  // with no synthesized hyphen and no extra gap between the pieces.
+  it('softHyphen contributes no glyph and no gap, given the shape the parser actually emits', async () => {
+    // This is what parse_run_inner produces for
+    // <w:r><w:t>br</w:t><w:softHyphen/><w:t>eaking</w:t></w:r>: the
+    // <w:softHyphen/> arm pushes nothing, so exactly two DocRun::Text survive.
     const fills = await render([para([textRun('br'), textRun('eaking')])]);
     const drawn = fills.map((c) => c.text).join('');
     expect(drawn).not.toContain('-');
     expect(drawn.replace(/[^a-z]/g, '')).toBe('breaking');
+    // No gap: the two pieces are adjacent glyph runs, not separated by a
+    // dropped-but-still-spaced placeholder. "eaking" must start exactly where
+    // "br" ends (2 glyphs * FS), not further right.
+    const br = fills.find((c) => c.text === 'br');
+    const eaking = fills.find((c) => c.text === 'eaking');
+    expect(br, '"br" must be drawn').toBeDefined();
+    expect(eaking, '"eaking" must be drawn').toBeDefined();
+    expect(eaking!.x).toBeCloseTo(br!.x + 2 * 10, 3);
   });
 });

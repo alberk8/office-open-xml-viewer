@@ -458,7 +458,7 @@ pub struct ParaBorderEdge {
 
 /// ECMA-376 §17.3.2.4 `<w:bdr>` — a run-level border ("box" around the run).
 /// Serialized shape matches `DocxRunBorder` on the TS side.
-#[derive(Serialize, Debug, Clone)]
+#[derive(Serialize, Debug, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct RunBorder {
     /// "single" | "double" | "dashed" | ... (w:bdr/@w:val)
@@ -642,7 +642,16 @@ pub enum DocRun {
     /// `alignment` (§17.18.71) and `relativeTo` (§17.18.73) attributes, filling
     /// the gap with the `leader` (§17.18.72) character. A separate variant (not a
     /// `"\t"` Text run) so the layout can resolve the jump geometrically.
-    #[serde(rename_all = "camelCase")]
+    ///
+    /// `#[serde(rename = "ptab")]`: the enum-level `rename_all = "camelCase"`
+    /// treats a leading run of capitals as a single word, so `PTab` would
+    /// otherwise serialize its tag as `"pTab"` (only the leading `P`
+    /// lowercased). The TS discriminant union (types.ts) uses the fully
+    /// lowercase `'ptab'`, matching the other single/lowercase-joined
+    /// variant tags (`text`/`image`/`break`/`field`/`shape`/`math`) — so
+    /// without this override every `<w:ptab>` silently failed to match any
+    /// arm in the TS render switch and was dropped from the page.
+    #[serde(rename = "ptab", rename_all = "camelCase")]
     PTab {
         /// ST_PTabAlignment (§17.18.71): "left" | "center" | "right".
         alignment: String,

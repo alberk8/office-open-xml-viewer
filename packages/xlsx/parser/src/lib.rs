@@ -165,6 +165,10 @@ fn parse_sheet_with(
 
     // Attach any drawing-anchored images and charts for this sheet
     ws.images = load_sheet_images(archive, &sheet_path);
+    // Embedded OLE object previews (§18.3.1.59) draw through the same image
+    // list; their preview parts are referenced from the worksheet XML + rels.
+    ws.images
+        .extend(load_sheet_ole_images(archive, &sheet_path, &sheet_xml));
     ws.charts = load_sheet_charts(archive, &sheet_path, theme_colors);
     ws.shape_groups = load_sheet_shape_groups(archive, &sheet_path, theme_colors);
     ws.hyperlinks = load_hyperlinks(archive, &sheet_path, hyperlink_rids);

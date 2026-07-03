@@ -2246,8 +2246,11 @@ export function computePages(
       }
 
       // Tables in a multi-column section are sized to the column width, not the
-      // full content band.
-      const rowHs = computeTableRowHeights(measureState, tbl, colW());
+      // full content band. Resolve columns + row heights together (one min-content
+      // scan) so both can be stamped for the paint pass (B2 table stage 1b).
+      const tblContentWPt = colW();
+      const { colWidthsPt: tblColWidthsPt, rowHeightsPt: rowHs } =
+        computeTablePtLayout(measureState, tbl, tblContentWPt);
       const h = rowHs.reduce((s, x) => s + x, 0);
       // Footnote references inside table cells are not folded into the reserve
       // (the per-page reserve is driven by body paragraphs); they still draw at
@@ -2271,6 +2274,10 @@ export function computePages(
           bodyTopPt(),
           () => currentSectionHF,
           () => currentSectionGeom,
+          // B2 table stage 1b — stamp the scale-1 layout onto each slice so the
+          // paint pass reuses it. Each slice records ITS rows' heights; the column
+          // widths + contentWPt are constant across the split.
+          { colWidthsPt: tblColWidthsPt, contentWPt: tblContentWPt },
         );
         y = endY;
         measureState.y = bodyTopPt() + endY;
@@ -2278,6 +2285,8 @@ export function computePages(
         // §17.6.4 column balancing (wantsBalanceBreak) OR a table that doesn't fit
         // the rest of this column ⇒ advance to the next column / page.
         if (wantsBalanceBreak(h) || y + h > tableContentH) nextColumnOrPage(i);
+        // B2 table stage 1b — stamp the whole-table scale-1 layout for paint reuse.
+        stampTableLayout(el as PaginatedBodyElement, tblColWidthsPt, rowHs, tblContentWPt);
         pushTagged(el as PaginatedBodyElement);
         y += h;
         measureState.y += h;
@@ -2999,10 +3008,26 @@ function splitParagraphAcrossPages(
  *  §17.3.1.33 contextual/overlap spacing collapse (via `sumCellContentHeight`), so
  *  the caller is a thin delegation. */
 function computeTableRowHeights(state: RenderState, table: DocTable, contentWPt: number): number[] {
-  const colWidths = resolveColumnWidths(table, contentWPt, state);
-  return resolveTableRowHeights(table, colWidths, 1, (cell, cellW) =>
+  return computeTablePtLayout(state, table, contentWPt).rowHeightsPt;
+}
+
+/** The paginator's scale-1 table layout: the per-grid-column widths (pt) and the
+ *  per-row heights (pt), both resolved through the SAME functions the paint pass
+ *  uses ({@link resolveColumnWidths} + {@link resolveTableRowHeights} with the
+ *  unified {@link measureCellContentHeightPx} at scale 1). Returned together so
+ *  the paginator can stamp both onto the table element (B2 table stage 1b) for the
+ *  paint pass to reuse — one column resolution feeds both the stamp and the row
+ *  heights, so the min-content scan runs once. */
+function computeTablePtLayout(
+  state: RenderState,
+  table: DocTable,
+  contentWPt: number,
+): { colWidthsPt: number[]; rowHeightsPt: number[] } {
+  const colWidthsPt = resolveColumnWidths(table, contentWPt, state);
+  const rowHeightsPt = resolveTableRowHeights(table, colWidthsPt, 1, (cell, cellW) =>
     measureCellContentHeightPx(cell, table, cellW, 1, state),
   );
+  return { colWidthsPt, rowHeightsPt };
 }
 
 function estimateTableHeight(state: RenderState, table: DocTable, contentWPt: number): number {
@@ -3308,6 +3333,23 @@ function tableBreakAllowedBefore(table: DocTable, ri: number): boolean {
   return !table.rows[ri].cells.some((c) => c.vMerge === false);
 }
 
+/** B2 table stage 1b — stamp a table element (whole table or one page slice) with
+ *  the scale-1 layout the paginator resolved, so the paint pass ({@link computeTableLayout})
+ *  reuses it. `rowHeightsPt` must align 1:1 with `el.rows` (a slice passes its own
+ *  rows' heights). `contentWPt` is the pt content-band width the columns were fit
+ *  to; the paint gate re-derives it as `contentW / scale` and reuses the stamp only
+ *  when they match. Sets the runtime-only fields on `PaginatedBodyElement`. */
+function stampTableLayout(
+  el: PaginatedBodyElement,
+  colWidthsPt: number[],
+  rowHeightsPt: number[],
+  contentWPt: number,
+): void {
+  el.tableColWidthsPt = colWidthsPt;
+  el.tableRowHeightsPt = rowHeightsPt;
+  el.tableLayoutInputs = { scale: 1, contentWPt };
+}
+
 /**
  * Split a table that is taller than one page across page boundaries, row by
  * row (ECMA-376 table pagination). Each page receives a {@link DocTable} slice
@@ -3351,6 +3393,12 @@ export function splitTableAcrossPages(
    *  margins; constant across the split). Stamped so the renderer sizes each page
    *  from the right section. Omitted ⇒ the renderer's body-level fallback. */
   tagSectionGeom?: () => SectionGeom,
+  /** B2 table stage 1b — the scale-1 layout to stamp onto each slice for paint
+   *  reuse. `colWidthsPt` is the full grid (constant across the split); each slice
+   *  gets ITS rows' heights (sliced from `rowHs`, with the repeated header rows
+   *  prepended on continuations so the stamp aligns 1:1 with the slice's rows).
+   *  Omitted (direct unit tests) ⇒ slices carry no table stamp and paint recomputes. */
+  tableStamp?: { colWidthsPt: number[]; contentWPt: number },
 ): number {
   const colTop = columnTop ?? (() => 0);
   const n = table.rows.length;
@@ -3359,6 +3407,7 @@ export function splitTableAcrossPages(
   while (headerCount < n && table.rows[headerCount].isHeader) headerCount++;
   const headerRows = table.rows.slice(0, headerCount);
   const headerH = rowHs.slice(0, headerCount).reduce((s, h) => s + h, 0);
+  const headerHeightsPt = rowHs.slice(0, headerCount);
 
   let y = startY;
   let start = 0;
@@ -3387,6 +3436,15 @@ export function splitTableAcrossPages(
     if (columnTop && marginTopPt != null) sliceEl.colTopPt = marginTopPt + colTop();
     if (tagSectionHF) sliceEl.sectionHF = tagSectionHF();
     if (tagSectionGeom) sliceEl.sectionGeom = tagSectionGeom();
+    // B2 table stage 1b — stamp this slice's own row heights (repeated header rows
+    // prepended on continuations, matching `sliceRows`) so the paint pass reuses
+    // them 1:1 instead of re-measuring the slice.
+    if (tableStamp) {
+      const sliceHeightsPt = isContinuation
+        ? [...headerHeightsPt, ...rowHs.slice(start, end)]
+        : rowHs.slice(start, end);
+      stampTableLayout(sliceEl, tableStamp.colWidthsPt, sliceHeightsPt, tableStamp.contentWPt);
+    }
     pages[pages.length - 1].push(sliceEl);
 
     y += used;
@@ -5633,6 +5691,14 @@ function paragraphSegsStateSensitive(para: DocParagraph): boolean {
  *  never leaks onto the public surface. */
 let lineReuseEnabled = true;
 
+/** B2 table stage 1b — master switch for the compute-once TABLE layout reuse
+ *  (stamped column widths + row heights, {@link computeTableLayout}). Always ON in
+ *  production; the characterization test flips it OFF to capture a fresh-recompute
+ *  reference and assert the reuse path resolves an IDENTICAL layout (see
+ *  table-layout-reuse.test.ts). Module-local so it never leaks onto the public
+ *  surface. */
+let tableReuseEnabled = true;
+
 /** Additional context passed to layoutLines so it can honor floats on the current page. */
 interface WrapLayoutCtx {
   startPageY: number;   // absolute canvas Y where the first line should start
@@ -7831,6 +7897,27 @@ export const __test_setLineReuseEnabled = (v: boolean): boolean => {
   return prev;
 };
 
+/** Exported for the compute-once table-layout characterization test (B2 table
+ *  stage 1b). Toggles the stamped column-width/row-height reuse in
+ *  computeTableLayout so the test can resolve the SAME stamped table with reuse ON
+ *  and OFF and assert the layout is identical. Returns the previous value so the
+ *  test can restore it. */
+export const __test_setTableReuseEnabled = (v: boolean): boolean => {
+  const prev = tableReuseEnabled;
+  tableReuseEnabled = v;
+  return prev;
+};
+
+/** Exported for the table-layout reuse test — resolves a table's px column
+ *  widths / row heights through the production {@link computeTableLayout}, so the
+ *  test can drive the reuse gate against a stamped element and a stub RenderState. */
+export const __test_computeTableLayout = (
+  table: DocTable,
+  contentWPx: number,
+  state: RenderState,
+): { colWidths: number[]; tableW: number; rowHeights: number[] } =>
+  computeTableLayout(table, contentWPx, state);
+
 function resolveAnchorBox(
   img: ImageRun,
   state: RenderState,
@@ -8117,9 +8204,42 @@ function computeTableLayout(
   state: RenderState,
 ): { colWidths: number[]; tableW: number; rowHeights: number[] } {
   const { scale } = state;
+
+  // B2 table stage 1b — compute-once reuse. When the paginator laid this table
+  // out it stamped the scale-1 pt column widths and per-row heights it resolved
+  // (splitTableAcrossPages per slice, or the whole-table push). Reuse them at the
+  // paint scale — skipping resolveColumnWidths (which re-measures the min-content
+  // width of every token in every cell) and resolveTableRowHeights (which re-lays
+  // out every cell paragraph) — WHEN this paint's inputs reconstruct to the
+  // paginator's scale-1 space. Both stamps are resolved purely in pt: column
+  // widths are scale-independent (resolveColumnWidths never rounds per scale) and
+  // the paginator now measures cell heights through the SAME measureCellContentHeightPx
+  // as the paint pass (stage 1a), at scale 1, so `× scale` reproduces the paint-
+  // scale layout. The gate compares in the paginator's scale-1 space with the same
+  // magnitude-relative epsilon the paragraph reuse uses (contentW/scale − colfit
+  // round-off ~1e-13 is a geometric equality, not a snap). A slice stamps only its
+  // own rows, so `tableRowHeightsPt` aligns 1:1 with `table.rows`; the column stamp
+  // is the full grid, shared by every slice.
+  const stamped = table as PaginatedBodyElement;
+  const contentWPt1 = contentWPx / scale;
+  const reuseInputs = stamped.tableLayoutInputs;
+  const reuse =
+    tableReuseEnabled &&
+    reuseInputs !== undefined &&
+    stamped.tableColWidthsPt !== undefined &&
+    stamped.tableRowHeightsPt !== undefined &&
+    reuseInputs.scale === 1 &&
+    stamped.tableRowHeightsPt.length === table.rows.length &&
+    Math.abs(reuseInputs.contentWPt - contentWPt1) <= 1e-6 * Math.max(1, Math.abs(contentWPt1));
+  if (reuse) {
+    const colWidths = (stamped.tableColWidthsPt as number[]).map((w) => w * scale);
+    const rowHeights = (stamped.tableRowHeightsPt as number[]).map((h) => h * scale);
+    return { colWidths, tableW: colWidths.reduce((s, w) => s + w, 0), rowHeights };
+  }
+
   // Resolve column widths in pt (autofit by preferred widths, or fixed grid),
   // already scaled to fit the available content width, then convert to px.
-  const colWidths = resolveColumnWidths(table, contentWPx / scale, state).map((w) => w * scale);
+  const colWidths = resolveColumnWidths(table, contentWPt1, state).map((w) => w * scale);
   const tableW = colWidths.reduce((s, w) => s + w, 0);
 
   // Shared ST_HeightRule + §17.4.85 vMerge-span skeleton (resolveTableRowHeights),

@@ -651,7 +651,13 @@ pub(crate) fn parse_chart_xml(
         // Axis title + tick label font size extraction (ECMA-376 §21.2.2.17
         // c:txPr/a:defRPr@sz gives tick labels their hpt size; absent = default).
         match elem_name {
-            "catAx" => {
+            // `<c:dateAx>` (§21.2.2.39) is the date/time-series category axis:
+            // same child grammar as `<c:catAx>` (title, numFmt, delete, ticks,
+            // scaling, line style). Excel emits it when the category source is
+            // dates; the numFmt formatCode drives serial-date label formatting on
+            // the TS side. Advanced date-unit control (baseTimeUnit/majorTimeUnit)
+            // is out of scope here — treated identically to catAx.
+            "catAx" | "dateAx" => {
                 if cat_axis_title.is_none() {
                     let (t, sz, b, c) = extract_axis_title_with_props(&child, c_ns, a_ns);
                     if t.is_some() {
@@ -2810,5 +2816,83 @@ mod solid_fill_color_tests {
         let doc = Document::parse(&xml).unwrap();
         let out = extract_solid_fill_in_drawingml(&doc.root_element(), &theme());
         assert_eq!(out.as_deref(), Some("FF8000"));
+    }
+}
+
+#[cfg(test)]
+mod date_axis_tests {
+    use super::*;
+
+    const C_NS: &str = "http://schemas.openxmlformats.org/drawingml/2006/chart";
+    const A_NS: &str = "http://schemas.openxmlformats.org/drawingml/2006/main";
+
+    fn theme() -> Vec<String> {
+        vec!["#111111".into(); 12]
+    }
+
+    /// A line chart whose horizontal axis is a `<c:dateAx>` (§21.2.2.39), the
+    /// time-series category axis Excel emits when the category source is dates.
+    /// `axis_inner` is spliced into the `<c:dateAx>` element.
+    fn date_axis_chart_xml(axis_inner: &str) -> String {
+        format!(
+            r#"<c:chartSpace xmlns:c="{c}" xmlns:a="{a}">
+  <c:chart>
+    <c:plotArea>
+      <c:lineChart>
+        <c:grouping val="standard"/>
+        <c:ser>
+          <c:idx val="0"/><c:order val="0"/>
+          <c:cat><c:numRef><c:numCache>
+            <c:pt idx="0"><c:v>44927</c:v></c:pt><c:pt idx="1"><c:v>44958</c:v></c:pt>
+          </c:numCache></c:numRef></c:cat>
+          <c:val><c:numRef><c:numCache>
+            <c:pt idx="0"><c:v>10</c:v></c:pt><c:pt idx="1"><c:v>20</c:v></c:pt>
+          </c:numCache></c:numRef></c:val>
+        </c:ser>
+        <c:axId val="1"/><c:axId val="2"/>
+      </c:lineChart>
+      <c:dateAx>
+        <c:axId val="2"/>
+        <c:axPos val="b"/>
+        {axis}
+      </c:dateAx>
+      <c:valAx><c:axId val="1"/><c:axPos val="l"/></c:valAx>
+    </c:plotArea>
+  </c:chart>
+</c:chartSpace>"#,
+            c = C_NS,
+            a = A_NS,
+            axis = axis_inner,
+        )
+    }
+
+    /// `<c:dateAx>` is a category axis (§21.2.2.39): its `<c:numFmt>` formatCode
+    /// must populate `cat_axis_format_code` exactly as `<c:catAx>` does, so the
+    /// TS side formats the serial dates instead of showing raw numbers.
+    #[test]
+    fn date_axis_format_code_populates_cat_axis_format_code() {
+        let xml = date_axis_chart_xml(r#"<c:numFmt formatCode="m/d/yyyy" sourceLinked="0"/>"#);
+        let chart = parse_chart_xml(&xml, C_NS, A_NS, &theme()).expect("dateAx chart parses");
+        assert_eq!(chart.cat_axis_format_code.as_deref(), Some("m/d/yyyy"));
+    }
+
+    /// A deleted `<c:dateAx>` (`<c:delete val="1"/>`) hides the category axis,
+    /// matching the catAx convention.
+    #[test]
+    fn date_axis_delete_hides_cat_axis() {
+        let xml = date_axis_chart_xml(r#"<c:delete val="1"/>"#);
+        let chart = parse_chart_xml(&xml, C_NS, A_NS, &theme()).expect("dateAx chart parses");
+        assert!(chart.cat_axis_hidden);
+    }
+
+    /// A dateAx title maps to the cat-axis title (same as catAx).
+    #[test]
+    fn date_axis_title_maps_to_cat_axis_title() {
+        let title = r#"<c:title><c:tx><c:rich><a:p>
+            <a:r><a:rPr sz="1200"/><a:t>Date</a:t></a:r></a:p></c:rich></c:tx></c:title>"#;
+        let xml = date_axis_chart_xml(title);
+        let chart = parse_chart_xml(&xml, C_NS, A_NS, &theme()).expect("dateAx chart parses");
+        assert_eq!(chart.cat_axis_title.as_deref(), Some("Date"));
+        assert_eq!(chart.cat_axis_title_size, Some(1200));
     }
 }

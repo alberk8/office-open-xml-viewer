@@ -1073,11 +1073,14 @@ function renderLineChart(
 
   // stackedLine (`<c:grouping val="stacked">`) draws each series at the running
   // sum of the series below it; stackedLinePct (`percentStacked`) normalizes
-  // each category to 100% (ECMA-376 §21.2.2.75). Plain `line` is unstacked.
+  // each category to 100% (ECMA-376 §21.2.2.76 c:grouping / §21.2.3.17
+  // ST_Grouping). Plain `line` is unstacked.
   const stacked = chart.chartType === 'stackedLine' || chart.chartType === 'stackedLinePct';
   const pct = chart.chartType === 'stackedLinePct';
   // Per-category |Σ| denominator for percent normalization (matches the bar
-  // percentStacked convention). Only computed when needed.
+  // percentStacked convention). The spec only mandates scaling to a 100% total;
+  // the Σ|v| denominator (and stacking negatives on the opposite side) is the
+  // Excel/PowerPoint behavior we match. Only computed when needed.
   const pctTotals = pct
     ? cats.map((_, ci) => {
         let t = 0;
@@ -1271,11 +1274,12 @@ function renderAreaChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
   const cats = chartCategories(chart);
   const n = cats.length; if (n === 0) return;
   const stacked = chart.chartType === 'stackedArea' || chart.chartType === 'stackedAreaPct';
-  // stackedAreaPct (`<c:grouping val="percentStacked">`, ECMA-376 §21.2.2.75)
-  // normalizes each category to its Σ|v| so the stack always tops out at 100%,
-  // matching the stackedLine/stackedLinePct (renderLineChart) and bar/column
-  // percentStacked convention (sign-preserving per-value normalization against
-  // the per-category |v| sum).
+  // stackedAreaPct (`<c:grouping val="percentStacked">`, ECMA-376 §21.2.2.76
+  // c:grouping / §21.2.3.17 ST_Grouping) normalizes each category so the stack
+  // tops out at 100%, matching the stackedLine/stackedLinePct (renderLineChart)
+  // and bar/column percentStacked convention. The spec only mandates scaling to
+  // a 100% total; the Σ|v| denominator (sign-preserving per-value normalization
+  // against the per-category |v| sum) is the Excel/PowerPoint behavior we match.
   const pct = chart.chartType === 'stackedAreaPct';
   const pctTotals = pct
     ? cats.map((_, ci) => {

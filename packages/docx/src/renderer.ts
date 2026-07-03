@@ -2746,7 +2746,7 @@ function estimateParagraphHeight(
       lineBoxH: (a, d, _h, is) => lineBoxHeight(para.lineSpacing, a, d, 1, grid, paraHasRuby, is ?? 0, paragraphIsEastAsian(para)),
       pageH: state.pageH,
     } : undefined;
-    const lines = layoutLines(state.ctx, segs, paraW, para.indentFirst, 1, para.tabStops, wrapCtx, state.fontFamilyClasses, indLeft, state.kinsoku, gridCharDeltaPx(grid, 1), state.defaultTabPt);
+    const lines = layoutLines(state.ctx, segs, paraW, para.indentFirst, 1, para.tabStops, wrapCtx, state.fontFamilyClasses, indLeft, state.kinsoku, gridCharDeltaPx(grid, 1), state.defaultTabPt, paraW + indRight);
     if (lines.length === 0) {
       // Anchor-only paragraph: no inline content, but the paragraph mark still
       // occupies one (possibly flowed) line (§17.3.1.29).
@@ -2957,7 +2957,7 @@ function splitParagraphAcrossPages(
     lineBoxH: (a, d, _h, is) => lineBoxHeight(para.lineSpacing, a, d, 1, measureState.docGrid, paragraphHasRuby(para), is ?? 0, paragraphIsEastAsian(para)),
     pageH: measureState.pageH,
   } : undefined;
-  const lines = layoutLines(measureState.ctx, segs, paraW, para.indentFirst, 1, para.tabStops, wrapCtx, measureState.fontFamilyClasses, indLeft, measureState.kinsoku, gridCharDeltaPx(paraGrid(para, measureState), 1), measureState.defaultTabPt);
+  const lines = layoutLines(measureState.ctx, segs, paraW, para.indentFirst, 1, para.tabStops, wrapCtx, measureState.fontFamilyClasses, indLeft, measureState.kinsoku, gridCharDeltaPx(paraGrid(para, measureState), 1), measureState.defaultTabPt, paraW + indRight);
   if (lines.length === 0) {
     // Anchor-only paragraph: no inline lines, but the paragraph mark still
     // occupies one (possibly relocated) line (§17.3.1.29).
@@ -4703,12 +4703,18 @@ function renderParagraph(
   //     page-absolute Y, which have no scale-1 form here (the stamp reuse excludes
   //     floats for the same reason). Pre-existing paginate(scale 1)/paint(scale s)
   //     float behaviour, unchanged.
+  // ECMA-376 §17.3.3.23 — paraX-relative X of the text-margin right edge, for
+  // resolving a `<w:ptab w:relativeTo="margin">` (paraW is the content box; add
+  // the right indent to reach the margin). Scale and scale-1 mirrors kept in sync.
+  const indRight1 = inFrame ? 0 : (baseRtl ? para.indentLeft : para.indentRight);
+  const marginRightPx = paraW + indRight;
+  const marginRightPx1 = paraW1 + indRight1;
   const lines = reuse
     ? rescaleLayoutLines(stamped.layoutLines as LayoutLine[], scale, ctx, state.fontFamilyClasses, paintGridDeltaPx)
     : wrapCtx
-      ? layoutLines(ctx, segments, paraW, firstLineIndent, scale, para.tabStops, wrapCtx, state.fontFamilyClasses, indLeft, state.kinsoku, paintGridDeltaPx, state.defaultTabPt)
+      ? layoutLines(ctx, segments, paraW, firstLineIndent, scale, para.tabStops, wrapCtx, state.fontFamilyClasses, indLeft, state.kinsoku, paintGridDeltaPx, state.defaultTabPt, marginRightPx)
       : rescaleLayoutLines(
-          layoutLines(ctx, segments, paraW1, firstIndent1, 1, para.tabStops, undefined, state.fontFamilyClasses, indLeft1, state.kinsoku, gridDelta1, state.defaultTabPt),
+          layoutLines(ctx, segments, paraW1, firstIndent1, 1, para.tabStops, undefined, state.fontFamilyClasses, indLeft1, state.kinsoku, gridDelta1, state.defaultTabPt, marginRightPx1),
           scale, ctx, state.fontFamilyClasses, paintGridDeltaPx,
         );
 

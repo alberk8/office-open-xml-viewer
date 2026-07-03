@@ -636,6 +636,25 @@ pub enum DocRun {
         #[serde(skip_serializing_if = "Option::is_none")]
         jc: Option<String>,
     },
+    /// ECMA-376 §17.3.3.23 `<w:ptab>` — an absolute-position tab. Unlike a plain
+    /// `<w:tab>` (§17.3.3.22) it ignores the paragraph's custom tab stops and the
+    /// default-tab interval, advancing instead to a position derived from its own
+    /// `alignment` (§17.18.71) and `relativeTo` (§17.18.73) attributes, filling
+    /// the gap with the `leader` (§17.18.72) character. A separate variant (not a
+    /// `"\t"` Text run) so the layout can resolve the jump geometrically.
+    #[serde(rename_all = "camelCase")]
+    PTab {
+        /// ST_PTabAlignment (§17.18.71): "left" | "center" | "right".
+        alignment: String,
+        /// ST_PTabRelativeTo (§17.18.73): "margin" | "indent".
+        relative_to: String,
+        /// ST_PTabLeader (§17.18.72): "none" | "dot" | "hyphen" | "underscore" |
+        /// "middleDot". Fills the space created by the tab.
+        leader: String,
+        /// Resolved run font size (pt) so the leader glyphs / gap height match the
+        /// surrounding text — mirrors how `<w:tab>` carries the run's font.
+        font_size: f64,
+    },
 }
 
 /// A DrawingML line-end decoration (arrow head). ECMA-376 §20.1.8.3

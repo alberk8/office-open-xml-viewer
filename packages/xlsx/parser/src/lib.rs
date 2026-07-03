@@ -1753,9 +1753,34 @@ fn split_sheet_ref(s: &str) -> (Option<String>, String) {
 ///
 /// This is intentionally lighter than `parse_row_cells`: sparklines only need
 /// raw numbers, no styles, formulas, or shared strings.
+/// Upper bound on the number of cells a single sparkline data range may span
+/// before `extract_range_values` refuses to materialize the dense value buffer.
+///
+/// Rationale: a real sparkline plots a handful to a few hundred points; even a
+/// generous whole-column series is 1,048,576 cells (Excel's max rows, ECMA-376
+/// §18.3.1.73 — `SpreadsheetML` grid is 16384 cols × 1048576 rows). We cap at
+/// exactly one million cells, which:
+///   • comfortably covers any legitimate range (a full single column, or a
+///     1000×1000 block), and
+///   • bounds the dense `Vec<Option<f64>>` to 1e6 × 16 B = 16 MiB — trivially
+///     within the 512 MiB per-entry ZIP budget (`ooxml_common::zip`), so the
+///     sparkline allocation can never dominate the parse.
+/// A crafted `A1:XFD1048576` reference (16384 × 1048576 ≈ 1.7e10 cells ≈ 275 GB)
+/// exceeds this by four orders of magnitude and is refused: we return an empty
+/// `Vec` and the sparkline is simply not drawn (the renderer iterates the value
+/// slice by index, so an empty slice draws nothing — graceful degradation, not
+/// a hard error).
+const MAX_SPARKLINE_CELLS: usize = 1_000_000;
+
 fn extract_range_values(sheet_xml: &str, range: &CellRange) -> Vec<Option<f64>> {
     let total = ((range.bottom - range.top + 1) as usize)
         .saturating_mul((range.right - range.left + 1) as usize);
+    // Guard the dense allocation: refuse pathological ranges (e.g. a full-sheet
+    // `<xm:f>`) that would demand a multi-hundred-GB buffer. Returning empty
+    // fails safe — no sparkline rather than OOM. See MAX_SPARKLINE_CELLS.
+    if total > MAX_SPARKLINE_CELLS {
+        return Vec::new();
+    }
     let mut values: Vec<Option<f64>> = vec![None; total];
     let Ok(doc) = roxmltree::Document::parse(sheet_xml) else {
         return values;
@@ -2862,5 +2887,89 @@ mod strict_namespace_cell_tests {
             CellValue::Number { number } => assert_eq!(*number, 42.5),
             other => panic!("expected a number, got {other:?}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod sparkline_range_cap_tests {
+    use super::*;
+
+    /// A malicious `<xm:f>` referencing a whole-sheet range (`A1:XFD1048576`,
+    /// 16384 × 1048576 ≈ 1.7e10 cells → ~275 GB of `Vec<Option<f64>>`) must NOT
+    /// attempt the dense allocation. The cap fires and `extract_range_values`
+    /// returns an empty `Vec`, so the sparkline simply is not drawn (the
+    /// downstream renderer iterates `values` by index, so an empty slice draws
+    /// nothing — no panic, no OOM).
+    #[test]
+    fn oversized_full_sheet_range_returns_empty_without_allocating() {
+        // parse_cell_ref("A1") = (col 1, row 1); ("XFD1048576") = (col 16384,
+        // row 1048576). This is Excel's entire grid — the worst case an
+        // attacker can express.
+        let range = CellRange {
+            top: 1,
+            left: 1,
+            bottom: 1_048_576,
+            right: 16_384,
+        };
+        // Minimal well-formed worksheet with a single real value inside the
+        // range. Before the fix, building `vec![None; 1.7e10]` OOMs/aborts here.
+        let xml = r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1"><v>3.5</v></c></row></sheetData></worksheet>"#;
+        let values = extract_range_values(xml, &range);
+        assert!(
+            values.is_empty(),
+            "an over-cap sparkline range must yield an empty Vec (no dense alloc), got len {}",
+            values.len()
+        );
+    }
+
+    /// A normal small sparkline range (a handful of cells) must still resolve
+    /// its numeric values in row-major order, unaffected by the cap.
+    #[test]
+    fn normal_small_range_still_resolves_values() {
+        // B2:B4 — three cells in one column.
+        let range = CellRange {
+            top: 2,
+            left: 2,
+            bottom: 4,
+            right: 2,
+        };
+        let xml = r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="2"><c r="B2"><v>10</v></c></row><row r="3"><c r="B3"><v>20</v></c></row><row r="4"><c r="B4" t="s"><v>0</v></c></row></sheetData></worksheet>"#;
+        let values = extract_range_values(xml, &range);
+        assert_eq!(values.len(), 3, "3-cell range must yield 3 slots");
+        assert_eq!(values[0], Some(10.0));
+        assert_eq!(values[1], Some(20.0));
+        assert_eq!(values[2], None, "string cell (t=s) must map to None");
+    }
+
+    /// A range exactly at the cap must still allocate; one cell over must not.
+    /// Guards the boundary condition of `MAX_SPARKLINE_CELLS`.
+    #[test]
+    fn range_at_cap_allocates_over_cap_does_not() {
+        // 1000 columns × 1000 rows = 1_000_000 cells = exactly MAX_SPARKLINE_CELLS.
+        let at_cap = CellRange {
+            top: 1,
+            left: 1,
+            bottom: 1000,
+            right: 1000,
+        };
+        let empty_xml = r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData/></worksheet>"#;
+        let at = extract_range_values(empty_xml, &at_cap);
+        assert_eq!(
+            at.len(),
+            MAX_SPARKLINE_CELLS,
+            "a range exactly at the cap must allocate all slots"
+        );
+
+        // One column wider → 1001 × 1000 = 1_001_000 > cap → empty.
+        let over_cap = CellRange {
+            top: 1,
+            left: 1,
+            bottom: 1000,
+            right: 1001,
+        };
+        assert!(
+            extract_range_values(empty_xml, &over_cap).is_empty(),
+            "a range one cell over the cap must yield empty"
+        );
     }
 }

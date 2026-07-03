@@ -40,6 +40,48 @@ jobs:
       - name: Test
         run: cargo test --workspace
 
+  # RB8 — dependency vulnerability audit. Report-only for now
+  # (continue-on-error): one known advisory already exists at introduction —
+  # RUSTSEC-2026-0190 (anyhow < 1.0.103 unsound `Error::downcast_mut`), pulled
+  # in only by the non-shipped ooxml-mcp-server crate, not the wasm parsers or
+  # the npm package. Starting non-blocking surfaces advisories in the CI log
+  # without gating the whole repo on a transitive dev-tool issue; flip to
+  # blocking (drop continue-on-error) once the backlog is at zero.
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+
+      # Scans Cargo.lock against the RustSec advisory DB. Default level fails on
+      # vulnerabilities but only warns on unmaintained/unsound advisories.
+      - name: cargo audit
+        run: cargo audit
+
+      - uses: pnpm/action-setup@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+          cache: 'pnpm'
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # Audit only production deps (the shipped surface); --audit-level high
+      # ignores low/moderate advisories in the (large) dev toolchain.
+      - name: pnpm audit (prod)
+        run: pnpm audit --prod --audit-level high
+
   typecheck:
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -142,5 +184,23 @@ jobs:
           else
             pnpm exec playwright install chrome --with-deps
           fi
+      # webkit + firefox back the multi-engine smoke projects. The ink assertion
+      # (canvasHasInk) is font-independent, so it is stable across engines and
+      # catches engine-specific pipeline breakage a Chrome-only run would miss.
+      # Chrome is handled by the guarded step above (system Google Chrome), so we
+      # install only the two bundled engines here.
+      - name: Install Playwright WebKit + Firefox
+        timeout-minutes: 5
+        run: pnpm exec playwright install webkit firefox --with-deps
       - name: Smoke tests
         run: pnpm smoke
+
+      # Worker/main pixel-equivalence: each package renders demo/sample-1 on the
+      # main thread and in a Web Worker (OffscreenCanvas) and asserts the two
+      # canvases match (<=0.5% pixel diff). This is a same-machine relative
+      # comparison — it guards the worker render path, NOT font portability — and
+      # uses only the committed demo sample, so it is CI-safe (the private-sample
+      # VRT in each package's visual.spec.ts stays local-only). Reuses the same
+      # Google Chrome the smoke job already relies on.
+      - name: Worker-equivalence tests
+        run: pnpm vrt:worker

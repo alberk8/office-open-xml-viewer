@@ -5,6 +5,8 @@
 // literal escapes, thousands separators, decimals, percent, and Excel serial
 // dates.
 
+import { excelSerialToUtcDate } from '../excel-date';
+
 /** Excel's default `formatCode="General"` for charts: raw numbers with no
  *  "k"/"M" abbreviation, trailing decimal zeros trimmed. */
 export function formatChartVal(v: number): string {
@@ -24,7 +26,13 @@ export function formatChartVal(v: number): string {
  * unquoted. Returns the default `formatChartVal` output when `code` is null
  * or an empty section tells the caller to hide the value.
  */
-export function formatChartValWithCode(v: number, code: string | null | undefined): string {
+export function formatChartValWithCode(
+  v: number,
+  code: string | null | undefined,
+  /** Chart date system (`<c:date1904>`, §21.2.2.38). `true` resolves serial
+   *  date codes against the 1904 epoch. Defaults to false (1900 system). */
+  date1904 = false,
+): string {
   // Absent `code`, or the reserved "General" keyword (ECMA-376 §18.8.30), both
   // mean the General number format. LibreOffice charts emit
   // `<c:numFmt formatCode="General">`; tokenizing it as a literal pattern would
@@ -34,7 +42,7 @@ export function formatChartValWithCode(v: number, code: string | null | undefine
   // route to the date formatter. Charts use this on the X axis of scatter
   // / time-series charts where the value is a serial date.
   if (isDateFormatCode(code)) {
-    return formatExcelDate(v, code);
+    return formatExcelDate(v, code, date1904);
   }
   const sections = splitFormatSections(code);
   // Section selection per §18.8.30: positive;negative;zero;text. When the
@@ -64,7 +72,13 @@ export function formatChartValWithCode(v: number, code: string | null | undefine
  * missing code, `"General"`, or a non-numeric category string falls through
  * to the raw text unchanged — no new interpretation is invented.
  */
-export function formatCategoryLabel(raw: string, code: string | null | undefined): string {
+export function formatCategoryLabel(
+  raw: string,
+  code: string | null | undefined,
+  /** Chart date system (`<c:date1904>`, §21.2.2.38). Threaded to the date
+   *  formatter for serial-date category labels. Defaults to false. */
+  date1904 = false,
+): string {
   if (!code) return raw;
   // Only numeric-looking categories are formatted. `Number('')` and
   // `Number('  ')` are 0 (falsely finite), so reject blank / whitespace text
@@ -72,7 +86,7 @@ export function formatCategoryLabel(raw: string, code: string | null | undefined
   if (raw.trim() === '') return raw;
   const num = Number(raw);
   if (!Number.isFinite(num)) return raw;
-  return formatChartValWithCode(num, code);
+  return formatChartValWithCode(num, code, date1904);
 }
 
 /**
@@ -100,19 +114,15 @@ function isDateFormatCode(code: string): boolean {
 }
 
 /**
- * Format an Excel serial date with the supplied code. Uses the conventional
- * 1900-based epoch with the spec's leap-year bug (i.e. serial 60 maps to
- * March 1, 1900, treating Feb 29, 1900 as a real day). For most chart
- * usage (post-1900 dates) this matches Excel's display.
+ * Format an Excel serial date with the supplied code. Delegates the serial →
+ * calendar-date conversion to the shared core `excelSerialToUtcDate`
+ * (ECMA-376 §18.17.4.1), which carries the 1900 Lotus leap-year-bug compat and
+ * the 1900/1904 date-system select. `date1904` comes from `<c:date1904>`
+ * (§21.2.2.38); it defaults to false so existing 1900-system charts are
+ * unchanged.
  */
-function formatExcelDate(serial: number, code: string): string {
-  // Days since 1899-12-30 (so serial 1 → 1900-01-01). The leap-year bug
-  // means serials 60..62 are off by one if you use a strict Date — we
-  // mimic Excel by subtracting an extra day for serials < 60.
-  const baseUtcMs = Date.UTC(1899, 11, 30);
-  const adjusted = serial < 60 ? serial + 1 : serial;
-  const ms = baseUtcMs + Math.floor(adjusted) * 86400000;
-  const date = new Date(ms);
+function formatExcelDate(serial: number, code: string, date1904 = false): string {
+  const date = excelSerialToUtcDate(Math.floor(serial), date1904);
   const yyyy = date.getUTCFullYear();
   const M = date.getUTCMonth() + 1;
   const D = date.getUTCDate();

@@ -1336,6 +1336,42 @@ mod tests {
     }
 
     #[test]
+    fn legacy_chart_honors_chart_space_date1904() {
+        // `<c:date1904/>` is a direct child of `<c:chartSpace>` (ECMA-376
+        // §21.2.2.38). It must thread through parse_legacy_chart into
+        // ChartModel.date1904 so date-format value labels resolve against the
+        // 1904 epoch. Absent element ⇒ the 1900 default (false).
+        let with = r#"<?xml version="1.0"?>
+<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+ <c:date1904/>
+ <c:chart><c:plotArea><c:lineChart>
+  <c:ser>
+   <c:val><c:numRef><c:numCache><c:ptCount val="1"/><c:pt idx="0"><c:v>1</c:v></c:pt></c:numCache></c:numRef></c:val>
+  </c:ser>
+ </c:lineChart></c:plotArea></c:chart>
+</c:chartSpace>"#;
+        let chart = parse_legacy_chart(with, &HashMap::new()).expect("line chart should parse");
+        assert!(
+            chart.chart.date1904,
+            "<c:date1904/> must set ChartModel.date1904 = true"
+        );
+
+        let without = r#"<?xml version="1.0"?>
+<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+ <c:chart><c:plotArea><c:lineChart>
+  <c:ser>
+   <c:val><c:numRef><c:numCache><c:ptCount val="1"/><c:pt idx="0"><c:v>1</c:v></c:pt></c:numCache></c:numRef></c:val>
+  </c:ser>
+ </c:lineChart></c:plotArea></c:chart>
+</c:chartSpace>"#;
+        let chart0 = parse_legacy_chart(without, &HashMap::new()).expect("line chart should parse");
+        assert!(
+            !chart0.chart.date1904,
+            "absent <c:date1904> must leave the 1900 default"
+        );
+    }
+
+    #[test]
     fn extract_image_reads_entry() {
         use std::io::{Cursor, Write};
         let mut buf = Vec::new();

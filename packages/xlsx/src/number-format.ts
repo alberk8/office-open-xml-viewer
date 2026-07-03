@@ -1,3 +1,4 @@
+import { excelSerialToUtcDate } from '@silurus/ooxml-core';
 import type { Cell, CellValue, Styles } from './types.js';
 import { todaySerial, nowSerial } from './formula.js';
 
@@ -16,6 +17,10 @@ export function formatCellValue(
   cell: Cell,
   styles: Styles,
   cfNumFmt?: { numFmtId: number; formatCode: string | null } | null,
+  /** Workbook date system (`<workbookPr date1904>`, §18.2.28). `true` resolves
+   *  serial dates against the 1904 epoch (§18.17.4.1). Defaults to false (1900
+   *  date system) so callers that don't thread the flag are unaffected. */
+  date1904 = false,
 ): string {
   // Resolve the effective format once so both the numeric and text paths
   // honour the same precedence: CF dxf numFmt > style numFmt (§18.8.17).
@@ -38,8 +43,17 @@ export function formatCellValue(
   // Volatile builtins: TODAY()/NOW() cells have a cached `<v>` from the last
   // save, which the viewer would otherwise show as a stale date. Recompute
   // them against the current system clock at render time.
-  const num = recomputeVolatile(cell.formula) ?? cell.value.number;
-  return applyFormat(num, effectiveFmtId, effectiveFmt);
+  const recomputed = recomputeVolatile(cell.formula);
+  const num = recomputed ?? cell.value.number;
+  // `todaySerial`/`nowSerial` always emit a 1900-system serial (they encode
+  // "today" as a calendar concept, independent of the workbook's date system),
+  // so a recomputed volatile must be formatted against the 1900 epoch even in a
+  // 1904 workbook. Formatting a 1900-system serial against the (later) 1904
+  // base date would push it 1462 days into the future — i.e. render it 1462
+  // days late. Stored cell values, by contrast, use the workbook's own date
+  // system.
+  const effectiveDate1904 = recomputed !== null ? false : date1904;
+  return applyFormat(num, effectiveFmtId, effectiveFmt, effectiveDate1904);
 }
 
 /**
@@ -167,19 +181,21 @@ function resolveJpEra(date: Date): { abbr: string; short: string; long: string; 
   return { abbr: last.abbr, short: last.short, long: last.long, year: date.getUTCFullYear() };
 }
 
-/** Convert an Excel date serial to a UTC Date (avoids local-timezone off-by-one errors). */
-function excelSerialToUTCDate(serial: number): Date {
-  return new Date((serial - 25569) * 86400 * 1000);
-}
-
 /**
  * Format an Excel date serial using an ECMA-376 format code.
  * Supports: y/yy/yyy/yyyy, m/mm/mmm/mmmm/mmmmm, d/dd/ddd/dddd,
  *           h/hh, m/mm (minutes when after h), s/ss, AM/PM, A/P,
  *           quoted literals, bracket escapes, _ padding, * fill.
+ *
+ * `date1904` selects the date system (`<workbookPr date1904>`, §18.2.28). The
+ * serial → calendar-date conversion is delegated to the shared core
+ * `excelSerialToUtcDate` (§18.17.4.1), which carries the 1900 Lotus
+ * leap-year-bug compat and the 1904 epoch. It defaults to false so 1900-system
+ * workbooks are unchanged (apart from the serial ≤ 59 leap-bug compat, which is
+ * now correct in both systems).
  */
-function formatExcelDateCode(serial: number, fmtCode: string): string {
-  const date = excelSerialToUTCDate(serial);
+function formatExcelDateCode(serial: number, fmtCode: string, date1904 = false): string {
+  const date = excelSerialToUtcDate(serial, date1904);
   const yr = date.getUTCFullYear();
   const mo = date.getUTCMonth() + 1;   // 1-12
   const dy = date.getUTCDate();
@@ -364,21 +380,102 @@ function isDateFormatCode(code: string): boolean {
   return /[yd]/i.test(stripped) || /a{3,}/i.test(stripped);
 }
 
-function applyFormat(num: number, numFmtId: number, formatCode: string | null): string {
+// Excel's General format does not round-trip the raw IEEE-754 double: the
+// display engine rounds to 11 significant digits (of the 15-17 significant
+// digits a double can carry), which is what keeps binary floating point
+// noise from arithmetic (e.g. 0.1 + 0.2 === 0.30000000000000004) from ever
+// reaching the screen. See "Floating-point arithmetic may give inaccurate
+// results in Excel" (Microsoft KB78113) for the 15-digit internal precision
+// this display rounding sits on top of.
+const GENERAL_SIGNIFICANT_DIGITS = 11;
+// Once General has committed to scientific notation (see thresholds below),
+// Excel caps the mantissa at 6 significant digits (1 integer + 5 decimal),
+// e.g. 123456789012 -> "1.23457E+11", independent of the 11-digit budget
+// used for fixed-point display.
+const GENERAL_EXPONENTIAL_MANTISSA_DIGITS = 6;
+
+/** Strips trailing fractional zeros (and a dangling ".") from a fixed-point
+ *  digit string. No-op for strings without a decimal point. */
+function trimTrailingZeros(digits: string): string {
+  if (!digits.includes('.')) return digits;
+  return digits.replace(/0+$/, '').replace(/\.$/, '');
+}
+
+/** Formats `exponent` the way Excel's General exponential notation does:
+ *  always signed, at least two digits (E+05, E+11, E-09, ...). */
+function formatExcelExponent(exponent: number): string {
+  const sign = exponent >= 0 ? '+' : '-';
+  const digits = Math.abs(exponent).toString().padStart(2, '0');
+  return `${sign}${digits}`;
+}
+
+/** Renders a finite, non-zero, non-negative number in Excel's General
+ *  exponential style: mantissa trimmed to `GENERAL_EXPONENTIAL_MANTISSA_DIGITS`
+ *  significant digits with trailing zeros dropped, uppercase `E`, signed
+ *  2+-digit exponent (e.g. 123456789012 -> "1.23457E+11"). */
+function formatGeneralExponential(abs: number): string {
+  const [mantissa, exponent] = abs.toExponential(GENERAL_EXPONENTIAL_MANTISSA_DIGITS - 1).split('e');
+  return `${trimTrailingZeros(mantissa)}E${formatExcelExponent(Number(exponent))}`;
+}
+
+/**
+ * Formats a number the way Excel's "General" cell format does: round to 11
+ * significant digits (hiding binary floating-point round-trip noise like
+ * 0.1 + 0.2), trim trailing fractional zeros, and switch to Excel-style
+ * exponential notation ("1.23457E+11") once the value's decimal exponent
+ * falls outside the fixed-point display budget.
+ *
+ * Thresholds:
+ * - Integer part >= 12 digits (decimal exponent >= 11): Excel General is
+ *   documented to switch 12+ digit numbers to scientific notation.
+ * - Decimal exponent < -5 (value would need 6+ leading fractional zeros
+ *   before the first significant digit): mirrors the same "11 significant
+ *   digits must fit in the fixed-point budget" rule on the small-number
+ *   side — not a numerically-documented Microsoft threshold, but the
+ *   consistent extrapolation of the documented large-number rule.
+ *
+ * Column-width narrowing is not modeled: Excel shrinks a General value's
+ * displayed precision further to fit a narrow column, but this function always
+ * emits the full 11-significant-digit form regardless of the destination
+ * column width, matching how the rest of this renderer treats layout as
+ * independent of formatting.
+ */
+function formatGeneralNumber(num: number): string {
+  if (!Number.isFinite(num)) return String(num);
+  if (num === 0) return '0'; // canonicalizes -0 to "0"
+
+  const negative = num < 0;
+  const abs = Math.abs(num);
+
+  // Decimal exponent of the value once rounded to the target significant
+  // digits, derived from the (already-rounded) exponential form so a
+  // rounding carry that bumps the digit count (e.g. 99999999999.6 -> 1E+11)
+  // is reflected before the fixed-vs-exponential branch is chosen.
+  const exponent = Number(abs.toExponential(GENERAL_SIGNIFICANT_DIGITS - 1).split('e')[1]);
+  const useExponential = exponent >= GENERAL_SIGNIFICANT_DIGITS || exponent < -5;
+
+  const body = useExponential
+    ? formatGeneralExponential(abs)
+    : trimTrailingZeros(abs.toPrecision(GENERAL_SIGNIFICANT_DIGITS));
+
+  return negative ? `-${body}` : body;
+}
+
+function applyFormat(num: number, numFmtId: number, formatCode: string | null, date1904 = false): string {
   // Built-in date/time numFmtIds (ECMA-376 §18.8.30 table)
   const builtinFmt = BUILTIN_DATE_FMT[numFmtId];
-  if (builtinFmt) return formatExcelDateCode(num, builtinFmt);
+  if (builtinFmt) return formatExcelDateCode(num, builtinFmt, date1904);
   // ECMA-376 §18.8.30: "General" is the reserved General number format regardless
   // of numFmtId. LibreOffice writes a custom numFmt (id ≥ 164) with
   // formatCode="General"; tokenizing it as a literal pattern would render the
   // word "General" instead of the value (issue #358).
-  if (formatCode && formatCode.trim().toLowerCase() === 'general') return String(num);
+  if (formatCode && formatCode.trim().toLowerCase() === 'general') return formatGeneralNumber(num);
   if (formatCode) {
-    if (isDateFormatCode(formatCode)) return formatExcelDateCode(num, formatCode);
+    if (isDateFormatCode(formatCode)) return formatExcelDateCode(num, formatCode, date1904);
     return applyFormatCode(num, formatCode);
   }
   switch (numFmtId) {
-    case 0: return String(num);
+    case 0: return formatGeneralNumber(num);
     case 1: return Math.round(num).toString();
     case 2: return num.toFixed(2);
     case 3: return formatThousands(num, 0);
@@ -389,7 +486,7 @@ function applyFormat(num: number, numFmtId: number, formatCode: string | null): 
     case 37: case 38: return formatThousands(num, 0);
     case 39: case 40: return formatThousands(num, 2);
     case 49: return String(num);
-    default: return String(num);
+    default: return formatGeneralNumber(num);
   }
 }
 

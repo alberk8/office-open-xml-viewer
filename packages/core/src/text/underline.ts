@@ -33,7 +33,11 @@ export function drawUnderline(
   dpr = 1,
 ): void {
   const baseLineW = Math.max(1, sizePx * 0.05);
-  const heavy = style?.endsWith('Heavy') ?? false;
+  // ST_TextUnderlineType (§20.1.10.82) has two distinct "heavy" spellings:
+  // the bare `heavy` value itself, and the `*Heavy` suffix on the dotted/dash/
+  // wavy families (`dottedHeavy`, `dashHeavy`, …). Both denote the same ~1.8×
+  // weight class, so both must be recognized here.
+  const heavy = style === 'heavy' || (style?.endsWith('Heavy') ?? false);
   const lineW = heavy ? baseLineW * 1.8 : baseLineW;
   const y = baseline + Math.max(2, lineW);
   // Crispness nudge (see crispOffset): a horizontal underline whose device-pixel

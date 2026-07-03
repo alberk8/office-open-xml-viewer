@@ -159,9 +159,13 @@ pub(crate) fn parse_legacy_chart(
         None
     };
     let secondary_ax_id = secondary_val_ax.as_ref().and_then(ax_id_of);
+    // The category axis is `<c:catAx>` or, for a date/time-series X axis,
+    // `<c:dateAx>` (§21.2.2.39) — same child grammar, so every cat-axis read
+    // below (hidden, tick label size/color/bold, line style, tick marks, format
+    // code) treats them identically.
     let cat_ax = root
         .descendants()
-        .find(|n| n.is_element() && n.tag_name().name() == "catAx");
+        .find(|n| n.is_element() && matches!(n.tag_name().name(), "catAx" | "dateAx"));
     let (val_min, val_max) = val_ax
         .map(ooxml_common::chart::extract_axis_min_max)
         .unwrap_or((None, None));
@@ -620,6 +624,11 @@ pub(crate) fn parse_legacy_chart(
 
     // `<c:valAx><c:numFmt formatCode>` — value-axis tick label number format.
     let val_axis_format_code = val_ax.and_then(ooxml_common::chart::extract_axis_format_code);
+    // `<c:catAx|dateAx><c:numFmt formatCode>` — category-axis number format. For
+    // a `<c:dateAx>` this is the date serial format code (e.g. "m/d/yyyy") the TS
+    // side needs to format category labels. Reaches parity with the xlsx parser,
+    // which already wires this field (pptx previously hardcoded it to None).
+    let cat_axis_format_code = cat_ax.and_then(ooxml_common::chart::extract_axis_format_code);
 
     // Secondary value axis (combo charts) — parse the right-hand `<c:valAx>`
     // into a self-contained spec using the same shared helpers as the primary
@@ -743,10 +752,11 @@ pub(crate) fn parse_legacy_chart(
     let mut val_axis_title_size: Option<i32> = None;
     let mut val_axis_title_bold: Option<bool> = None;
     let mut val_axis_title_color: Option<String> = None;
-    for ax in plot_area.children().filter(|n| {
-        n.is_element() && (n.tag_name().name() == "catAx" || n.tag_name().name() == "valAx")
-    }) {
-        let is_cat = if ax.tag_name().name() == "catAx" {
+    for ax in plot_area
+        .children()
+        .filter(|n| n.is_element() && matches!(n.tag_name().name(), "catAx" | "dateAx" | "valAx"))
+    {
+        let is_cat = if matches!(ax.tag_name().name(), "catAx" | "dateAx") {
             true
         } else {
             // valAx: disambiguate by axPos (b/t → X/cat, l/r → Y/val).
@@ -873,7 +883,7 @@ pub(crate) fn parse_legacy_chart(
             cat_axis_crosses_at: None,
             val_axis_crosses: None,
             val_axis_crosses_at: None,
-            cat_axis_format_code: None,
+            cat_axis_format_code,
             cat_axis_min: None,
             cat_axis_max: None,
             radar_style: None,

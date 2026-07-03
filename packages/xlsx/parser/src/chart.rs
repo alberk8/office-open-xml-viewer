@@ -651,7 +651,13 @@ pub(crate) fn parse_chart_xml(
         // Axis title + tick label font size extraction (ECMA-376 §21.2.2.17
         // c:txPr/a:defRPr@sz gives tick labels their hpt size; absent = default).
         match elem_name {
-            "catAx" => {
+            // `<c:dateAx>` (§21.2.2.39) is the date/time-series category axis:
+            // same child grammar as `<c:catAx>` (title, numFmt, delete, ticks,
+            // scaling, line style). Excel emits it when the category source is
+            // dates; the numFmt formatCode drives serial-date label formatting on
+            // the TS side. Advanced date-unit control (baseTimeUnit/majorTimeUnit)
+            // is out of scope here — treated identically to catAx.
+            "catAx" | "dateAx" => {
                 if cat_axis_title.is_none() {
                     let (t, sz, b, c) = extract_axis_title_with_props(&child, c_ns, a_ns);
                     if t.is_some() {
@@ -1544,115 +1550,33 @@ pub(crate) fn parse_marker_block(
     (symbol, size, fill, line)
 }
 
-/// Locate the first `a:solidFill > a:srgbClr@val` or `a:schemeClr@val` under
-/// `node` (children only, not deep descendants — chart spPr is structured
-/// shallowly). Returns the resolved hex without `#`. Handles theme refs and
-/// `lumMod`/`lumOff`/`tint`/`shade`/`alpha` color transforms by delegating
-/// to `apply_color_transforms`.
+/// Locate the first resolvable `<a:solidFill>` among `parent`'s direct children
+/// (children only, not deep descendants — chart spPr is structured shallowly)
+/// and resolve its color to hex **without** `#` (uppercase). The chart wire
+/// model prepends `#` on the TS side, so this matches every other chart color
+/// field.
+///
+/// Delegates the DrawingML color grammar (`srgbClr`/`sysClr`/`prstClr`/
+/// `schemeClr` + `lumMod`/`lumOff`/`tint`/`shade`/`alpha` transforms) to the
+/// shared [`ooxml_common::color::parse_color_node`] via the crate-wide
+/// [`XlsxSchemeResolver`], so scheme slots resolve through the §20.1.6.2 default
+/// clrMap (`tx2`→`dk2`, `bg2`→`lt2`) and luminance transforms apply in HLS space
+/// (§20.1.2.3.20/.21). The prior private copy in this module mapped `bg2`/`tx2`
+/// to the wrong slots and multiplied `lumMod`/`lumOff` in RGB space.
 pub(crate) fn extract_solid_fill_in_drawingml(
     parent: &roxmltree::Node,
     theme_colors: &[String],
 ) -> Option<String> {
-    for fill in parent
+    parent
         .children()
         .filter(|n| n.is_element() && n.tag_name().name() == "solidFill")
-    {
-        for clr in fill.children().filter(|n| n.is_element()) {
-            match clr.tag_name().name() {
-                "srgbClr" => {
-                    if let Some(rgb) = clr.attribute("val") {
-                        return Some(apply_color_transforms(rgb, &clr));
-                    }
-                }
-                "schemeClr" => {
-                    if let Some(scheme) = clr.attribute("val") {
-                        let base = resolve_scheme_color(scheme, theme_colors);
-                        if let Some(b) = base {
-                            return Some(apply_color_transforms(&b, &clr));
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-    None
-}
-
-/// Look up a scheme color name ("dk1"/"lt1"/"dk2"/"lt2"/"accent1"…"accent6"
-/// /"hlink"/"folHlink") in the workbook theme color table. Returns hex
-/// (no `#`) or None when unknown.
-pub(crate) fn resolve_scheme_color(name: &str, theme_colors: &[String]) -> Option<String> {
-    // Theme order (parse_theme_colors): dk1@0, lt1@1, dk2@2, lt2@3,
-    // accent1@4..accent6@9, hlink@10, folHlink@11.
-    let idx = match name {
-        "dk1" | "tx1" | "bg2" => 0,
-        "lt1" | "bg1" | "tx2" => 1,
-        "dk2" => 2,
-        "lt2" => 3,
-        "accent1" => 4,
-        "accent2" => 5,
-        "accent3" => 6,
-        "accent4" => 7,
-        "accent5" => 8,
-        "accent6" => 9,
-        "hlink" => 10,
-        "folHlink" => 11,
-        _ => return None,
-    };
-    theme_colors
-        .get(idx)
-        .map(|s| s.trim_start_matches('#').to_string())
-}
-
-/// Apply DrawingML color transforms (`lumMod`/`lumOff`/`tint`/`shade`/
-/// `alpha` — drop alpha) found as children of a color element. Returns a
-/// hex string without `#`. Already-existing `apply_tint` handles
-/// lumMod-style brightness changes for the simpler `lumMod-only` case;
-/// this widens it to combine multiple transforms.
-pub(crate) fn apply_color_transforms(base_hex: &str, color_el: &roxmltree::Node) -> String {
-    let cleaned = base_hex.trim_start_matches('#');
-    let r = u8::from_str_radix(cleaned.get(0..2).unwrap_or("00"), 16).unwrap_or(0);
-    let g = u8::from_str_radix(cleaned.get(2..4).unwrap_or("00"), 16).unwrap_or(0);
-    let b = u8::from_str_radix(cleaned.get(4..6).unwrap_or("00"), 16).unwrap_or(0);
-    let mut rf = r as f64 / 255.0;
-    let mut gf = g as f64 / 255.0;
-    let mut bf = b as f64 / 255.0;
-    for child in color_el.children().filter(|n| n.is_element()) {
-        let pct = child
-            .attribute("val")
-            .and_then(|v| v.parse::<f64>().ok())
-            .map(|v| v / 100000.0);
-        let Some(p) = pct else { continue };
-        match child.tag_name().name() {
-            "lumMod" => {
-                rf *= p;
-                gf *= p;
-                bf *= p;
-            }
-            "lumOff" => {
-                rf += p;
-                gf += p;
-                bf += p;
-            }
-            "tint" => {
-                // ECMA-376: lighten toward 1.0 by `p` (0..1).
-                rf = rf + (1.0 - rf) * p;
-                gf = gf + (1.0 - gf) * p;
-                bf = bf + (1.0 - bf) * p;
-            }
-            "shade" => {
-                // Darken toward 0 by `1 - p`.
-                rf *= p;
-                gf *= p;
-                bf *= p;
-            }
-            // alpha is dropped — we render opaque.
-            _ => {}
-        }
-    }
-    let clamp = |v: f64| -> u8 { (v.clamp(0.0, 1.0) * 255.0).round() as u8 };
-    format!("{:02X}{:02X}{:02X}", clamp(rf), clamp(gf), clamp(bf))
+        .find_map(|fill| {
+            ooxml_common::color::parse_color_node(
+                fill,
+                &crate::drawing::XlsxSchemeResolver { theme_colors },
+                ooxml_common::color::TintMode::PowerPointLinear,
+            )
+        })
 }
 
 /// Walk every `<c:dPt>` direct child of the series and collect per-point
@@ -2803,5 +2727,172 @@ mod axis_title_and_border_tests {
         assert_eq!(chart.val_axis_title.as_deref(), Some("Period"));
         assert_eq!(chart.val_axis_title_size, Some(1800));
         assert_eq!(chart.val_axis_title_bold, None);
+    }
+}
+
+#[cfg(test)]
+mod solid_fill_color_tests {
+    use super::*;
+    use roxmltree::Document;
+
+    const A_NS: &str = "http://schemas.openxmlformats.org/drawingml/2006/main";
+
+    // Theme in clrScheme document order: dk1@0, lt1@1, dk2@2, lt2@3,
+    // accent1@4 … folHlink@11. Distinct hexes so a mis-index is obvious.
+    fn theme() -> Vec<String> {
+        vec![
+            "#111111".into(), // dk1 @0
+            "#FEFEFE".into(), // lt1 @1
+            "#222222".into(), // dk2 @2
+            "#EEEEEE".into(), // lt2 @3
+            "#4472C4".into(), // accent1 @4
+            "#00AA00".into(), // accent2 @5
+            "#0000AA".into(), // accent3 @6
+            "#AAAA00".into(), // accent4 @7
+            "#00AAAA".into(), // accent5 @8
+            "#AA00AA".into(), // accent6 @9
+            "#0563C1".into(), // hlink @10
+            "#954F72".into(), // folHlink @11
+        ]
+    }
+
+    fn solid_fill(inner: &str) -> String {
+        format!(r#"<a:spPr xmlns:a="{A_NS}"><a:solidFill>{inner}</a:solidFill></a:spPr>"#)
+    }
+
+    /// §20.1.6.2 default clrMap: `tx2` → `dk2` (theme slot 2), NOT `lt1`.
+    #[test]
+    fn scheme_tx2_resolves_to_dk2_slot() {
+        let xml = solid_fill(r#"<a:schemeClr val="tx2"/>"#);
+        let doc = Document::parse(&xml).unwrap();
+        let out = extract_solid_fill_in_drawingml(&doc.root_element(), &theme());
+        // tx2 → dk2 → theme[2] = "222222" (uppercase, no `#`).
+        assert_eq!(out.as_deref(), Some("222222"));
+    }
+
+    /// §20.1.6.2 default clrMap: `bg2` → `lt2` (theme slot 3), NOT `dk1`.
+    #[test]
+    fn scheme_bg2_resolves_to_lt2_slot() {
+        let xml = solid_fill(r#"<a:schemeClr val="bg2"/>"#);
+        let doc = Document::parse(&xml).unwrap();
+        let out = extract_solid_fill_in_drawingml(&doc.root_element(), &theme());
+        // bg2 → lt2 → theme[3] = "EEEEEE".
+        assert_eq!(out.as_deref(), Some("EEEEEE"));
+    }
+
+    /// tx1 → dk1 and bg1 → lt1 (unchanged, but pinned so a refactor can't drift).
+    #[test]
+    fn scheme_tx1_bg1_resolve_to_dk1_lt1() {
+        let tx1 = solid_fill(r#"<a:schemeClr val="tx1"/>"#);
+        let doc = Document::parse(&tx1).unwrap();
+        assert_eq!(
+            extract_solid_fill_in_drawingml(&doc.root_element(), &theme()).as_deref(),
+            Some("111111") // dk1 @0
+        );
+        let bg1 = solid_fill(r#"<a:schemeClr val="bg1"/>"#);
+        let doc = Document::parse(&bg1).unwrap();
+        assert_eq!(
+            extract_solid_fill_in_drawingml(&doc.root_element(), &theme()).as_deref(),
+            Some("FEFEFE") // lt1 @1
+        );
+    }
+
+    /// `lumMod` is a luminance modulation applied to the HLS `L` channel
+    /// (§20.1.2.3.20), NOT a per-RGB-component multiply. For `4472C4` at
+    /// `lumMod 50000`, the HLS result is `203864`; the (wrong) RGB-space
+    /// multiply would give `223962`.
+    #[test]
+    fn lummod_applies_in_hls_space_not_rgb() {
+        let xml = solid_fill(r#"<a:srgbClr val="4472C4"><a:lumMod val="50000"/></a:srgbClr>"#);
+        let doc = Document::parse(&xml).unwrap();
+        let out = extract_solid_fill_in_drawingml(&doc.root_element(), &theme());
+        assert_eq!(out.as_deref(), Some("203864"));
+    }
+
+    /// A plain srgbClr with no transforms passes through (uppercased, no `#`).
+    #[test]
+    fn plain_srgb_passthrough() {
+        let xml = solid_fill(r#"<a:srgbClr val="ff8000"/>"#);
+        let doc = Document::parse(&xml).unwrap();
+        let out = extract_solid_fill_in_drawingml(&doc.root_element(), &theme());
+        assert_eq!(out.as_deref(), Some("FF8000"));
+    }
+}
+
+#[cfg(test)]
+mod date_axis_tests {
+    use super::*;
+
+    const C_NS: &str = "http://schemas.openxmlformats.org/drawingml/2006/chart";
+    const A_NS: &str = "http://schemas.openxmlformats.org/drawingml/2006/main";
+
+    fn theme() -> Vec<String> {
+        vec!["#111111".into(); 12]
+    }
+
+    /// A line chart whose horizontal axis is a `<c:dateAx>` (§21.2.2.39), the
+    /// time-series category axis Excel emits when the category source is dates.
+    /// `axis_inner` is spliced into the `<c:dateAx>` element.
+    fn date_axis_chart_xml(axis_inner: &str) -> String {
+        format!(
+            r#"<c:chartSpace xmlns:c="{c}" xmlns:a="{a}">
+  <c:chart>
+    <c:plotArea>
+      <c:lineChart>
+        <c:grouping val="standard"/>
+        <c:ser>
+          <c:idx val="0"/><c:order val="0"/>
+          <c:cat><c:numRef><c:numCache>
+            <c:pt idx="0"><c:v>44927</c:v></c:pt><c:pt idx="1"><c:v>44958</c:v></c:pt>
+          </c:numCache></c:numRef></c:cat>
+          <c:val><c:numRef><c:numCache>
+            <c:pt idx="0"><c:v>10</c:v></c:pt><c:pt idx="1"><c:v>20</c:v></c:pt>
+          </c:numCache></c:numRef></c:val>
+        </c:ser>
+        <c:axId val="1"/><c:axId val="2"/>
+      </c:lineChart>
+      <c:dateAx>
+        <c:axId val="2"/>
+        <c:axPos val="b"/>
+        {axis}
+      </c:dateAx>
+      <c:valAx><c:axId val="1"/><c:axPos val="l"/></c:valAx>
+    </c:plotArea>
+  </c:chart>
+</c:chartSpace>"#,
+            c = C_NS,
+            a = A_NS,
+            axis = axis_inner,
+        )
+    }
+
+    /// `<c:dateAx>` is a category axis (§21.2.2.39): its `<c:numFmt>` formatCode
+    /// must populate `cat_axis_format_code` exactly as `<c:catAx>` does, so the
+    /// TS side formats the serial dates instead of showing raw numbers.
+    #[test]
+    fn date_axis_format_code_populates_cat_axis_format_code() {
+        let xml = date_axis_chart_xml(r#"<c:numFmt formatCode="m/d/yyyy" sourceLinked="0"/>"#);
+        let chart = parse_chart_xml(&xml, C_NS, A_NS, &theme()).expect("dateAx chart parses");
+        assert_eq!(chart.cat_axis_format_code.as_deref(), Some("m/d/yyyy"));
+    }
+
+    /// A deleted `<c:dateAx>` (`<c:delete val="1"/>`) hides the category axis,
+    /// matching the catAx convention.
+    #[test]
+    fn date_axis_delete_hides_cat_axis() {
+        let xml = date_axis_chart_xml(r#"<c:delete val="1"/>"#);
+        let chart = parse_chart_xml(&xml, C_NS, A_NS, &theme()).expect("dateAx chart parses");
+        assert!(chart.cat_axis_hidden);
+    }
+
+    /// A dateAx title maps to the cat-axis title (same as catAx).
+    #[test]
+    fn date_axis_title_maps_to_cat_axis_title() {
+        let title = r#"<c:title><c:tx><c:rich><a:p>
+            <a:r><a:rPr sz="1200"/><a:t>Date</a:t></a:r></a:p></c:rich></c:tx></c:title>"#;
+        let xml = date_axis_chart_xml(title);
+        let chart = parse_chart_xml(&xml, C_NS, A_NS, &theme()).expect("dateAx chart parses");
+        assert_eq!(chart.cat_axis_title.as_deref(), Some("Date"));
+        assert_eq!(chart.cat_axis_title_size, Some(1200));
     }
 }

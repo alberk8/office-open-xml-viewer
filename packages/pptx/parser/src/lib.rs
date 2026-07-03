@@ -5813,4 +5813,71 @@ mod tests {
             _ => unreachable!(),
         }
     }
+
+    /// A line chart whose horizontal axis is a `<c:dateAx>` (§21.2.2.39) — the
+    /// date/time-series category axis. `axis_inner` is spliced into the dateAx.
+    fn date_axis_chart_xml(axis_inner: &str) -> String {
+        format!(
+            r#"<?xml version="1.0"?>
+<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"
+              xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+  <c:chart>
+    <c:plotArea>
+      <c:lineChart>
+        <c:grouping val="standard"/>
+        <c:ser>
+          <c:idx val="0"/><c:order val="0"/>
+          <c:cat><c:numRef><c:numCache>
+            <c:pt idx="0"><c:v>44927</c:v></c:pt>
+            <c:pt idx="1"><c:v>44958</c:v></c:pt>
+          </c:numCache></c:numRef></c:cat>
+          <c:val><c:numRef><c:numCache>
+            <c:pt idx="0"><c:v>10</c:v></c:pt>
+            <c:pt idx="1"><c:v>20</c:v></c:pt>
+          </c:numCache></c:numRef></c:val>
+        </c:ser>
+      </c:lineChart>
+      <c:dateAx>
+        <c:axId val="10"/>
+        <c:axPos val="b"/>
+        {axis}
+      </c:dateAx>
+      <c:valAx><c:axId val="20"/><c:axPos val="l"/></c:valAx>
+    </c:plotArea>
+  </c:chart>
+</c:chartSpace>"#,
+            axis = axis_inner,
+        )
+    }
+
+    /// `<c:dateAx>` is recognized as the category axis: its `<c:numFmt>`
+    /// formatCode populates `cat_axis_format_code` so serial dates get formatted.
+    #[test]
+    fn date_axis_format_code_populates_cat_axis_format_code() {
+        let theme = HashMap::new();
+        let xml = date_axis_chart_xml(r#"<c:numFmt formatCode="m/d/yyyy" sourceLinked="0"/>"#);
+        let c = parse_legacy_chart(&xml, &theme).expect("dateAx chart should parse");
+        assert_eq!(c.chart.cat_axis_format_code.as_deref(), Some("m/d/yyyy"));
+    }
+
+    /// A dateAx title maps to the cat-axis title (same wiring as catAx).
+    #[test]
+    fn date_axis_title_maps_to_cat_axis_title() {
+        let theme = HashMap::new();
+        let title = r#"<c:title><c:tx><c:rich><a:p><a:pPr><a:defRPr sz="1000"/></a:pPr>
+            <a:r><a:t>Date</a:t></a:r></a:p></c:rich></c:tx></c:title>"#;
+        let xml = date_axis_chart_xml(title);
+        let c = parse_legacy_chart(&xml, &theme).expect("dateAx chart should parse");
+        assert_eq!(c.chart.cat_axis_title.as_deref(), Some("Date"));
+        assert_eq!(c.chart.cat_axis_title_font_size_hpt, Some(1000));
+    }
+
+    /// A deleted dateAx hides the category axis.
+    #[test]
+    fn date_axis_delete_hides_cat_axis() {
+        let theme = HashMap::new();
+        let xml = date_axis_chart_xml(r#"<c:delete val="1"/>"#);
+        let c = parse_legacy_chart(&xml, &theme).expect("dateAx chart should parse");
+        assert!(c.chart.cat_axis_hidden);
+    }
 }

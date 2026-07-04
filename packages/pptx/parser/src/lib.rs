@@ -5794,9 +5794,11 @@ mod tests {
         assert_eq!(c.chart_type, "clusteredBar");
         assert_eq!(c.series.len(), 2, "both bar and line series parsed");
 
-        // Bar series: primary axis, no line override.
+        // Bar series: primary axis. `series_type` now carries the group type
+        // ("bar"); the renderer treats any non-"line" type as a bar (identical
+        // rendering to the old `None`).
         assert_eq!(c.series[0].name, "Revenue ($M)");
-        assert_eq!(c.series[0].series_type, None);
+        assert_eq!(c.series[0].series_type.as_deref(), Some("bar"));
         assert_eq!(c.series[0].use_secondary_axis, None);
 
         // Line series: tagged "line" + bound to the secondary axis.
@@ -5823,7 +5825,8 @@ mod tests {
         let c = parse_legacy_chart(bar_chart_with_axis_titles_xml(), &theme)
             .expect("legacy chart should parse");
         assert!(c.chart.secondary_val_axis.is_none());
-        assert_eq!(c.chart.series[0].series_type, None);
+        // `series_type` now carries the group type ("bar") for every series.
+        assert_eq!(c.chart.series[0].series_type.as_deref(), Some("bar"));
         assert_eq!(c.chart.series[0].use_secondary_axis, None);
     }
 

@@ -756,14 +756,30 @@ export async function preloadImages(
  */
 const renderTokens = new WeakMap<HTMLCanvasElement | OffscreenCanvas, number>();
 
-/** True when a section is set to vertical writing (ECMA-376 §17.6.20 tbRl:
- *  glyphs stack top-to-bottom, lines advance right-to-left). Vertical variants
- *  that Word also defines (`tbLr`, `lrV`, `tbRlV`) are treated the same for
- *  layout purposes here; only `tbRl` appears in the vertical-Japanese samples.
- *  Horizontal (`lrTb`, dropped to null by the parser) ⇒ false. */
+/** True when a section flows VERTICALLY (glyphs stack top→bottom, lines advance
+ *  across the page). `<w:sectPr><w:textDirection>` uses the TRANSITIONAL
+ *  ST_TextDirection enum (ECMA-376 Part 4 §14.11.7; Word writes these, not the
+ *  Part 1 §17.18.93 Strict `tb|rl|lr|…` set):
+ *    - `tbRl`  (≡ Strict `rl`)  — vertical, lines right→left: standard vertical
+ *                                 Japanese; the only value in the samples.
+ *    - `tbRlV` (≡ Strict `rlV`) — vertical R→L, non-EA glyphs rotated 90° CW.
+ *    - `tbLrV` (≡ Strict `lrV`) — vertical L→R, non-EA glyphs rotated 90° CW.
+ *  These three share the +90° page rotation + upright-CJK glyph path (stage-1
+ *  approximates the `V` variants' non-EA rotation the same as `tbRl`, which the
+ *  glyph path already draws Latin sideways for).
+ *
+ *  Two values are VERTICAL but NOT handled by this stage-1 path, so they return
+ *  false (parsed and carried, but rendered as horizontal until implemented):
+ *    - `btLr`  (≡ Strict `lr`)  — vertical, but lines flow LEFT→RIGHT and glyphs
+ *                                 stack BOTTOM→TOP: needs the opposite page
+ *                                 rotation/flow, a separate follow-up.
+ *  And two are HORIZONTAL (glyphs upright, lines top→bottom) ⇒ false:
+ *    - `lrTb`  (≡ Strict `tb`, the default) — dropped to null by the parser.
+ *    - `lrTbV` (≡ Strict `tbV`) — horizontal, EA glyphs rotated 270°; still a
+ *                                 horizontal flow, so not this vertical path. */
 function isVerticalSection(s: SectionProps): boolean {
   const td = s.textDirection;
-  return td === 'tbRl' || td === 'tbLr' || td === 'tbRlV' || td === 'lrV';
+  return td === 'tbRl' || td === 'tbRlV' || td === 'tbLrV';
 }
 
 /** Map a vertical (tbRl) section's PHYSICAL page geometry to the SWAPPED LOGICAL
@@ -7830,6 +7846,13 @@ function renderCell(
     // cell edge.
     ctx.save();
     ctx.beginPath();
+    // `ctx.canvas.width` is the PHYSICAL device width; on a vertical (§17.6.20
+    // tbRl) page the ctx is rotated, so this clip rect is expressed in LOGICAL
+    // coordinates and the physical-width span makes it OVER-wide along the logical
+    // x-axis. That is harmless here — the clip is a Y-band anti-bleed guard, so an
+    // over-wide x-extent still fully contains the intended row band (it never
+    // UNDER-clips). Vertical tables are not yet exercised by a ground-truth
+    // fixture; when they are, tighten this to the logical content width.
     ctx.rect(0, y, ctx.canvas.width, h);
     ctx.clip();
     renderCellContent(cell.content, cellState);

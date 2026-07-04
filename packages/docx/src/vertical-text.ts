@@ -19,8 +19,19 @@
 //     browser's shaping/advance for the run).
 //
 // This module owns ONLY the pure geometry + classification; the renderer wires
-// it into the three whole-run `fillText` draw sites behind the `verticalCJK`
-// flag, so the horizontal path stays byte-identical.
+// it into the whole-run glyph draw sites, the anchor/inline/float image draws,
+// and the text-selection overlay behind the `verticalCJK` flag, so the
+// horizontal path stays byte-identical.
+//
+// STAGE-1 SCOPE (issue #771 tracks stage-2). Implemented: +90° page rotation,
+// upright-CJK / sideways-Latin glyph draw, anchor images resolved against the
+// physical page then projected into the logical flow (PDF-verified centroid),
+// inline/anchored/float image uprighting, and the vertical text-layer transform.
+// NOT yet implemented (approximated or deferred): vertical-form punctuation
+// substitution (U+FE10–U+FE19) and the `0.12em`/`0.4em` glyph nudges are
+// font-dependent stage-1 heuristics (flagged inline); 縦中横 (tate-chū-yoko),
+// `btLr` flow, header/footer + tables in tbRl, and paragraph-relative vertical
+// anchors are follow-ups.
 
 import { isCjkBreakChar } from '@silurus/ooxml-core';
 
@@ -68,7 +79,14 @@ const VERTICAL_PUNCT_UPPER_RIGHT = new Set<number>([
  */
 export function verticalGlyphOffset(cp: number): { dx: number; dy: number } {
   if (VERTICAL_PUNCT_UPPER_RIGHT.has(cp)) {
-    // Move toward the upper-right corner of the cell: right ~0.4em, up ~0.4em.
+    // HEURISTIC (stage-1 approximation, font-dependent): move the small comma/
+    // full stop toward the upper-right corner of the cell by ~0.4em each way.
+    // This is NOT a spec constant — JIS X 4051 §4.x gives the punctuation cell
+    // geometry (the glyph occupies a quarter-em corner box), not a 0.4em nudge.
+    // The correct fix is full vertical-form glyph substitution (U+FE10–U+FE19,
+    // Unicode CJK Compatibility Forms) so the font supplies the pre-positioned
+    // vertical comma/period; then this offset is deleted. Tracked in issue #771
+    // (vertical-text stage-2).
     return { dx: 0.4, dy: -0.4 };
   }
   return { dx: 0, dy: 0 };
@@ -158,10 +176,15 @@ export function drawVerticalRun(
       ctx.translate(cx, baseline);
       ctx.rotate(-Math.PI / 2);
       // In the upright local frame: draw centred horizontally (the cell centre)
-      // and with an alphabetic baseline nudged so the ideograph sits centred in
-      // its cell. The em-box centre for CJK is ~0.5em below the cap line; using
-      // `middle` baseline centres the glyph box, then shift up by ~0.12em so the
-      // visual centre lands on the cell centre for typical CJK metrics.
+      // with a `middle` baseline that centres the glyph box on the cell.
+      // HEURISTIC (stage-1 approximation, font-dependent): the extra +0.12em
+      // vertical shift nudges typical CJK metrics so the visual centre lands on
+      // the cell centre — it is NOT a spec constant (JIS X 4051 positions the
+      // glyph from the font's ideographic em-box / vertical baseline, which the
+      // browser does not expose here). The correct fix is to place each glyph
+      // from the font's vertical metrics (ideographic baseline / `ideographic`
+      // textBaseline once broadly supported); replace 0.12em then. Tracked in
+      // issue #771 (vertical-text stage-2).
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
       ctx.fillText(

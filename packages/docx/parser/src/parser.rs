@@ -1692,11 +1692,16 @@ fn parse_section(
     // paginator needs the final section's here to resolve the boundary INTO it.
     props.section_start = read_section_break_type(sp);
 
-    // ECMA-376 §17.6.20 `<w:textDirection w:val>` (ST_TextDirection §17.18.93).
-    // The default "lrTb" (horizontal, left-to-right / top-to-bottom) is dropped to
+    // ECMA-376 §17.6.20 `<w:textDirection w:val>`. Word writes the TRANSITIONAL
+    // ST_TextDirection enum (Part 4 §14.11.7): `lrTb`|`tbRl`|`btLr`|`lrTbV`|
+    // `tbLrV`|`tbRlV` — NOT the Part 1 §17.18.93 Strict set (`tb`|`rl`|`lr`|…).
+    // The default "lrTb" (horizontal, left→right / top→bottom) is dropped to
     // `None` so horizontal documents serialize exactly as before (the field is
-    // `skip_serializing_if = "Option::is_none"`); only a non-default value (most
-    // commonly "tbRl" for vertical Japanese) is carried through to the renderer.
+    // `skip_serializing_if = "Option::is_none"`); any other value (most commonly
+    // "tbRl" for vertical Japanese) is carried through verbatim so the renderer
+    // decides which are vertical (see `isVerticalSection`). The parser does not
+    // validate the enum — an unknown value is carried and the renderer treats it
+    // as horizontal, which is the safe default.
     if let Some(td) = child_w(sp, "textDirection").and_then(|n| attr_w(n, "val")) {
         if td != "lrTb" {
             props.text_direction = Some(td);
@@ -10426,11 +10431,11 @@ mod column_tests {
         assert_eq!(parse(r#"<w:cols w:num="2"/>"#).section_start, None);
     }
 
-    /// ECMA-376 §17.6.20 `<w:textDirection w:val>` (ST_TextDirection §17.18.93) is
-    /// surfaced on SectionProps so the renderer can rotate the page for vertical
-    /// Japanese. The default "lrTb" is dropped to None so horizontal documents
-    /// keep byte-identical rendering; a non-default value (most commonly "tbRl")
-    /// is carried through.
+    /// ECMA-376 §17.6.20 `<w:textDirection w:val>` (TRANSITIONAL ST_TextDirection,
+    /// Part 4 §14.11.7 — the enum Word writes) is surfaced on SectionProps so the
+    /// renderer can rotate the page for vertical Japanese. The default "lrTb" is
+    /// dropped to None so horizontal documents keep byte-identical rendering; any
+    /// other value (most commonly "tbRl") is carried through verbatim.
     #[test]
     fn section_props_carries_text_direction() {
         let parse = |sect: &str| {
@@ -10443,6 +10448,16 @@ mod column_tests {
         assert_eq!(
             parse(r#"<w:textDirection w:val="tbRl"/>"#).text_direction,
             Some("tbRl".to_string())
+        );
+        // Other transitional values (§14.11.7) are carried verbatim too — the
+        // renderer, not the parser, decides which flow vertically.
+        assert_eq!(
+            parse(r#"<w:textDirection w:val="tbLrV"/>"#).text_direction,
+            Some("tbLrV".to_string())
+        );
+        assert_eq!(
+            parse(r#"<w:textDirection w:val="btLr"/>"#).text_direction,
+            Some("btLr".to_string())
         );
         // The default horizontal value is dropped so lrTb documents don't emit
         // the field (byte-identical serialization to the pre-vertical parser).

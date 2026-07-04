@@ -231,13 +231,14 @@ pub struct SectionProps {
     /// "nextPage" (the spec default).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub section_start: Option<String>,
-    /// ECMA-376 §17.6.20 `<w:textDirection w:val>` (ST_TextDirection §17.18.93)
-    /// — the section's flow direction. "lrTb" (the default; left-to-right,
-    /// top-to-bottom horizontal) is treated as `None` here so horizontal
-    /// documents keep byte-identical rendering; "tbRl" (top-to-bottom,
-    /// right-to-left — vertical Japanese: glyphs stack downward, lines advance
-    /// right→left) and its relatives are carried so the renderer can rotate the
-    /// page. `None` ⇒ horizontal (lrTb).
+    /// ECMA-376 §17.6.20 `<w:textDirection w:val>` — the section's flow
+    /// direction, using the TRANSITIONAL ST_TextDirection enum Word writes
+    /// (Part 4 §14.11.7: `lrTb`|`tbRl`|`btLr`|`lrTbV`|`tbLrV`|`tbRlV`), NOT the
+    /// Part 1 §17.18.93 Strict set. "lrTb" (the default; horizontal, left→right /
+    /// top→bottom) is treated as `None` here so horizontal documents keep
+    /// byte-identical rendering; "tbRl" (vertical Japanese: glyphs stack downward,
+    /// lines advance right→left) and the other non-default values are carried so
+    /// the renderer can decide which flow vertically. `None` ⇒ horizontal (lrTb).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text_direction: Option<String>,
     /// ECMA-376 §17.6.5 w:docGrid/@w:type ("default" | "lines" |

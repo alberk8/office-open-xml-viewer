@@ -1331,3 +1331,257 @@ describe('CH9 — dispBlanksAs="zero" applies to per-point data labels too (§21
     expect(labelTexts).toContain('0');
   });
 });
+
+// ─── CH8 — pie / doughnut geometry ───────────────────────────────────────────
+
+interface RingArc { x: number; y: number; r: number; a0: number; a1: number; ccw: boolean }
+interface FontText { text: string; font: string; fill: string }
+
+interface RingRecorded {
+  ctx: CanvasRenderingContext2D;
+  arcs: RingArc[];
+  fills: string[];
+  fontTexts: FontText[];
+}
+
+/** Recording context that also captures arc() (radius + angles) and, for each
+ *  fillText, the active font + fillStyle. Used by the pie/doughnut + font tests
+ *  which assert on ring radii, slice start angle, explosion offsets, and the
+ *  resolved `ctx.font` family. */
+function ringRecordingCtx(): RingRecorded {
+  const arcs: RingArc[] = [];
+  const fills: string[] = [];
+  const fontTexts: FontText[] = [];
+  const state: Record<string, unknown> = {
+    font: '10px sans-serif', fillStyle: '#000', strokeStyle: '#000', lineWidth: 1,
+    textAlign: 'start', textBaseline: 'alphabetic', globalAlpha: 1,
+  };
+  const fontPx = (font: string): number => {
+    const m = /(\d+(?:\.\d+)?)px/.exec(font);
+    return m ? parseFloat(m[1]) : 10;
+  };
+  const handler: ProxyHandler<Record<string, unknown>> = {
+    get(_t, prop: string) {
+      if (prop in state && typeof state[prop] !== 'function') return state[prop];
+      switch (prop) {
+        case 'measureText':
+          return (t: string) => {
+            const px = fontPx(String(state.font));
+            let w = 0;
+            for (const ch of String(t)) w += ch.charCodeAt(0) > 0x2e7f ? px : px * 0.6;
+            return { width: w };
+          };
+        case 'arc':
+          return (x: number, y: number, r: number, a0: number, a1: number, ccw = false) =>
+            arcs.push({ x, y, r, a0, a1, ccw });
+        case 'fill':
+          return () => fills.push(String(state.fillStyle));
+        case 'fillText':
+          return (text: string) =>
+            fontTexts.push({ text, font: String(state.font), fill: String(state.fillStyle) });
+        case 'createLinearGradient':
+        case 'createRadialGradient':
+          return () => ({ addColorStop() {} });
+        case 'save': case 'restore': case 'beginPath': case 'closePath':
+        case 'stroke': case 'moveTo': case 'lineTo': case 'bezierCurveTo':
+        case 'quadraticCurveTo': case 'rect': case 'fillRect': case 'strokeRect':
+        case 'clearRect': case 'strokeText': case 'setLineDash': case 'translate':
+        case 'rotate': case 'scale': case 'clip': case 'setTransform':
+        case 'resetTransform': case 'getTransform':
+          return () => undefined;
+        default:
+          return undefined;
+      }
+    },
+    set(_t, prop: string, value) { state[prop] = value; return true; },
+  };
+  return { ctx: new Proxy(state, handler) as unknown as CanvasRenderingContext2D, arcs, fills, fontTexts };
+}
+
+/** Outer/inner ring radii for a pie/doughnut: the outer radius is the largest
+ *  arc radius; the inner radius is the smallest DISTINCT smaller radius (0 for a
+ *  solid pie whose wedges are a single radius). */
+function ringRadii(arcs: RingArc[]): { outer: number; inner: number } {
+  const rs = [...new Set(arcs.map(a => Math.round(a.r * 100) / 100))].sort((a, b) => b - a);
+  return { outer: rs[0] ?? 0, inner: rs.length > 1 ? rs[rs.length - 1] : 0 };
+}
+
+describe('CH8 — pie / doughnut geometry', () => {
+  const pieModel = (over: Partial<ChartModel>): ChartModel =>
+    baseModel({
+      chartType: 'pie',
+      categories: ['A', 'B', 'C'],
+      series: [series({ name: 'S', values: [30, 45, 25] })],
+      ...over,
+    });
+
+  it('a plain pie draws solid wedges (inner radius 0)', () => {
+    const rec = ringRecordingCtx();
+    renderChart(rec.ctx, pieModel({}), RECT, 1);
+    const { outer, inner } = ringRadii(rec.arcs);
+    expect(outer).toBeGreaterThan(0);
+    expect(inner).toBe(0);
+  });
+
+  it('doughnut holeSize sets the inner radius fraction of the outer radius', () => {
+    const rec = ringRecordingCtx();
+    renderChart(rec.ctx, pieModel({ chartType: 'doughnut', holeSize: 60 }), RECT, 1);
+    const { outer, inner } = ringRadii(rec.arcs);
+    expect(inner).toBeGreaterThan(0);
+    // holeSize 60 → inner ≈ 0.60 × outer.
+    expect(inner / outer).toBeCloseTo(0.6, 2);
+  });
+
+  it('a smaller holeSize yields a smaller hole', () => {
+    const big = ringRecordingCtx();
+    const small = ringRecordingCtx();
+    renderChart(big.ctx, pieModel({ chartType: 'doughnut', holeSize: 80 }), RECT, 1);
+    renderChart(small.ctx, pieModel({ chartType: 'doughnut', holeSize: 20 }), RECT, 1);
+    expect(ringRadii(big.arcs).inner).toBeGreaterThan(ringRadii(small.arcs).inner);
+  });
+
+  it('firstSliceAngle rotates the first slice start clockwise from 12 o\'clock', () => {
+    const base = ringRecordingCtx();
+    const rot = ringRecordingCtx();
+    renderChart(base.ctx, pieModel({}), RECT, 1);
+    renderChart(rot.ctx, pieModel({ firstSliceAngle: 90 }), RECT, 1);
+    // The first wedge's start angle. Default 0 → -90° (canvas up = -π/2).
+    const startBase = base.arcs[0].a0;
+    const startRot = rot.arcs[0].a0;
+    expect(startBase).toBeCloseTo(-Math.PI / 2, 4);
+    // +90° → -π/2 + π/2 = 0 (3 o'clock).
+    expect(startRot).toBeCloseTo(0, 4);
+  });
+
+  it('a transparent hole is NOT overpainted with an opaque fill (doughnut)', () => {
+    const rec = ringRecordingCtx();
+    renderChart(rec.ctx, pieModel({ chartType: 'doughnut', holeSize: 50 }), RECT, 1);
+    // Pre-CH8 drew a full 0..2π white circle to mask the wedge centers. The
+    // annular geometry removes it: no arc should be a full circle at the inner
+    // radius drawn with a white fill immediately after.
+    const fullCircles = rec.arcs.filter(a => Math.abs((a.a1 - a.a0) - Math.PI * 2) < 1e-6);
+    expect(fullCircles.length).toBe(0);
+  });
+
+  it('explosion offsets the slice center outward (arc center moves)', () => {
+    const rec = ringRecordingCtx();
+    renderChart(rec.ctx, pieModel({
+      series: [series({
+        name: 'S',
+        values: [30, 45, 25],
+        dataPointOverrides: [{ idx: 1, explosion: 40 }],
+      })],
+    }), RECT, 1);
+    // Every wedge shares the pie center EXCEPT the exploded one, whose arc
+    // center is displaced. Collect the distinct arc centers.
+    const centers = new Set(rec.arcs.map(a => `${Math.round(a.x)},${Math.round(a.y)}`));
+    expect(centers.size).toBeGreaterThan(1);
+  });
+
+  it('a multi-series doughnut draws concentric rings (multiple distinct radii)', () => {
+    const rec = ringRecordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'doughnut',
+      categories: ['A', 'B'],
+      series: [
+        series({ name: 'Outer', values: [1, 1] }),
+        series({ name: 'Inner', values: [1, 1] }),
+      ],
+      holeSize: 40,
+    }), RECT, 1);
+    // Two rings → at least three distinct radii (outer ring outer/inner + inner
+    // ring outer/inner, some shared) — assert more than the two a single ring
+    // would produce.
+    const distinctRadii = new Set(rec.arcs.map(a => Math.round(a.r * 10) / 10));
+    expect(distinctRadii.size).toBeGreaterThanOrEqual(3);
+  });
+
+  it('rich pie dLbls compose showCatName + showPercent', () => {
+    const rec = ringRecordingCtx();
+    renderChart(rec.ctx, pieModel({
+      series: [series({
+        name: 'S',
+        categories: ['Alpha', 'Beta', 'Gamma'],
+        values: [30, 45, 25],
+        seriesDataLabels: {
+          showVal: false, showCatName: true, showSerName: false, showPercent: true,
+        },
+      })],
+    }), RECT, 1);
+    const texts = rec.fontTexts.map(t => t.text);
+    // "Alpha 30%" etc. — category name and percent joined.
+    expect(texts.some(t => t.includes('Alpha') && t.includes('30%'))).toBe(true);
+  });
+});
+
+// ─── CH10 — chart text font faces ────────────────────────────────────────────
+
+describe('CH10 — chart text font faces', () => {
+  // No data labels: the only numeric text is then the value-axis ticks, so the
+  // `/^[\d.]+$/` filter isolates the value-axis font cleanly (data-label values
+  // legitimately use the SEPARATE dataLabelFontFace and would otherwise blur the
+  // assertion).
+  const barWithLabels = (over: Partial<ChartModel>): ChartModel =>
+    baseModel({
+      chartType: 'clusteredBar',
+      categories: ['A', 'B'],
+      series: [series({ name: 'S', values: [10, 20] })],
+      valAxisTitle: 'Units',
+      ...over,
+    });
+
+  it('an explicit value-axis face is used for value-axis tick labels', () => {
+    const rec = ringRecordingCtx();
+    renderChart(rec.ctx, barWithLabels({ valAxisFontFace: 'Georgia' }), RECT, 1);
+    // The value-axis ticks ("0", "5", …) are drawn with the Georgia family.
+    const tickFonts = rec.fontTexts.filter(t => /^[\d.]+$/.test(t.text)).map(t => t.font);
+    expect(tickFonts.some(f => f.includes('Georgia'))).toBe(true);
+  });
+
+  it('falls back to the theme body (minor) font when no element face is set', () => {
+    const rec = ringRecordingCtx();
+    renderChart(rec.ctx, barWithLabels({ themeMinorFontLatin: 'Aptos Narrow' }), RECT, 1);
+    const tickFonts = rec.fontTexts.filter(t => /^[\d.]+$/.test(t.text)).map(t => t.font);
+    expect(tickFonts.some(f => f.includes('Aptos Narrow'))).toBe(true);
+  });
+
+  it('an element face wins over the theme font', () => {
+    const rec = ringRecordingCtx();
+    renderChart(rec.ctx, barWithLabels({
+      valAxisFontFace: 'Georgia',
+      themeMinorFontLatin: 'Aptos Narrow',
+    }), RECT, 1);
+    const tickFonts = rec.fontTexts.filter(t => /^[\d.]+$/.test(t.text)).map(t => t.font);
+    expect(tickFonts.some(f => f.includes('Georgia'))).toBe(true);
+    expect(tickFonts.some(f => f.includes('Aptos Narrow'))).toBe(false);
+  });
+
+  it('with no face and no theme, the built-in sans-serif is used (byte-stable)', () => {
+    const rec = ringRecordingCtx();
+    renderChart(rec.ctx, barWithLabels({}), RECT, 1);
+    const tickFonts = rec.fontTexts.filter(t => /^[\d.]+$/.test(t.text)).map(t => t.font);
+    expect(tickFonts.length).toBeGreaterThan(0);
+    expect(tickFonts.every(f => f.endsWith('sans-serif') && !f.includes('"'))).toBe(true);
+  });
+
+  it('a `+mn-lt` theme reference face resolves to the theme minor font', () => {
+    const rec = ringRecordingCtx();
+    renderChart(rec.ctx, barWithLabels({
+      valAxisFontFace: '+mn-lt',
+      themeMinorFontLatin: 'Aptos Narrow',
+      themeMajorFontLatin: 'Aptos Display',
+    }), RECT, 1);
+    const tickFonts = rec.fontTexts.filter(t => /^[\d.]+$/.test(t.text)).map(t => t.font);
+    // "+mn-lt" must NOT appear literally; it resolves to the minor face.
+    expect(tickFonts.some(f => f.includes('Aptos Narrow'))).toBe(true);
+    expect(tickFonts.some(f => f.includes('+mn-lt'))).toBe(false);
+  });
+
+  it('axis titles use the theme heading (major) font as fallback', () => {
+    const rec = ringRecordingCtx();
+    renderChart(rec.ctx, barWithLabels({ themeMajorFontLatin: 'Aptos Display' }), RECT, 1);
+    const titleFont = rec.fontTexts.find(t => t.text === 'Units')?.font;
+    expect(titleFont).toBeDefined();
+    expect(titleFont).toContain('Aptos Display');
+  });
+});

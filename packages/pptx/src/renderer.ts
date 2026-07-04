@@ -4084,7 +4084,7 @@ function drawParseErrorPlaceholder(
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
   ctx.font = `${glyph}px sans-serif`;
-  ctx.fillText('⚠', cx, heightPx * 0.34); // ⚠
+  ctx.fillText('⚠', cx, heightPx * 0.34);
 
   // Heading.
   const headSize = Math.max(11, Math.min(widthPx, heightPx) * 0.045);

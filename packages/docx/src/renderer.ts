@@ -901,7 +901,7 @@ function drawParseErrorPlaceholder(
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
   ctx.font = `${glyph}px sans-serif`;
-  ctx.fillText('⚠', cx, heightPx * 0.34); // ⚠
+  ctx.fillText('⚠', cx, heightPx * 0.34);
 
   const headSize = Math.max(13, base * 0.032);
   ctx.fillStyle = '#333333';

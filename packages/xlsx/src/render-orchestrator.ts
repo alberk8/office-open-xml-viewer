@@ -305,7 +305,7 @@ function drawSheetParseErrorOverlay(
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
   ctx.font = `${glyph}px sans-serif`;
-  ctx.fillText('⚠', cx, heightPx * 0.32); // ⚠
+  ctx.fillText('⚠', cx, heightPx * 0.32);
 
   const headSize = Math.max(13, base * 0.035);
   ctx.fillStyle = '#333333';

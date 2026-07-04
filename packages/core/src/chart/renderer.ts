@@ -1392,18 +1392,48 @@ function renderLineChart(
       if (!started) { ctx.moveTo(px, py); started = true; } else ctx.lineTo(px, py);
     }
     ctx.stroke();
+
+    // Error bars (`<c:errBars>`, §21.2.2.20) — drawn under the markers so the
+    // dots overlay the bar tips. Only fires for series that carry them.
+    const plottedOf = (ci: number): number => plotted(si, ci);
+    for (const eb of s.errBars ?? []) {
+      drawCategoryErrorBars(ctx, s, eb, n, toX, yOf, plottedOf, color);
+    }
+
     ctx.fillStyle = color;
     // ECMA-376 §21.2.2.32 — when the series resolves to no marker, skip the
     // data-point dots but keep data labels. Markers / labels pin to the plotted
     // (cumulative) value so they ride the stacked line, not the raw datum.
     const drawMarkers = s.showMarker !== false;
+    // Series carrying explicit `<c:marker>` detail route through drawMarker
+    // (symbol/size/fill/line + per-point `<c:dPt>` overrides). Series without
+    // any detail keep the historical fixed-circle fast path unchanged
+    // (byte-stable). `markerSymbol: "none"` is caught by the showMarker gate.
+    const hasMarkerDetail = seriesHasMarkerDetail(s);
+    // Per-point / series-level data labels (`<c:dLbl idx>` / `<c:dLbls>`) take
+    // precedence over the family's simple `showDataLabels` value dump.
+    const perPointLabels = drawCategoryDataLabels(
+      ctx, s, cats, n, toX, yOf, plottedOf, ph, ptToPx, chart.date1904 ?? false,
+    );
+    if (perPointLabels) ctx.fillStyle = color;
     for (let ci = 0; ci < n; ci++) {
       if (!stacked && s.values[ci] == null) continue;
       const pv = plotted(si, ci);
       if (drawMarkers) {
-        ctx.beginPath(); ctx.arc(toX(ci), yOf(pv), markerR, 0, Math.PI * 2); ctx.fill();
+        if (hasMarkerDetail) {
+          const dpt = (s.dataPointOverrides ?? []).find(d => d.idx === ci);
+          const symbol = (dpt?.markerSymbol ?? s.markerSymbol ?? 'circle');
+          if (symbol !== 'none') {
+            const sizePt = dpt?.markerSize ?? s.markerSize ?? 5;
+            const fill = dpt?.markerFill ?? dpt?.color ?? s.markerFill ?? color;
+            const line = dpt?.markerLine ?? s.markerLine ?? null;
+            drawMarker(ctx, toX(ci), yOf(pv), symbol, sizePt, fill, line, ptToPx);
+          }
+        } else {
+          ctx.beginPath(); ctx.arc(toX(ci), yOf(pv), markerR, 0, Math.PI * 2); ctx.fill();
+        }
       }
-      if (chart.showDataLabels) {
+      if (chart.showDataLabels && !perPointLabels) {
         ctx.font = `${dataLabelPx}px sans-serif`;
         ctx.fillStyle = '#333'; ctx.textAlign = 'center'; ctx.textBaseline = 'bottom';
         const labelOffset = drawMarkers ? markerR + 1 : 2;
@@ -1630,6 +1660,60 @@ function renderAreaChart(ctx: CanvasRenderingContext2D, chart: ChartModel, r: Ch
     ctx.fill();
     ctx.strokeStyle = color; ctx.lineWidth = 1.5; ctx.setLineDash([]);
     ctx.stroke();
+  }
+
+  // Markers, error bars, and per-point data labels for area series. Drawn in a
+  // SEPARATE forward pass (after all fills) so the fill loop above stays
+  // byte-identical, and each block fires ONLY for series carrying the relevant
+  // fields — an area chart with no marker/errBar/dLbl detail draws exactly as
+  // before. The plotted top-of-band value matches where the fill's top edge sat
+  // (cumulative for stacked). ECMA-376 §21.2.2.32 / §21.2.2.20 / §21.2.2.45.
+  {
+    const areaMarkerR = Math.max(2, 2.5 * ptToPx);
+    // Cumulative top of each series' band per category (stacked); the raw value
+    // otherwise. Rebuilt here independently of the fill loop's mutated stackBase.
+    const topValue = (si: number, ci: number): number => {
+      if (stacked) {
+        let sum = 0;
+        for (let k = 0; k <= si; k++) sum += stackedValue(k, ci);
+        return sum;
+      }
+      return chart.series[si].values[ci] ?? 0;
+    };
+    for (let si = 0; si < chart.series.length; si++) {
+      const s = chart.series[si];
+      const color = chartColor(si, s);
+      const yOf = yMapFor(s);
+      const plottedOf = (ci: number): number => topValue(si, ci);
+      // Error bars first (markers overlay their tips).
+      for (const eb of s.errBars ?? []) {
+        drawCategoryErrorBars(ctx, s, eb, n, toX, yOf, plottedOf, color);
+      }
+      // Markers only when the series opts in (`<c:marker>` symbol/size/… — area
+      // charts default to NO markers, so nothing fires without explicit detail).
+      if (s.showMarker === true || seriesHasMarkerDetail(s)) {
+        for (let ci = 0; ci < n; ci++) {
+          if (s.values[ci] == null) continue;
+          const dpt = (s.dataPointOverrides ?? []).find(d => d.idx === ci);
+          const symbol = (dpt?.markerSymbol ?? s.markerSymbol ?? 'circle');
+          if (symbol === 'none') continue;
+          const px = toX(ci); const py = yOf(plottedOf(ci));
+          if (seriesHasMarkerDetail(s)) {
+            const sizePt = dpt?.markerSize ?? s.markerSize ?? 5;
+            const fill = dpt?.markerFill ?? dpt?.color ?? s.markerFill ?? color;
+            const line = dpt?.markerLine ?? s.markerLine ?? null;
+            drawMarker(ctx, px, py, symbol, sizePt, fill, line, ptToPx);
+          } else {
+            ctx.fillStyle = color;
+            ctx.beginPath(); ctx.arc(px, py, areaMarkerR, 0, Math.PI * 2); ctx.fill();
+          }
+        }
+      }
+      // Per-point / series-level data labels.
+      drawCategoryDataLabels(
+        ctx, s, cats, n, toX, yOf, plottedOf, ph, ptToPx, chart.date1904 ?? false,
+      );
+    }
   }
 
   if (!chart.valAxisHidden) {
@@ -2556,6 +2640,119 @@ function dashPatternForPreset(preset: string | undefined): number[] {
     case 'dashDotDot':case 'sysDashDotDot':case 'lgDashDotDot': return [4, 2, 1, 2, 1, 2];
     default: return [];
   }
+}
+
+/** True when the series carries any explicit `<c:marker>` detail (symbol, size,
+ *  fill, line) or per-point `<c:dPt>` marker overrides — i.e. a reason to route
+ *  through {@link drawMarker} instead of the line/area family's historical
+ *  fixed-circle fast path. A series without any of these keeps the exact prior
+ *  circle marker (byte-stable), so charts that never parsed marker detail are
+ *  unchanged. `markerSymbol: "none"` counts as detail (it disables the marker),
+ *  handled by the caller's showMarker gate. */
+function seriesHasMarkerDetail(s: ChartSeries): boolean {
+  return (
+    s.markerSymbol != null ||
+    s.markerSize != null ||
+    s.markerFill != null ||
+    s.markerLine != null ||
+    (s.dataPointOverrides != null && s.dataPointOverrides.length > 0)
+  );
+}
+
+/** Draw error bars for a category-axis series (line / area). Mirrors the scatter
+ *  {@link drawSeriesErrorBars} cap/dash geometry, but maps points by CATEGORY
+ *  INDEX (`xAt(ci)`) with a per-series value→px mapping (`yAt`) instead of the
+ *  numeric X mapping scatter uses. Only the Y direction is drawn: a category
+ *  axis has no data-unit X scale, so `<c:errBars dir="x">` cannot be positioned
+ *  (Excel likewise only shows Y error bars on category charts). `plotted`
+ *  returns the point's plotted (possibly stacked) value so bars ride the drawn
+ *  line. Null cells are skipped. */
+function drawCategoryErrorBars(
+  ctx: CanvasRenderingContext2D,
+  s: ChartSeries,
+  eb: NonNullable<ChartSeries['errBars']>[number],
+  n: number,
+  xAt: (ci: number) => number,
+  yAt: (v: number) => number,
+  plotted: (ci: number) => number,
+  fallbackColor: string,
+): void {
+  if (eb.dir === 'x') return; // no data-unit X scale on a category axis
+  const drawPlus = eb.barType === 'plus' || eb.barType === 'both';
+  const drawMinus = eb.barType === 'minus' || eb.barType === 'both';
+  ctx.save();
+  ctx.strokeStyle = eb.color ? `#${eb.color}` : fallbackColor;
+  ctx.lineWidth = eb.lineWidthEmu ? Math.max(0.5, eb.lineWidthEmu / EMU_PER_PT) : 1;
+  ctx.setLineDash(dashPatternForPreset(eb.dash));
+  const capHalf = ctx.lineWidth * 1.5;
+  for (let ci = 0; ci < n; ci++) {
+    if (s.values[ci] == null) continue;
+    const pv = plotted(ci);
+    const px = xAt(ci); const py = yAt(pv);
+    const drawSeg = (dataDelta: number): void => {
+      const y2 = yAt(pv + dataDelta);
+      ctx.beginPath(); ctx.moveTo(px, py); ctx.lineTo(px, y2); ctx.stroke();
+      if (!eb.noEndCap) {
+        ctx.save(); ctx.setLineDash([]);
+        ctx.beginPath();
+        ctx.moveTo(px - capHalf, y2); ctx.lineTo(px + capHalf, y2);
+        ctx.stroke();
+        ctx.restore();
+      }
+    };
+    if (drawPlus) { const v = eb.plus[ci]; if (v != null) drawSeg(v); }
+    if (drawMinus) { const v = eb.minus[ci]; if (v != null) drawSeg(-v); }
+  }
+  ctx.restore();
+}
+
+/** Per-point data labels for a category-axis series (line / area). Consumes the
+ *  same `<c:dLbl idx>` overrides and series-level `<c:dLbls>` block scatter does
+ *  ({@link drawSeriesDataLabels}), but maps points by CATEGORY INDEX with the
+ *  series' plotted value → px mapping. Returns true when it handled the labels
+ *  for this series (so the caller skips the family's legacy `showDataLabels`
+ *  path), false when the series has no override/series-level label config. */
+function drawCategoryDataLabels(
+  ctx: CanvasRenderingContext2D,
+  s: ChartSeries,
+  cats: string[],
+  n: number,
+  xAt: (ci: number) => number,
+  yAt: (v: number) => number,
+  plotted: (ci: number) => number,
+  ph: number,
+  ptToPx: number,
+  date1904: boolean,
+): boolean {
+  const overrides = s.dataLabelOverrides ?? [];
+  const seriesDef = s.seriesDataLabels;
+  if (overrides.length === 0 && !seriesDef) return false;
+  for (let ci = 0; ci < n; ci++) {
+    if (s.values[ci] == null) continue;
+    const pv = plotted(ci);
+    const ovr = overrides.find(o => o.idx === ci);
+    let text: string;
+    if (ovr) {
+      if (ovr.text === '') continue; // `<c:delete val="1"/>` — deleted label
+      text = ovr.text;
+    } else if (seriesDef && (seriesDef.showVal || seriesDef.showSerName || seriesDef.showCatName)) {
+      const parts: string[] = [];
+      if (seriesDef.showCatName) parts.push(cats[ci] ?? '');
+      if (seriesDef.showSerName) parts.push(s.name);
+      if (seriesDef.showVal) parts.push(formatChartValWithCode(pv, seriesDef.formatCode ?? null, date1904));
+      text = parts.filter(Boolean).join(' ');
+      if (!text) continue;
+    } else {
+      continue;
+    }
+    const pos = ovr?.position ?? seriesDef?.position ?? 't';
+    const sizeHpt = ovr?.fontSizeHpt ?? seriesDef?.fontSizeHpt;
+    const fontSizePx = sizeHpt ? (sizeHpt / 100) * ptToPx : Math.max(9, Math.min(11, ph / 25));
+    const color = ovr?.fontColor ?? seriesDef?.fontColor;
+    const bold = ovr?.fontBold ?? seriesDef?.fontBold ?? false;
+    drawDataLabelText(ctx, xAt(ci), yAt(pv), text, pos, fontSizePx, color, bold);
+  }
+  return true;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

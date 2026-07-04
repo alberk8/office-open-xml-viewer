@@ -886,3 +886,217 @@ describe('CH7 — line/area series honor a secondary value axis (§21.2.2.*)', (
     });
   }
 });
+
+// ─── CH9 — line/area marker detail, error bars, per-point labels, smooth,
+//          dispBlanksAs (§21.2.2.32 / §21.2.2.20 / §21.2.2.45 / §21.2.2.194 /
+//          §21.2.2.42) ─────────────────────────────────────────────────────
+//
+// scatter already consumes s.markerSymbol/size/fill/line, s.errBars,
+// s.dataLabelOverrides + s.seriesDataLabels, and smooth splines. CH9 wires the
+// same series-level fields into the line and area families, adds per-series
+// smooth (`<c:ser><c:smooth>`), and honors the chartSpace `dispBlanksAs` value
+// when deciding how null cells break/span/zero the plotted line.
+
+interface ArcCall { x: number; y: number; r: number }
+interface FillRectCall { x: number; y: number; w: number; h: number }
+
+/** Recording context that captures the primitives markers / smooth / error
+ *  bars emit: `arc` (circle/star markers + the default line dot), `fillRect`
+ *  (square marker + dash), `bezierCurveTo` (smooth spline), and `fillText`
+ *  (data labels). Also groups stroked/filled path vertices into SEGMENTS
+ *  (delimited by `beginPath`) so a test can inspect the polyline a series
+ *  drew — used to tell gap / zero / span apart for dispBlanksAs. */
+function markerRecordingCtx(): {
+  ctx: CanvasRenderingContext2D;
+  arcs: ArcCall[];
+  fillRects: FillRectCall[];
+  beziers: number;
+  texts: TextCall[];
+  segments: Array<Array<{ x: number; y: number }>>;
+} {
+  const arcs: ArcCall[] = [];
+  const fillRects: FillRectCall[] = [];
+  const texts: TextCall[] = [];
+  const segments: Array<Array<{ x: number; y: number }>> = [];
+  let current: Array<{ x: number; y: number }> | null = null;
+  let beziers = 0;
+  const state: Record<string, unknown> = {
+    font: '10px sans-serif',
+    fillStyle: '#000',
+    strokeStyle: '#000',
+    lineWidth: 1,
+    textAlign: 'start',
+    textBaseline: 'alphabetic',
+    lineCap: 'butt',
+    lineJoin: 'miter',
+    globalAlpha: 1,
+  };
+  const fontPx = (font: string): number => {
+    const m = /(\d+(?:\.\d+)?)px/.exec(font);
+    return m ? parseFloat(m[1]) : 10;
+  };
+  const push = (x: number, y: number): void => {
+    if (!current) { current = []; segments.push(current); }
+    current.push({ x, y });
+  };
+  const handler: ProxyHandler<Record<string, unknown>> = {
+    get(_t, prop: string) {
+      if (prop in state && typeof state[prop] !== 'function') return state[prop];
+      switch (prop) {
+        case 'measureText':
+          return (t: string) => {
+            const px = fontPx(String(state.font));
+            let w = 0;
+            for (const ch of String(t)) w += ch.charCodeAt(0) > 0x2e7f ? px : px * 0.6;
+            return { width: w };
+          };
+        case 'beginPath':
+          return () => { current = null; };
+        case 'moveTo':
+        case 'lineTo':
+          return (x: number, y: number) => push(x, y);
+        case 'arc':
+          return (x: number, y: number, rad: number) => { arcs.push({ x, y, r: rad }); push(x, y); };
+        case 'fillRect':
+          return (x: number, y: number, w: number, h: number) => fillRects.push({ x, y, w, h });
+        case 'bezierCurveTo':
+          return () => { beziers += 1; };
+        case 'fillText':
+          return (text: string, x: number, y: number) => texts.push({ text, x, y });
+        case 'createLinearGradient':
+        case 'createRadialGradient':
+          return () => ({ addColorStop() {} });
+        default:
+          return () => undefined;
+      }
+    },
+    set(_t, prop: string, value) { state[prop] = value; return true; },
+  };
+  return {
+    ctx: new Proxy(state, handler) as unknown as CanvasRenderingContext2D,
+    arcs, fillRects, texts, segments,
+    get beziers() { return beziers; },
+  } as never;
+}
+
+describe('CH9 — line/area consume marker detail (§21.2.2.32)', () => {
+  for (const chartType of ['line', 'area'] as const) {
+    it(`${chartType}: markerSymbol="square" draws square markers (fillRect), not the default circle`, () => {
+      const rec = markerRecordingCtx();
+      renderChart(rec.ctx, baseModel({
+        chartType,
+        categories: ['A', 'B', 'C'],
+        series: [series({ name: 'S', values: [3, 5, 4], showMarker: true, markerSymbol: 'square' })],
+      }), RECT, 1);
+      // One square fillRect per data point. (Area also fills the region with a
+      // path, not a fillRect, so every fillRect here is a marker.)
+      expect(rec.fillRects.length).toBe(3);
+      // Squares are square: w === h.
+      for (const fr of rec.fillRects) expect(Math.round(fr.w)).toBe(Math.round(fr.h));
+    });
+
+    it(`${chartType}: markerSize scales the marker (bigger size → bigger square)`, () => {
+      const small = markerRecordingCtx();
+      renderChart(small.ctx, baseModel({
+        chartType,
+        categories: ['A', 'B'],
+        series: [series({ name: 'S', values: [3, 5], showMarker: true, markerSymbol: 'square', markerSize: 4 })],
+      }), RECT, 1);
+      const big = markerRecordingCtx();
+      renderChart(big.ctx, baseModel({
+        chartType,
+        categories: ['A', 'B'],
+        series: [series({ name: 'S', values: [3, 5], showMarker: true, markerSymbol: 'square', markerSize: 20 })],
+      }), RECT, 1);
+      expect(big.fillRects[0].w).toBeGreaterThan(small.fillRects[0].w);
+    });
+
+    it(`${chartType}: a series WITHOUT markerSymbol keeps the default circle marker`, () => {
+      // Byte-stability: the fixed-circle fast path must remain when no symbol
+      // is specified — no fillRect (square), markers are drawn via arc.
+      const rec = markerRecordingCtx();
+      renderChart(rec.ctx, baseModel({
+        chartType,
+        categories: ['A', 'B', 'C'],
+        series: [series({ name: 'S', values: [3, 5, 4], showMarker: true })],
+      }), RECT, 1);
+      expect(rec.fillRects.length).toBe(0);
+      // 3 marker dots (arcs). Line also strokes with arc-free paths, so all
+      // arcs are markers here.
+      const markerArcs = rec.arcs.filter(a => a.r < 10);
+      expect(markerArcs.length).toBe(3);
+    });
+  }
+});
+
+describe('CH9 — line/area draw per-series error bars (§21.2.2.20)', () => {
+  for (const chartType of ['line', 'area'] as const) {
+    it(`${chartType}: a series with errBars strokes a vertical bar around each point`, () => {
+      const withBars = pathRecordingCtx();
+      renderChart(withBars.ctx, baseModel({
+        chartType,
+        categories: ['A', 'B', 'C'],
+        series: [series({
+          name: 'S',
+          values: [10, 20, 15],
+          errBars: [{ dir: 'y', barType: 'both', plus: [2, 2, 2], minus: [2, 2, 2], noEndCap: false }],
+        })],
+      }), RECT, 1);
+      const without = pathRecordingCtx();
+      renderChart(without.ctx, baseModel({
+        chartType,
+        categories: ['A', 'B', 'C'],
+        series: [series({ name: 'S', values: [10, 20, 15] })],
+      }), RECT, 1);
+      // Error bars add vertical segments (constant x, varying y) — 2-vertex
+      // "bar" segments the plain plot never emits. Count vertical 2-point segs.
+      const verticalSegs = (segs: Array<Array<{ x: number; y: number }>>): number =>
+        segs.filter(s => s.length === 2 && Math.round(s[0].x) === Math.round(s[1].x)
+          && Math.round(s[0].y) !== Math.round(s[1].y)).length;
+      expect(verticalSegs(withBars.segments)).toBeGreaterThan(verticalSegs(without.segments));
+    });
+  }
+});
+
+describe('CH9 — line/area per-point data labels (§21.2.2.45)', () => {
+  for (const chartType of ['line', 'area'] as const) {
+    it(`${chartType}: dataLabelOverrides render custom text at the point, and delete (empty) skips it`, () => {
+      const rec = recordingCtx();
+      renderChart(rec.ctx, baseModel({
+        chartType,
+        categories: ['A', 'B', 'C'],
+        series: [series({
+          name: 'S',
+          values: [3, 5, 4],
+          dataLabelOverrides: [
+            { idx: 0, text: 'FIRST' },
+            { idx: 1, text: '' }, // deleted
+            { idx: 2, text: 'THIRD', fontColor: 'FF0000' },
+          ],
+        })],
+      }), RECT, 1);
+      const labelTexts = rec.texts.map(t => t.text);
+      expect(labelTexts).toContain('FIRST');
+      expect(labelTexts).toContain('THIRD');
+      // The deleted (empty) label must not appear.
+      expect(labelTexts.some(t => t === '')).toBe(false);
+    });
+
+    it(`${chartType}: seriesDataLabels showVal renders each point's value`, () => {
+      const rec = recordingCtx();
+      renderChart(rec.ctx, baseModel({
+        chartType,
+        categories: ['A', 'B'],
+        series: [series({
+          name: 'S',
+          values: [42, 7],
+          seriesDataLabels: {
+            showVal: true, showCatName: false, showSerName: false, showPercent: false,
+          },
+        })],
+      }), RECT, 1);
+      expect(rec.texts.some(t => t.text === '42')).toBe(true);
+      expect(rec.texts.some(t => t.text === '7')).toBe(true);
+    });
+  }
+});

@@ -131,6 +131,13 @@ export interface ChartDataPointOverride {
   markerSize?: number;
   markerFill?: string;
   markerLine?: string;
+  /**
+   * `<c:dPt><c:explosion val>` (ECMA-376 §21.2.2.61) — the amount, as a
+   * percentage 0–100, that this pie/doughnut slice is moved out from the
+   * center. undefined/absent = 0 (no explosion, flush with the ring). Only
+   * consulted by the pie/doughnut renderer.
+   */
+  explosion?: number;
 }
 
 export interface ChartDataLabelOverride {
@@ -304,6 +311,41 @@ export interface ChartModel {
   valAxisTitleFontBold?: boolean | null;
   /** `<c:valAx><c:title>` run-prop color (hex without '#'). null = default. */
   valAxisTitleFontColor?: string | null;
+  // ── Chart text font faces (CH10) ─────────────────────────────────────────
+  // Each is the `<a:latin typeface>` (ECMA-376 §20.1.4.2.24) resolved from the
+  // element's `<c:txPr>`. When absent the renderer falls back to the theme
+  // body/heading font (`themeMinorFontLatin` / `themeMajorFontLatin`) and
+  // finally to the built-in sans-serif, so a chart that specifies no faces is
+  // byte-stable. Faces mirror the existing color/size/bold groups.
+  /** `<c:catAx><c:txPr>…<a:latin typeface>` tick-label font. */
+  catAxisFontFace?: string | null;
+  /** `<c:valAx><c:txPr>…<a:latin typeface>` tick-label font. */
+  valAxisFontFace?: string | null;
+  /** `<c:catAx><c:title>…<a:latin typeface>` axis-title font. */
+  catAxisTitleFontFace?: string | null;
+  /** `<c:valAx><c:title>…<a:latin typeface>` axis-title font. */
+  valAxisTitleFontFace?: string | null;
+  /** `<c:dLbls><c:txPr>…<a:latin typeface>` data-label font. */
+  dataLabelFontFace?: string | null;
+  /** `<c:legend><c:txPr>…<a:latin typeface>` legend font. */
+  legendFontFace?: string | null;
+  /** `<c:legend><c:txPr>…<a:solidFill>` legend text color (hex without '#'). */
+  legendFontColor?: string | null;
+  /** `<c:legend><c:txPr>` legend font size (OOXML hundredths of a point). */
+  legendFontSizeHpt?: number | null;
+  /** `<c:legend><c:txPr>…defRPr@b` legend bold flag. */
+  legendFontBold?: boolean | null;
+  /**
+   * Theme font-scheme faces (`<a:fontScheme>`, ECMA-376 §20.1.4.2). Latin
+   * heading (majorFont) and body (minorFont) typefaces, used as the fallback
+   * for any chart text element whose own `<c:txPr>` supplies no `<a:latin>`.
+   * null when the theme is not threaded to the chart (then the renderer's
+   * built-in sans-serif remains, byte-stable). Axis titles / chart title use
+   * the major (heading) face; tick labels / data labels / legend use the
+   * minor (body) face — matching Office's default chart text styling.
+   */
+  themeMajorFontLatin?: string | null;
+  themeMinorFontLatin?: string | null;
   /** Explicit chart border color (hex without '#') from
    *  `<c:chartSpace><c:spPr><a:ln><a:solidFill><a:srgbClr>`. Only set when the
    *  XML explicitly declares a paintable line; null otherwise (no default
@@ -387,6 +429,25 @@ export interface ChartModel {
    * the attribute is omitted, so `<c:date1904/>` alone means date1904=true.
    */
   date1904?: boolean;
+  /**
+   * `<c:doughnutChart><c:holeSize val>` (ECMA-376 §21.2.2.60,
+   * `ST_HoleSizePercent` §21.2.3.55) — the doughnut hole diameter as a
+   * percentage 1–90 of the outer diameter. Ignored for pie (which has no
+   * hole). null/undefined = use the renderer's doughnut default when the
+   * element is absent. Note the ECMA `CT_HoleSize` schema default is 10%, but
+   * a real doughnut file always writes an explicit `<c:holeSize>` (Excel /
+   * PowerPoint emit 50–75%); the renderer falls back to 50% only for the
+   * pathological absent case.
+   */
+  holeSize?: number | null;
+  /**
+   * `<c:pieChart | doughnutChart><c:firstSliceAng val>` (ECMA-376 §21.2.2.52,
+   * `ST_FirstSliceAng` §21.2.3.15) — the angle in degrees (0–360, clockwise
+   * from the 12 o'clock position) at which the first slice begins.
+   * null/undefined = 0 (start at 12 o'clock), which matches the renderer's
+   * historical fixed −90° (canvas up) start.
+   */
+  firstSliceAngle?: number | null;
   /**
    * `<c:chartSpace><c:chart><c:dispBlanksAs val>` (ECMA-376 §21.2.2.42,
    * `ST_DispBlanksAs` §21.2.3.10) — how blank (null) cells are plotted on

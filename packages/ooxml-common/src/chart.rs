@@ -165,6 +165,54 @@ pub struct ChartModel {
     pub radar_style: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub secondary_val_axis: Option<SecondaryValueAxis>,
+    // ── Pie / doughnut geometry (CH8) ───────────────────────────────────────
+    /// `<c:doughnutChart><c:holeSize val>` (§21.2.2.60, `ST_HoleSizePercent`
+    /// §21.2.3.55) — hole diameter as 1–90% of the outer diameter. `None` when
+    /// absent; the renderer defaults an absent doughnut hole to 50%.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hole_size: Option<u32>,
+    /// `<c:pieChart | doughnutChart><c:firstSliceAng val>` (§21.2.2.52,
+    /// `ST_FirstSliceAng` §21.2.3.15) — start angle 0–360° clockwise from 12
+    /// o'clock. `None` = 0 (byte-stable).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_slice_angle: Option<u32>,
+    // ── Chart text font faces (CH10) ────────────────────────────────────────
+    /// `<c:catAx><c:txPr>…<a:latin typeface>` tick-label font.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cat_axis_font_face: Option<String>,
+    /// `<c:valAx><c:txPr>…<a:latin typeface>` tick-label font.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub val_axis_font_face: Option<String>,
+    /// `<c:catAx><c:title>…<a:latin typeface>` axis-title font.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cat_axis_title_font_face: Option<String>,
+    /// `<c:valAx><c:title>…<a:latin typeface>` axis-title font.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub val_axis_title_font_face: Option<String>,
+    /// `<c:dLbls><c:txPr>…<a:latin typeface>` data-label font.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_label_font_face: Option<String>,
+    /// `<c:legend><c:txPr>…<a:latin typeface>` legend font.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub legend_font_face: Option<String>,
+    /// `<c:legend><c:txPr>…<a:solidFill>` legend text color (hex, no `#`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub legend_font_color: Option<String>,
+    /// `<c:legend><c:txPr>` legend font size (OOXML hundredths of a point).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub legend_font_size_hpt: Option<i32>,
+    /// `<c:legend><c:txPr>…defRPr@b` legend bold flag.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub legend_font_bold: Option<bool>,
+    /// Theme heading (majorFont) Latin face — fallback for chart title / axis
+    /// titles when their `<c:txPr>` supplies no `<a:latin>`. `None` when the
+    /// theme is not threaded (renderer keeps sans-serif; byte-stable).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub theme_major_font_latin: Option<String>,
+    /// Theme body (minorFont) Latin face — fallback for tick labels / data
+    /// labels / legend. `None` when the theme is not threaded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub theme_minor_font_latin: Option<String>,
     /// `<c:date1904>` (ECMA-376 §21.2.2.38). `true` = the chart's serial dates
     /// resolve against the 1904 date system. Omitted from JSON when false (the
     /// default 1900 system) for wire parity.
@@ -241,6 +289,10 @@ pub struct ChartDataPointOverride {
     pub marker_fill: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub marker_line: Option<String>,
+    /// `<c:dPt><c:explosion val>` (§21.2.2.61) — pie/doughnut slice pull-out
+    /// percentage (0–100). `None`/absent = 0 (byte-stable).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub explosion: Option<u32>,
 }
 
 /// Mirror of TS `ChartDataLabelOverride`.
@@ -666,6 +718,141 @@ pub fn extract_axis_title_with_props(
     }
 }
 
+// ============================================================================
+// Chart text font faces (CH10) — `<c:txPr>` / `<c:title>` → `<a:latin@typeface>`
+// ============================================================================
+
+/// First `<a:latin typeface>` (DrawingML §20.1.4.2.24) descendant of `container`.
+/// Empty typefaces are dropped; a theme reference like `+mn-lt` / `+mj-lt` is
+/// returned verbatim so the caller can resolve it against the font scheme.
+fn first_latin_typeface(container: Node) -> Option<String> {
+    container.descendants().find_map(|n| {
+        if !n.is_element() || n.tag_name().name() != "latin" {
+            return None;
+        }
+        n.attribute("typeface")
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+    })
+}
+
+/// `<c:catAx|valAx><c:txPr>…<a:latin typeface>` — the axis tick-label font face.
+/// Scoped to the axis's `<c:txPr>` so an axis *title* face (under `<c:title>`)
+/// is not misread as the tick face. `None` when absent (renderer falls back to
+/// the theme body font, then sans-serif).
+pub fn extract_axis_tick_label_face(axis_node: Node) -> Option<String> {
+    first_latin_typeface(child(axis_node, "txPr")?)
+}
+
+/// `<c:catAx|valAx><c:title>…<a:latin typeface>` — the axis-title font face.
+/// Scoped to the axis's direct-child `<c:title>`. `None` when absent.
+pub fn extract_axis_title_face(axis_node: Node) -> Option<String> {
+    first_latin_typeface(child(axis_node, "title")?)
+}
+
+/// First `<c:dLbls><c:txPr>…<a:latin typeface>` in the chart — the data-label
+/// font face. Scoped to a `<c:txPr>` inside a `<c:dLbls>` so a series-value
+/// run's face isn't picked up. `None` when absent.
+pub fn extract_data_label_face(root: Node) -> Option<String> {
+    root.descendants()
+        .filter(|n| n.is_element() && n.tag_name().name() == "dLbls")
+        .find_map(|dlbls| first_latin_typeface(child(dlbls, "txPr")?))
+}
+
+/// `<c:legend><c:txPr>` text properties (CH10). Returns
+/// `(face, size_hpt, bold)` — the legend `<a:latin typeface>`, first
+/// `<a:defRPr|rPr@sz>` (hundredths of a point) and `@b` bold flag. Color is
+/// resolved separately via [`extract_legend_font_color`] (needs the theme
+/// resolver). All `None` when the legend has no `<c:txPr>`.
+pub fn extract_legend_text_props(root: Node) -> (Option<String>, Option<i32>, Option<bool>) {
+    let Some(legend) = root
+        .descendants()
+        .find(|n| n.is_element() && n.tag_name().name() == "legend")
+    else {
+        return (None, None, None);
+    };
+    let Some(txpr) = child(legend, "txPr") else {
+        return (None, None, None);
+    };
+    let face = first_latin_typeface(txpr);
+    let size = txpr.descendants().find_map(|n| {
+        let tag = n.tag_name().name();
+        if n.is_element() && (tag == "defRPr" || tag == "rPr") {
+            n.attribute("sz").and_then(|v| v.parse::<i32>().ok())
+        } else {
+            None
+        }
+    });
+    let bold = txpr.descendants().find_map(|n| {
+        let tag = n.tag_name().name();
+        if n.is_element() && (tag == "defRPr" || tag == "rPr") {
+            n.attribute("b")
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        } else {
+            None
+        }
+    });
+    (face, size, bold)
+}
+
+/// `<c:legend><c:txPr>…<a:solidFill>` legend text color, resolved to a hex
+/// string (no `#`) via the caller's `ColorResolver`. Scoped to the legend's
+/// `<c:txPr>` so a legend-frame `<c:spPr>` fill doesn't leak. `None` when absent.
+pub fn extract_legend_font_color(root: Node, resolver: &dyn ColorResolver) -> Option<String> {
+    let legend = root
+        .descendants()
+        .find(|n| n.is_element() && n.tag_name().name() == "legend")?;
+    let txpr = child(legend, "txPr")?;
+    txpr.descendants().find_map(|n| {
+        if n.is_element() && n.tag_name().name() == "solidFill" {
+            resolver.resolve_solid_fill(n)
+        } else {
+            None
+        }
+    })
+}
+
+// ============================================================================
+// Pie / doughnut geometry (CH8)
+// ============================================================================
+
+/// `<c:doughnutChart><c:holeSize val>` (§21.2.2.60) — hole diameter percentage
+/// (1–90). Clamped to the ECMA range. `None` when absent. `root` is the chart
+/// space (or `<c:chart>`); the search is scoped to a `<c:doughnutChart>` so a
+/// hole size only ever comes from a doughnut plot.
+pub fn extract_hole_size(root: Node) -> Option<u32> {
+    let doughnut = root
+        .descendants()
+        .find(|n| n.is_element() && n.tag_name().name() == "doughnutChart")?;
+    child(doughnut, "holeSize")
+        .and_then(|n| n.attribute("val"))
+        .and_then(|v| v.trim_end_matches('%').parse::<u32>().ok())
+        .map(|v| v.clamp(1, 90))
+}
+
+/// `<c:pieChart|doughnutChart><c:firstSliceAng val>` (§21.2.2.52) — start angle
+/// in degrees (0–360, clockwise from 12 o'clock). Clamped to the ECMA range.
+/// `None` when absent (renderer defaults to 0).
+pub fn extract_first_slice_angle(root: Node) -> Option<u32> {
+    root.descendants()
+        .find(|n| {
+            n.is_element()
+                && (n.tag_name().name() == "pieChart" || n.tag_name().name() == "doughnutChart")
+        })
+        .and_then(|pie| child(pie, "firstSliceAng"))
+        .and_then(|n| n.attribute("val"))
+        .and_then(|v| v.parse::<u32>().ok())
+        .map(|v| v.min(360))
+}
+
+/// `<c:dPt><c:explosion val>` (§21.2.2.61) — pie/doughnut slice pull-out
+/// percentage. Caller passes a `<c:dPt>` node. `None` when absent.
+pub fn extract_dpt_explosion(dpt_node: Node) -> Option<u32> {
+    child(dpt_node, "explosion")
+        .and_then(|n| n.attribute("val"))
+        .and_then(|v| v.parse::<u32>().ok())
+}
+
 /// Explicit chart-frame border from `<c:chartSpace><c:spPr><a:ln>` (ECMA-376
 /// §21.2.2.5 / DrawingML §20.1.2.2.24). `chart_space_root` is the
 /// `<c:chartSpace>` element. Returns `(srgb_color, width_emu)` under the locked
@@ -1034,6 +1221,19 @@ mod tests {
             scatter_style: None,
             radar_style: None,
             secondary_val_axis: None,
+            hole_size: None,
+            first_slice_angle: None,
+            cat_axis_font_face: None,
+            val_axis_font_face: None,
+            cat_axis_title_font_face: None,
+            val_axis_title_font_face: None,
+            data_label_font_face: None,
+            legend_font_face: None,
+            legend_font_color: None,
+            legend_font_size_hpt: None,
+            legend_font_bold: None,
+            theme_major_font_latin: None,
+            theme_minor_font_latin: None,
             date1904: false,
             disp_blanks_as: None,
         };
@@ -1531,5 +1731,128 @@ mod tests {
         // Absent element ⇒ false (default 1900 system).
         let absent = format!(r#"<c:chartSpace xmlns:c="{ns}"/>"#);
         assert!(!extract_chart_date1904(root_of(&absent).root_element()));
+    }
+
+    // ── CH8 — pie / doughnut geometry ───────────────────────────────────────
+
+    const C_NS: &str = "http://schemas.openxmlformats.org/drawingml/2006/chart";
+    const A_NS: &str = "http://schemas.openxmlformats.org/drawingml/2006/main";
+
+    #[test]
+    fn hole_size_from_doughnut() {
+        let xml = format!(
+            r#"<c:chart xmlns:c="{C_NS}"><c:plotArea><c:doughnutChart><c:holeSize val="60"/></c:doughnutChart></c:plotArea></c:chart>"#
+        );
+        assert_eq!(extract_hole_size(root_of(&xml).root_element()), Some(60));
+        // Clamped to the ECMA 1–90 range.
+        let hi = format!(
+            r#"<c:chart xmlns:c="{C_NS}"><c:doughnutChart><c:holeSize val="200"/></c:doughnutChart></c:chart>"#
+        );
+        assert_eq!(extract_hole_size(root_of(&hi).root_element()), Some(90));
+        // A pie chart has no hole → None even if a stray holeSize appears elsewhere.
+        let pie = format!(r#"<c:chart xmlns:c="{C_NS}"><c:pieChart/></c:chart>"#);
+        assert_eq!(extract_hole_size(root_of(&pie).root_element()), None);
+    }
+
+    #[test]
+    fn first_slice_angle_from_pie_or_doughnut() {
+        let pie = format!(
+            r#"<c:chart xmlns:c="{C_NS}"><c:pieChart><c:firstSliceAng val="90"/></c:pieChart></c:chart>"#
+        );
+        assert_eq!(
+            extract_first_slice_angle(root_of(&pie).root_element()),
+            Some(90)
+        );
+        let dn = format!(
+            r#"<c:chart xmlns:c="{C_NS}"><c:doughnutChart><c:firstSliceAng val="270"/></c:doughnutChart></c:chart>"#
+        );
+        assert_eq!(
+            extract_first_slice_angle(root_of(&dn).root_element()),
+            Some(270)
+        );
+        // Absent ⇒ None (renderer defaults to 0).
+        let none = format!(r#"<c:chart xmlns:c="{C_NS}"><c:pieChart/></c:chart>"#);
+        assert_eq!(
+            extract_first_slice_angle(root_of(&none).root_element()),
+            None
+        );
+    }
+
+    #[test]
+    fn dpt_explosion() {
+        let with =
+            format!(r#"<c:dPt xmlns:c="{C_NS}"><c:idx val="1"/><c:explosion val="25"/></c:dPt>"#);
+        assert_eq!(
+            extract_dpt_explosion(root_of(&with).root_element()),
+            Some(25)
+        );
+        let without = format!(r#"<c:dPt xmlns:c="{C_NS}"><c:idx val="1"/></c:dPt>"#);
+        assert_eq!(
+            extract_dpt_explosion(root_of(&without).root_element()),
+            None
+        );
+    }
+
+    // ── CH10 — chart text font faces ────────────────────────────────────────
+
+    #[test]
+    fn axis_tick_and_title_faces() {
+        // Tick face lives in the axis `<c:txPr>`; the title face in `<c:title>`.
+        // Extractors must NOT cross-contaminate.
+        let xml = format!(
+            r#"<c:valAx xmlns:c="{C_NS}" xmlns:a="{A_NS}">
+                 <c:title><a:p><a:r><a:rPr><a:latin typeface="Georgia"/></a:rPr><a:t>Y</a:t></a:r></a:p></c:title>
+                 <c:txPr><a:p><a:pPr><a:defRPr><a:latin typeface="Verdana"/></a:defRPr></a:pPr></a:p></c:txPr>
+               </c:valAx>"#
+        );
+        let root = root_of(&xml);
+        let ax = root.root_element();
+        assert_eq!(extract_axis_tick_label_face(ax).as_deref(), Some("Verdana"));
+        assert_eq!(extract_axis_title_face(ax).as_deref(), Some("Georgia"));
+    }
+
+    #[test]
+    fn data_label_face_scoped_to_dlbls() {
+        let xml = format!(
+            r#"<c:chart xmlns:c="{C_NS}" xmlns:a="{A_NS}">
+                 <c:plotArea><c:barChart>
+                   <c:dLbls><c:txPr><a:p><a:pPr><a:defRPr><a:latin typeface="Consolas"/></a:defRPr></a:pPr></a:p></c:txPr></c:dLbls>
+                 </c:barChart></c:plotArea>
+               </c:chart>"#
+        );
+        assert_eq!(
+            extract_data_label_face(root_of(&xml).root_element()).as_deref(),
+            Some("Consolas")
+        );
+    }
+
+    #[test]
+    fn legend_text_props_face_size_bold() {
+        let xml = format!(
+            r#"<c:chart xmlns:c="{C_NS}" xmlns:a="{A_NS}">
+                 <c:legend><c:legendPos val="b"/>
+                   <c:txPr><a:p><a:pPr><a:defRPr sz="1100" b="1"><a:latin typeface="Calibri"/></a:defRPr></a:pPr></a:p></c:txPr>
+                 </c:legend>
+               </c:chart>"#
+        );
+        let (face, size, bold) = extract_legend_text_props(root_of(&xml).root_element());
+        assert_eq!(face.as_deref(), Some("Calibri"));
+        assert_eq!(size, Some(1100));
+        assert_eq!(bold, Some(true));
+    }
+
+    #[test]
+    fn theme_reference_typeface_passes_through() {
+        // A `+mn-lt` theme reference is returned verbatim (the renderer resolves
+        // it against the theme font scheme).
+        let xml = format!(
+            r#"<c:valAx xmlns:c="{C_NS}" xmlns:a="{A_NS}">
+                 <c:txPr><a:p><a:pPr><a:defRPr><a:latin typeface="+mn-lt"/></a:defRPr></a:pPr></a:p></c:txPr>
+               </c:valAx>"#
+        );
+        assert_eq!(
+            extract_axis_tick_label_face(root_of(&xml).root_element()).as_deref(),
+            Some("+mn-lt")
+        );
     }
 }

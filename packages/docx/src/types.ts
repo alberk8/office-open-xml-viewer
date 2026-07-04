@@ -875,6 +875,13 @@ export interface DocxTextRun {
   smallCaps?: boolean;
   doubleStrikethrough?: boolean;
   highlight?: string | null;
+  /** ECMA-376 §17.3.2.12 `<w:em w:val>` — emphasis (boten / 圏点) mark drawn on
+   *  every non-space character of the run (§17.18.24 ST_Em). `'dot'` = filled
+   *  dot above, `'comma'` = sesame/comma above, `'circle'` = hollow circle
+   *  above, `'underDot'` = filled dot below (horizontal writing). Absent (or the
+   *  authored `val="none"`) ⇒ no mark. The renderer stamps the mark per glyph
+   *  after the text and does NOT change the glyph advance. */
+  emphasisMark?: EmphasisMark;
   /** ECMA-376 §17.3.3.25 ruby annotation (furigana). Renders above the
    *  base text in a smaller font; line height is expanded to fit it. */
   ruby?: RubyAnnotation;
@@ -937,6 +944,11 @@ export interface RubyAnnotation {
   /** Annotation font size in pt. Word stores this as half-points in `<w:hps>`. */
   fontSizePt: number;
 }
+
+/** ECMA-376 §17.18.24 ST_Em — the emphasis-mark styles a run may carry via
+ *  `<w:em w:val>` (§17.3.2.12). `'none'` is filtered out by the parser, so the
+ *  model only ever carries one of these four positive marks (or `undefined`). */
+export type EmphasisMark = 'dot' | 'comma' | 'circle' | 'underDot';
 
 export interface ImageRun {
   /**

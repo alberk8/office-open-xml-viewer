@@ -1010,6 +1010,14 @@ pub struct TextRun {
     /// OOXML highlight color name: "yellow" | "cyan" | "green" | ... (w:highlight)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub highlight: Option<String>,
+    /// ECMA-376 §17.3.2.12 `<w:em w:val>` — emphasis (boten / 圏点) mark drawn on
+    /// every non-space character of the run (§17.18.24 ST_Em). One of "dot"
+    /// (filled dot above), "comma" (sesame/comma above), "circle" (hollow circle
+    /// above), or "underDot" (filled dot below, in horizontal writing). `None`
+    /// when unset or `val="none"`. The renderer paints the mark per glyph after
+    /// the text; it does not alter the glyph advance.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub emphasis_mark: Option<String>,
     /// ECMA-376 §17.3.3.25 ruby annotation (furigana). Set on the rubyBase
     /// text run; renders as a small inline annotation above the base glyphs.
     /// `text` is the annotation string (e.g. "すわ" above "坐"). `font_size_pt`

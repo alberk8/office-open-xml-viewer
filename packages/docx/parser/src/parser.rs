@@ -80,14 +80,40 @@ fn resolve_section_refs(
     out
 }
 
+/// Open a docx ZIP container, tagging a failure with the container part name.
+///
+/// RB7 (MAJOR): a truncated / corrupt ZIP is the MOST COMMON way a docx is broken
+/// (an incomplete download, a byte-mangled attachment). `ZipArchive::new` maps
+/// that to an opaque `zip::result::ZipError` that, if propagated, throws with no
+/// indication that the CONTAINER (not some inner part) is the problem. Naming the
+/// failure lets the caller build a `degraded_document` tagged with the container,
+/// symmetric with how a corrupt `word/document.xml` is tagged inside [`parse`].
+pub(crate) fn open_zip(data: Vec<u8>) -> Result<Zip, String> {
+    ZipArchive::new(std::io::Cursor::new(data)).map_err(|e| format!("(zip container): {e}"))
+}
+
+/// A placeholder [`Document`] for a docx whose ZIP CONTAINER could not be opened
+/// (truncated / corrupt / not a zip). No parts are readable, so there is no theme
+/// to derive fonts from — fall back to the theme defaults. Mirrors the per-part
+/// [`degraded_document`] used inside [`parse`], but for the whole-container case.
+pub(crate) fn degraded_container_document(parse_error: String) -> Document {
+    degraded_document(&ThemeColors::default(), parse_error)
+}
+
 /// Parse a docx from raw archive bytes. Thin wrapper that opens a fresh
 /// [`Zip`] (owning a copy of `data`) and delegates to [`parse`]. Kept so the
 /// free `parse_docx` WASM entry point and the native `parse_docx_native` path
 /// keep their `&[u8]` signature; the stateful `DocxArchive` handle calls
 /// [`parse`] directly on its retained archive to avoid re-opening it per call.
+///
+/// RB7 (MAJOR): a corrupt / truncated CONTAINER degrades to a placeholder
+/// (`degraded_container_document`) rather than erroring, consistent with a corrupt
+/// inner part — the viewer shows a "could not display" page instead of nothing.
 pub fn parse_from_bytes(data: &[u8]) -> Result<Document, String> {
-    let mut zip =
-        ZipArchive::new(std::io::Cursor::new(data.to_vec())).map_err(|e| e.to_string())?;
+    let mut zip = match open_zip(data.to_vec()) {
+        Ok(zip) => zip,
+        Err(e) => return Ok(degraded_container_document(e)),
+    };
     parse(&mut zip)
 }
 
@@ -13180,6 +13206,43 @@ mod embedded_font_tests {
         assert!(
             err.starts_with("word/document.xml:"),
             "error names the missing part; got {err:?}"
+        );
+    }
+
+    /// RB7 MAJOR: a truncated / corrupt ZIP CONTAINER — the most common way a docx
+    /// is broken — degrades to a placeholder tagged with the container, rather than
+    /// throwing an opaque `ZipArchive::new` error before any part is read.
+    #[test]
+    fn rb7_corrupt_zip_container_degrades_to_placeholder() {
+        // Truncated container: a valid docx cut off partway is not a readable zip.
+        let full = build_docx_with_raw_document(
+            br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>hi</w:t></w:r></w:p></w:body></w:document>"#,
+        );
+        let truncated = &full[..full.len() / 2];
+        let doc = parse_from_bytes(truncated)
+            .expect("a corrupt container must open as a placeholder, not error out");
+        let err = doc
+            .parse_error
+            .as_deref()
+            .expect("degraded container doc carries a parse_error");
+        assert!(
+            err.contains("zip container"),
+            "error names the container; got {err:?}"
+        );
+        assert!(
+            doc.body.is_empty(),
+            "placeholder document has an empty body"
+        );
+
+        // Not-a-zip-at-all also degrades (no local file header).
+        let garbage = parse_from_bytes(b"this is definitely not a zip file")
+            .expect("non-zip bytes must open as a placeholder");
+        assert!(
+            garbage
+                .parse_error
+                .as_deref()
+                .is_some_and(|e| e.contains("zip container")),
+            "non-zip degrades with a container-tagged error"
         );
     }
 }

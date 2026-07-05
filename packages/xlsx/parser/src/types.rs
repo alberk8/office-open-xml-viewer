@@ -20,9 +20,7 @@ pub struct Workbook {
     /// `"xl/sharedStrings.xml: <detail>"`) makes the loss visible instead of
     /// silent, while every sheet still renders its non-string content. `None`
     /// (and omitted from JSON) when every shared part read cleanly, so existing
-    /// workbook snapshots are byte-for-byte unchanged. Also carries a
-    /// container-open error (`"(zip container): …"`) for the whole-container
-    /// degradation (#774).
+    /// workbook snapshots are byte-for-byte unchanged.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parse_error: Option<String>,
 }
@@ -1038,7 +1036,7 @@ pub struct SharedString {
     pub runs: Option<Vec<Run>>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct Styles {
     pub fonts: Vec<Font>,

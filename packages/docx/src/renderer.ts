@@ -1,7 +1,7 @@
 import type {
   DocxDocumentModel, BodyElement, PaginatedBodyElement, DocParagraph, DocTable, DocTableRow, DocTableCell, CellElement,
   DocRun, DocxTextRun, ImageRun, ChartRun, ShapeRun, ShapeText, ShapeTextRun, FieldRun, HeaderFooter, HeadersFooters, LineSpacing, BorderSpec, TableBorders, CellBorders,
-  TabStop, ParagraphBorders, ParaBorderEdge, DocxRunBorder, SectionProps, SectionGeom, DocNote, NumberingInfo, ColumnGeom, FramePr, TblpPr, DocSettings,
+  TabStop, ParagraphBorders, ParaBorderEdge, DocxRunBorder, SectionProps, SectionGeom, PageNumType, DocNote, NumberingInfo, ColumnGeom, FramePr, TblpPr, DocSettings,
 } from './types';
 import type { ArrowEnd, Stroke } from '@silurus/ooxml-core';
 import {
@@ -50,7 +50,8 @@ import {
   drawUnderline,
   renderChart,
 } from '@silurus/ooxml-core';
-import type { MathNode, MathRenderer, KinsokuRules, HyperlinkTarget } from '@silurus/ooxml-core';
+import type { MathNode, MathRenderer, KinsokuRules, HyperlinkTarget, NumberFormat } from '@silurus/ooxml-core';
+import { computePageNumbering } from './page-numbering.js';
 import { docxUnderlineToDrawingML } from './underline-map.js';
 import { intendedSingleLinePx, correctLineMetrics } from './font-metrics.js';
 import {
@@ -232,6 +233,15 @@ export interface RenderState {
   pageIndex: number;
   /** total page count in the document */
   totalPages: number;
+  /** ECMA-376 §17.6.12 — the DISPLAYED page number for the current page (after
+   *  per-section `w:start` restart). A PAGE field renders this instead of the raw
+   *  `pageIndex + 1`. Absent ⇒ `pageIndex + 1` (single-section fallback). */
+  displayPageNumber?: number;
+  /** ECMA-376 §17.6.12 / §17.18.59 — the ST_NumberFormat governing the current
+   *  page's number (from the page's section `w:fmt`). A PAGE field formats its
+   *  result with this unless it carries its own `\*` switch (§17.16.4.3.1). Absent
+   *  ⇒ decimal. */
+  pageNumberFormat?: NumberFormat;
   /** preloaded drawable images keyed by `imageKey(imagePath, colorReplaceFrom)`
    *  (raster ImageBitmap or, for an `asvg:svgBlip` vector original, an
    *  HTMLImageElement) */
@@ -976,6 +986,14 @@ export async function renderDocumentToCanvas(
   const totalPages = Math.max(opts.totalPages ?? pages.length, pages.length);
   const elements = pages[pageIndex] ?? pages[0] ?? [];
 
+  // ECMA-376 §17.6.12 — the DISPLAYED page number + format for every physical page,
+  // honoring per-section `w:start` restart / `w:fmt`. Computed over ALL pages (the
+  // restart counter walks page order) and indexed by this `pageIndex`. For a
+  // single-section document with no `<w:pgNumType>` every page resolves to
+  // { displayNumber: pageIndex+1, format: 'decimal' } — the pre-feature behaviour.
+  const pageNumbering = computePageNumbering(pages);
+  const thisPageNumber = pageNumbering[pageIndex] ?? { displayNumber: pageIndex + 1, format: 'decimal' as NumberFormat };
+
   // ECMA-376 §17.6.13 / §17.6.11 — page geometry is PER-SECTION. Size THIS page from
   // the section active at its top (resolvePageSection.geom, stamped by the paginator),
   // NOT from the single body-level `doc.section`. `sec` merges the resolved geometry
@@ -1094,6 +1112,10 @@ export async function renderDocumentToCanvas(
     defaultColor: opts.defaultTextColor ?? '#000000',
     pageIndex,
     totalPages,
+    // ECMA-376 §17.6.12 — the current page's displayed number + format (per-section
+    // restart / fmt), consumed by a PAGE field in the body, header, or footer.
+    displayPageNumber: thisPageNumber.displayNumber,
+    pageNumberFormat: thisPageNumber.format,
     images,
     dryRun: false,
     marginLeft: sec.marginLeft,
@@ -1693,6 +1715,22 @@ export function computePages(
     return bodySectionGeom;
   };
 
+  // ECMA-376 §17.6.12 `<w:pgNumType>` — the page-numbering settings (start / fmt)
+  // of the section that OWNS the content starting at body index `startIdx`.
+  // Mirrors `sectionGeomFrom`: carried on the NEXT `SectionBreak` marker at/after
+  // `startIdx` (the marker ENDS that section); if there is none, the content
+  // belongs to the FINAL (body-level) section whose settings live on
+  // `section.pageNumType`. `null` ⇒ no restart / decimal (numbering continues).
+  // Stamped on each element so `computePageNumbering` can resolve each physical
+  // page's owning section's numbering without re-deriving the body→page mapping.
+  const sectionPageNumTypeFrom = (startIdx: number): PageNumType | null => {
+    for (let j = startIdx; j < body.length; j++) {
+      const e = body[j];
+      if (e.type === 'sectionBreak') return e.pageNumType ?? null;
+    }
+    return section.pageNumType ?? null;
+  };
+
   // The active section's column geometry. Reassigned (a) here for the first
   // section and (b) at every `SectionBreak` as the flow enters the next section.
   // `colIndex` tracks which column we are filling; `colX()`/`colW()` give its
@@ -1715,6 +1753,11 @@ export function computePages(
   // Stamped on each element so the renderer sizes each page from its own section.
   // For a single-section document this stays the body-level geometry throughout.
   let currentSectionGeom = sectionGeomFrom(0);
+  // ECMA-376 §17.6.12 — the active section's page-numbering settings, tracked in
+  // lockstep with `currentSectionGeom` (reassigned at every SectionBreak). Stamped
+  // on each element so `computePageNumbering` resolves each physical page's owning
+  // section's restart/format. `null` for a section with no `<w:pgNumType>`.
+  let currentSectionPageNumType = sectionPageNumTypeFrom(0);
   // ECMA-376 §17.6.4 / §17.18.79 — the CURRENT multi-column region's vertical
   // extent on the current page, in content-relative pt (0 = page content top,
   // i.e. the same frame as `y`). A region tiled into N newspaper columns is a
@@ -2029,6 +2072,7 @@ export function computePages(
     el.colTopPt = colTopAbsPt();
     el.sectionHF = currentSectionHF;
     el.sectionGeom = currentSectionGeom;
+    el.sectionPageNumType = currentSectionPageNumType;
     pages[pages.length - 1].push(el);
   };
 
@@ -2089,6 +2133,8 @@ export function computePages(
       currentSectionHF = sectionHFFrom(i + 1);
       // ECMA-376 §17.6.13 / §17.6.11 — and its page geometry (size + margins).
       currentSectionGeom = sectionGeomFrom(i + 1);
+      // ECMA-376 §17.6.12 — and its page-numbering settings (start / fmt).
+      currentSectionPageNumType = sectionPageNumTypeFrom(i + 1);
       // The break is governed by the UPCOMING section's start type (§17.6.22),
       // not this marker's own kind (the section it closes). See sectionKindFrom.
       // The sample-5 cover overprint that prompted the 0.66.1 hotfix is now fixed
@@ -2472,6 +2518,7 @@ export function computePages(
           columnBottomLimit,
           () => currentSectionHF,
           () => currentSectionGeom,
+          () => currentSectionPageNumType,
         );
         // After splitting, `y` is the bottom of the last slice in the
         // current column (continues for the LAST slice; intermediate slices
@@ -2674,6 +2721,7 @@ export function computePages(
           bodyTopPt(),
           () => currentSectionHF,
           () => currentSectionGeom,
+          () => currentSectionPageNumType,
           // B2 table stage 1b — stamp the scale-1 layout onto each slice so the
           // paint pass reuses it. Each slice records ITS rows' heights; the column
           // widths + contentWPt are constant across the split.
@@ -3205,6 +3253,11 @@ function splitParagraphAcrossPages(
    *  all slices; stamped so the renderer sizes each page from the right section.
    *  Omitted ⇒ the renderer's body-level fallback. */
   tagSectionGeom?: () => SectionGeom,
+  /** ECMA-376 §17.6.12 — the active SECTION's page-numbering settings (start /
+   *  fmt). Constant across a paragraph's slices; stamped so `computePageNumbering`
+   *  sees the section's restart/format on EVERY physical page a spilled paragraph
+   *  lands on (not only the section's first page). Omitted ⇒ `null` (continue). */
+  tagSectionPageNumType?: () => PageNumType | null,
 ): { endY: number } {
   const colTop = columnTop ?? (() => 0);
   const colBot = columnBottom ?? (() => contentH);
@@ -3229,6 +3282,7 @@ function splitParagraphAcrossPages(
     }
     if (tagSectionHF) el.sectionHF = tagSectionHF();
     if (tagSectionGeom) el.sectionGeom = tagSectionGeom();
+    if (tagSectionPageNumType) el.sectionPageNumType = tagSectionPageNumType();
     return el;
   };
   const indLeft = para.indentLeft;
@@ -3795,6 +3849,10 @@ export function splitTableAcrossPages(
    *  margins; constant across the split). Stamped so the renderer sizes each page
    *  from the right section. Omitted ⇒ the renderer's body-level fallback. */
   tagSectionGeom?: () => SectionGeom,
+  /** ECMA-376 §17.6.12 — the active SECTION's page-numbering settings (constant
+   *  across the split). Stamped so `computePageNumbering` sees the section's
+   *  restart/format on every page a spilled table lands on. Omitted ⇒ `null`. */
+  tagSectionPageNumType?: () => PageNumType | null,
   /** B2 table stage 1b — the scale-1 layout to stamp onto each slice for paint
    *  reuse. `colWidthsPt` is the full grid (constant across the split); each slice
    *  gets ITS rows' heights (sliced from `rowHs`, with the repeated header rows
@@ -3838,6 +3896,7 @@ export function splitTableAcrossPages(
     if (columnTop && marginTopPt != null) sliceEl.colTopPt = marginTopPt + colTop();
     if (tagSectionHF) sliceEl.sectionHF = tagSectionHF();
     if (tagSectionGeom) sliceEl.sectionGeom = tagSectionGeom();
+    if (tagSectionPageNumType) sliceEl.sectionPageNumType = tagSectionPageNumType();
     // B2 table stage 1b — stamp this slice's own row heights (repeated header rows
     // prepended on continuations, matching `sliceRows`) so the paint pass reuses
     // them 1:1 instead of re-measuring the slice.

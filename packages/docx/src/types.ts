@@ -138,6 +138,22 @@ export interface HeaderFooter {
   body: BodyElement[];
 }
 
+/** ECMA-376 §17.6.12 `<w:pgNumType>` — a section's page-numbering settings.
+ *  Mirrors the Rust `PageNumType`. Only the two attributes that change the
+ *  DISPLAYED page number are carried:
+ *  - `start` — the number shown on the FIRST page of the section (§17.6.12);
+ *    absent ⇒ numbering continues from the previous section's highest number.
+ *    Kept as a possibly-zero / possibly-negative integer (Word writes `start="0"`).
+ *  - `fmt` — the ST_NumberFormat (§17.18.59) for the section's page numbers
+ *    (decimal / upperRoman / lowerLetter / …); absent ⇒ decimal.
+ *  `chapStyle`/`chapSep` (chapter-prefixed numbering) are out of scope for this
+ *  pass and never surfaced. Field names match the Rust `PageNumType` serialization
+ *  (`start`, `fmt`). */
+export interface PageNumType {
+  start?: number;
+  fmt?: string;
+}
+
 /** ECMA-376 §17.6.13 `<w:pgSz>` + §17.6.11 `<w:pgMar>` — a section's page
  *  geometry: page size + margins + header/footer distances (pt). Mirrors the Rust
  *  `SectionGeom`. Carried on a {@link BodyElement} `sectionBreak` arm (`geom`) so a
@@ -216,6 +232,11 @@ export interface SectionProps {
    *  body text flows top-to-bottom through `count` columns (newspaper fill);
    *  see {@link computeColumns}. */
   columns?: ColumnsSpec | null;
+  /** ECMA-376 §17.6.12 `<w:pgNumType>` — the body (final) section's page-numbering
+   *  settings (start / fmt). `null`/absent ⇒ numbering continues; decimal. The
+   *  renderer resolves the displayed page number per physical page from this plus
+   *  the per-section `SectionBreak.pageNumType` markers. */
+  pageNumType?: PageNumType | null;
 }
 
 /** ECMA-376 §17.6.4 `<w:cols>` — the section's multi-column configuration. */
@@ -284,6 +305,11 @@ export type BodyElement =
        *  (size + margins). Absent when the sectPr inherits both pgSz and pgMar
        *  (the renderer then falls back to the body-level section geometry). */
       geom?: SectionGeom;
+      /** ECMA-376 §17.6.12 `<w:pgNumType>` — this ENDING section's page-numbering
+       *  settings (start / fmt). Absent ⇒ numbering continues; decimal. Carried
+       *  separately from `geom` because a section may inherit its geometry yet
+       *  still restart / re-format its page numbers. */
+      pageNumType?: PageNumType | null;
     };
 
 /** A BodyElement annotated with a line range to render. Set when the
@@ -355,6 +381,13 @@ export type PaginatedBodyElement = BodyElement & {
    *  the renderer uses the body-level `doc.section` geometry (single-section docs are
    *  unaffected). Runtime-only — never emitted by the parser. */
   sectionGeom?: SectionGeom;
+  /** ECMA-376 §17.6.12 `<w:pgNumType>` — the page-numbering settings (start / fmt)
+   *  of the SECTION this element belongs to. Stamped by the paginator (from the
+   *  upcoming `SectionBreak`'s `pageNumType`, or the body-level section) so
+   *  `computePageNumbering` resolves each physical page's DISPLAYED number and
+   *  format. `null` ⇒ the section has no `<w:pgNumType>` (numbering continues;
+   *  decimal). Runtime-only — never emitted by the parser. */
+  sectionPageNumType?: PageNumType | null;
   /** B2 table stage 1b — compute-once table layout. When this element is a table
    *  (`type === 'table'`), the paginator stamps the per-grid-column widths (pt) it
    *  resolved via {@link resolveColumnWidths}. The paint pass ({@link computeTableLayout})

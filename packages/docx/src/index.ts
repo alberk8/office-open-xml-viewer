@@ -32,6 +32,9 @@ export type {
   // Per-section page geometry (reachable via the BodyElement sectionBreak arm's
   // `geom` and PaginatedBodyElement's `sectionGeom`, ECMA-376 §17.6.13/§17.6.11).
   SectionGeom,
+  // Per-section page-numbering settings (reachable via SectionProps.pageNumType
+  // and the BodyElement sectionBreak arm's `pageNumType`, ECMA-376 §17.6.12).
+  PageNumType,
   // Multi-column section sub-types (reachable via SectionProps.columns).
   ColumnsSpec,
   ColSpec,

@@ -34,6 +34,8 @@ import {
   isComplexScriptCodePoint,
   isSymbolFontFamily,
   symbolTextToUnicodeSegments,
+  formatOrdinalNumber,
+  parseFieldFormatSwitch,
 } from '@silurus/ooxml-core';
 import { intendedSingleLinePx, correctLineMetrics } from './font-metrics.js';
 import {
@@ -858,8 +860,25 @@ export function findNearbyFontSize(runs: DocRun[], idx: number): number {
 }
 
 export function resolveFieldText(f: FieldRun, state: RenderState): string {
-  if (f.fieldType === 'page') return String(state.pageIndex + 1);
-  if (f.fieldType === 'numPages') return String(state.totalPages);
+  if (f.fieldType === 'page') {
+    // ECMA-376 §17.16.5.44 PAGE — "the number of the current page". Use the
+    // per-section DISPLAY number (§17.6.12 `w:start` restart), falling back to the
+    // raw physical index for a single-section document without `<w:pgNumType>`.
+    const n = state.displayPageNumber ?? state.pageIndex + 1;
+    // §17.16.4.3.1 — the field's own general-formatting switch (`\* roman`, …)
+    // OVERRIDES the section format (§17.6.12 `w:fmt`); it is authored ON the field.
+    // No switch ⇒ the section format (or decimal for a single-section document).
+    const fmt = parseFieldFormatSwitch(f.instruction) ?? state.pageNumberFormat ?? 'decimal';
+    return formatOrdinalNumber(n, fmt);
+  }
+  // ECMA-376 §17.16.5.42 NUMPAGES — "the number of pages in the current document".
+  // This is the DOCUMENT's physical page count and is NOT affected by §17.6.12
+  // page-number restart (which only shifts the DISPLAYED number). It IS still
+  // subject to the field's own `\*` format switch.
+  if (f.fieldType === 'numPages') {
+    const fmt = parseFieldFormatSwitch(f.instruction) ?? 'decimal';
+    return formatOrdinalNumber(state.totalPages, fmt);
+  }
   return f.fallbackText;
 }
 

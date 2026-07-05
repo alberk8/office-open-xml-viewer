@@ -36,6 +36,8 @@ import {
   symbolTextToUnicodeSegments,
   formatOrdinalNumber,
   parseFieldFormatSwitch,
+  formatDateTimePicture,
+  parseDateTimePictureSwitch,
 } from '@silurus/ooxml-core';
 import { intendedSingleLinePx, correctLineMetrics } from './font-metrics.js';
 import {
@@ -950,6 +952,23 @@ export function resolveFieldText(f: FieldRun, state: RenderState): string {
     const fmt = parseFieldFormatSwitch(f.instruction) ?? 'decimal';
     return formatOrdinalNumber(state.totalPages, fmt);
   }
+  // ECMA-376 §17.16.5.16 DATE / §17.16.5.72 TIME — display the CURRENT date/time
+  // filtered through the field's `\@` date-time picture (§17.16.4.1). The
+  // "current" instant is injected via `state.currentDateMs` (default = real time,
+  // set at the render entry point) so the output is deterministic under test.
+  // A field with NO `\@` picture, or one whose picture uses an unimplemented
+  // token, falls back to the authored cached result (§17.16.4.1: with no picture
+  // the result is formatted "in an implementation-defined manner" — we keep
+  // Word's cached rendering rather than invent one).
+  if (f.fieldType === 'date' || f.fieldType === 'time') {
+    const picture = parseDateTimePictureSwitch(f.instruction);
+    if (picture) {
+      const now = new Date(state.currentDateMs ?? Date.now());
+      const formatted = formatDateTimePicture(picture, now);
+      if (formatted !== null) return formatted;
+    }
+    return f.fallbackText;
+  }
   return f.fallbackText;
 }
 
@@ -1308,7 +1327,11 @@ export function paragraphSegsStateSensitive(para: DocParagraph): boolean {
   for (const run of para.runs) {
     if (run.type === 'field') {
       const ft = (run as unknown as FieldRun).fieldType;
-      if (ft === 'page' || ft === 'numPages') return true;
+      // page / numPages depend on the per-page render context. date / time depend
+      // on the injected `state.currentDateMs`, which the measure state does not
+      // carry (buildMeasureState) — so these too must recompute rather than stamp
+      // a measure-time value (§17.16.4.1 DATE/TIME resolve at paint).
+      if (ft === 'page' || ft === 'numPages' || ft === 'date' || ft === 'time') return true;
     } else if (run.type === 'text' && (run as unknown as DocxTextRun).noteRef) {
       return true;
     }

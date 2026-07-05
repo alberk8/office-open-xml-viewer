@@ -2738,6 +2738,14 @@ fn classify_field(instr: &str) -> String {
     match token.as_str() {
         "PAGE" => "page".to_string(),
         "NUMPAGES" => "numPages".to_string(),
+        // ECMA-376 §17.16.5.16 DATE / §17.16.5.72 TIME — display the CURRENT
+        // date/time filtered through the field's `\@` date-time picture
+        // (§17.16.4.1). Classified as recomputable so the fldChar `separate`
+        // handler sets `substitute=true`: the authored cached result is swallowed
+        // (and preserved as the run's `fallback_text`) and the renderer formats
+        // the injected current time from the instruction's picture instead.
+        "DATE" => "date".to_string(),
+        "TIME" => "time".to_string(),
         _ => "other".to_string(),
     }
 }
@@ -7483,6 +7491,86 @@ mod tests {
             f.emphasis_mark.as_deref(),
             Some("dot"),
             "PAGE field run must carry w:em like a plain text run"
+        );
+    }
+
+    // ECMA-376 §17.16.5.16 DATE / §17.16.5.72 TIME — a `fldSimple` DATE/TIME
+    // field classifies as `date`/`time` (recomputable) and preserves its `\@`
+    // date-time picture in `instruction`; the authored text is its `fallback_text`.
+    #[test]
+    fn date_time_fields_classify_and_keep_picture() {
+        let base = RunFmt::default();
+        let styles = StyleMap::parse("");
+        let date = parse_para(
+            r#"<w:fldSimple w:instr=" DATE \@ &quot;yyyy-MM-dd&quot; ">
+                <w:r><w:t>2019-01-02</w:t></w:r>
+            </w:fldSimple>"#,
+            &base,
+            &styles,
+        );
+        let f = date
+            .iter()
+            .find_map(|r| match r {
+                DocRun::Field(f) => Some(f),
+                _ => None,
+            })
+            .expect("date field run");
+        assert_eq!(f.field_type, "date");
+        assert!(f.instruction.contains("yyyy-MM-dd"), "picture preserved");
+        assert_eq!(
+            f.fallback_text, "2019-01-02",
+            "cached result kept as fallback"
+        );
+
+        let time = parse_para(
+            r#"<w:fldSimple w:instr=" TIME \@ &quot;HH:mm&quot; ">
+                <w:r><w:t>09:41</w:t></w:r>
+            </w:fldSimple>"#,
+            &base,
+            &styles,
+        );
+        let f = time
+            .iter()
+            .find_map(|r| match r {
+                DocRun::Field(f) => Some(f),
+                _ => None,
+            })
+            .expect("time field run");
+        assert_eq!(f.field_type, "time");
+    }
+
+    // A complex (fldChar) TIME field swallows its cached result but preserves it
+    // as `fallback_text` (the sample-28 footer shape: TIME \@ "YYYY" → cached
+    // "2019"). The renderer recomputes from the picture, falling back to this.
+    #[test]
+    fn complex_time_field_swallows_cache_into_fallback() {
+        let base = RunFmt::default();
+        let styles = StyleMap::parse("");
+        let runs = parse_para(
+            r#"<w:r><w:fldChar w:fldCharType="begin"/></w:r>
+               <w:r><w:instrText xml:space="preserve"> TIME  \@ "YYYY"  \* MERGEFORMAT </w:instrText></w:r>
+               <w:r><w:fldChar w:fldCharType="separate"/></w:r>
+               <w:r><w:t>2019</w:t></w:r>
+               <w:r><w:fldChar w:fldCharType="end"/></w:r>"#,
+            &base,
+            &styles,
+        );
+        let f = runs
+            .iter()
+            .find_map(|r| match r {
+                DocRun::Field(f) => Some(f),
+                _ => None,
+            })
+            .expect("time field run");
+        assert_eq!(f.field_type, "time");
+        assert!(f.instruction.contains("YYYY"), "picture preserved");
+        assert_eq!(f.fallback_text, "2019", "cached year kept as fallback");
+        // The cached "2019" must NOT also leak as a standalone text run.
+        assert!(
+            !runs
+                .iter()
+                .any(|r| matches!(r, DocRun::Text(t) if t.text == "2019")),
+            "cached result swallowed, not rendered as text"
         );
     }
 

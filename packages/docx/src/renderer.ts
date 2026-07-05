@@ -303,6 +303,11 @@ export interface RenderState {
   /** When false, runs tagged with a `revision` render without the
    *  track-changes overlay (no author colour, no underline/strikethrough). */
   showTrackChanges: boolean;
+  /** ECMA-376 §17.16.5.16 DATE / §17.16.5.72 TIME — the "current" instant (epoch
+   *  ms) a DATE/TIME field formats through its `\@` picture (§17.16.4.1). Injected
+   *  from the render option `currentDate` so field output is deterministic under
+   *  test; absent ⇒ `Date.now()` (real time). */
+  currentDateMs?: number;
   /** ECMA-376 §17.11 — footnote/endnote reference markers (`noteRef` runs)
    *  display the note's 1-based sequential number, not the raw `@w:id`. Keyed by
    *  `"footnote:<id>"` / `"endnote:<id>"`. The in-note `<w:footnoteRef>`
@@ -440,6 +445,12 @@ export interface RenderDocumentOptions {
    *  no underline / strikethrough overlay — useful for a "final / no markup"
    *  view of a tracked document. */
   showTrackChanges?: boolean;
+  /** ECMA-376 §17.16.5.16 DATE / §17.16.5.72 TIME — the "current" instant that a
+   *  DATE/TIME field formats through its `\@` date picture (§17.16.4.1). Accepts a
+   *  `Date` or epoch-ms number. Default = the real current time (`Date.now()` at
+   *  render). Provide a fixed value to make DATE/TIME field output deterministic
+   *  (e.g. in tests / reproducible exports). */
+  currentDate?: Date | number;
 }
 
 // ===== Image preloading =====
@@ -481,6 +492,13 @@ interface ImagePair {
    *  crop, so the decode must prefer the raster (the crop math needs the
    *  bitmap's native pixel grid; an SVG vector original has none). */
   hasCrop?: boolean;
+}
+
+/** Normalize the `currentDate` render option (Date | epoch-ms | undefined) to
+ *  epoch milliseconds. Undefined ⇒ the real current time (§17.16.4.1 DATE/TIME). */
+function resolveCurrentDateMs(currentDate: Date | number | undefined): number {
+  if (currentDate == null) return Date.now();
+  return typeof currentDate === 'number' ? currentDate : currentDate.getTime();
 }
 
 /** Returns a stable map key for an (imagePath, colorReplaceFrom) pair. */
@@ -1163,6 +1181,8 @@ export async function renderDocumentToCanvas(
     mathDefJc: doc.settings?.mathDefJc,
     onTextRun: opts.onTextRun,
     showTrackChanges: opts.showTrackChanges ?? true,
+    // §17.16.4.1 — the instant DATE/TIME fields format against (default real time).
+    currentDateMs: resolveCurrentDateMs(opts.currentDate),
     noteNumbers,
     // ECMA-376 §17.6.20 — when set, the glyph-draw path counter-rotates upright
     // (CJK) glyphs so they stand up inside the +90°-rotated page (see the page

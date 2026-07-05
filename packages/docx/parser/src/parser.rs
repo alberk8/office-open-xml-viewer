@@ -3283,12 +3283,20 @@ fn parse_run_inner(
                 }
             }
             "pict" => {
-                // Legacy VML drawing (ECMA-376 Part 4 §14.1): <w:pict> wraps a
-                // <v:shape>/<v:rect>/<v:roundrect> with optional <v:textbox>.
-                // Word still emits these for simple text boxes. We surface the
-                // shape's fill/stroke/size and its txbxContent as a ShapeRun so
-                // the existing shape renderer draws the panel + RTL body text.
-                if let Some(shp) = parse_vml_pict(style_map, child, theme, media_map) {
+                // Legacy VML drawing (ECMA-376 Part 4 §19.1.2): a `<w:pict>`
+                // wraps a `<v:shape>`/`<v:rect>`/`<v:roundrect>` carrying one of
+                // several payloads. Dispatch by payload:
+                //   1. `<v:imagedata r:id>` (§19.1.2.11) — a non-OLE inline VML
+                //      picture. Surface it as an inline `ImageRun` through the
+                //      ordinary image pipeline.
+                //   2. `<v:textbox><w:txbxContent>` or a filled/stroked panel —
+                //      surface the shape's fill/stroke/size and its body text as
+                //      a `ShapeRun` (the existing text-box path).
+                // The imagedata form is tried first so a picture pict is not
+                // mistaken for an (empty) text-box panel.
+                if let Some(img) = parse_vml_pict_image(child, media_map) {
+                    runs.push(DocRun::Image(img));
+                } else if let Some(shp) = parse_vml_pict(style_map, child, theme, media_map) {
                     runs.push(DocRun::Shape(Box::new(shp)));
                 }
             }
@@ -5154,37 +5162,33 @@ fn extract_simple_paragraph_text(
 /// below the preceding content.
 ///
 /// Note: a bare `<w:pict>` carrying a `<v:imagedata>` (a non-OLE inline VML
-/// image, not a text box) is not resolved here — that remains an existing gap.
-/// The OLE-object case (`<w:object>` with a VML preview) is handled separately;
-/// see `parse_object_ole_image`.
+/// picture) is resolved by `parse_vml_pict_image` BEFORE this function runs, so
+/// an imagedata shape never reaches here — this path only builds fill/stroke/
+/// text-box panels. The OLE-object case (`<w:object>` with a VML preview) is
+/// handled separately; see `parse_object_ole_image`.
 fn parse_vml_pict(
     style_map: &StyleMap,
     pict: roxmltree::Node,
     theme: &ThemeColors,
     media_map: &HashMap<String, String>,
 ) -> Option<ShapeRun> {
-    // v:shape / v:rect / v:roundrect — any VML shape element with geometry.
+    // v:shape / v:rect / v:roundrect — any VML shape element with geometry. A
+    // shape whose payload is a `<v:imagedata>` is a PICTURE, not a text/fill
+    // panel (it is drawn by parse_vml_pict_image, or intentionally skipped when
+    // its image can't be resolved); such a shape must not be turned into an
+    // empty rectangle here, so it is excluded from the candidate set.
     let shape = pict.descendants().find(|n| {
-        n.is_element() && matches!(n.tag_name().name(), "shape" | "rect" | "roundrect" | "oval")
+        n.is_element()
+            && matches!(n.tag_name().name(), "shape" | "rect" | "roundrect" | "oval")
+            && !n
+                .children()
+                .any(|c| c.is_element() && c.tag_name().name() == "imagedata")
     })?;
 
     // CSS-like `style`: "position:relative;width:300pt;height:60pt;…"
     let style = shape.attribute("style").unwrap_or("");
-    let css_pt = |prop: &str| -> Option<f64> {
-        for decl in style.split(';') {
-            let mut kv = decl.splitn(2, ':');
-            let k = kv.next()?.trim();
-            let v = kv.next()?.trim();
-            if k.eq_ignore_ascii_case(prop) {
-                // strip a trailing "pt" unit; VML lengths default to pt here.
-                let num = v.trim_end_matches("pt").trim();
-                return num.parse::<f64>().ok();
-            }
-        }
-        None
-    };
-    let width_pt = css_pt("width").unwrap_or(0.0);
-    let height_pt = css_pt("height").unwrap_or(0.0);
+    let width_pt = vml_css_length_pt(style, "width").unwrap_or(0.0);
+    let height_pt = vml_css_length_pt(style, "height").unwrap_or(0.0);
     if width_pt <= 0.0 || height_pt <= 0.0 {
         return None;
     }
@@ -5261,6 +5265,109 @@ fn parse_vml_pict(
     })
 }
 
+/// Read a length from a VML CSS `style` string (ECMA-376 Part 4 §19.1.2.19
+/// "style" — a semicolon-delimited `name:value` list). Returns the numeric value
+/// with a trailing `pt` unit stripped; VML lengths in a `<w:pict>` default to
+/// points, so a bare number is taken as pt. Non-`pt` units (px/cm/…) and
+/// percentages are not converted here (callers that need them handle it).
+/// Property match is case-insensitive per the CSS2 grammar.
+fn vml_css_length_pt(style: &str, prop: &str) -> Option<f64> {
+    for decl in style.split(';') {
+        let mut kv = decl.splitn(2, ':');
+        let k = kv.next()?.trim();
+        let v = match kv.next() {
+            Some(v) => v.trim(),
+            None => continue,
+        };
+        if k.eq_ignore_ascii_case(prop) {
+            return v.trim_end_matches("pt").trim().parse::<f64>().ok();
+        }
+    }
+    None
+}
+
+/// Parse a bare legacy VML `<w:pict>` picture — a `<v:shape>` (or
+/// `<v:rect>`/`<v:roundrect>`/`<v:oval>`) carrying a `<v:imagedata r:id>`
+/// (ECMA-376 Part 4 §19.1.2.11 imagedata) with NO surrounding `<w:object>`. This
+/// is the non-OLE inline VML image form (e.g. a header picture Word emits as VML
+/// rather than DrawingML). The rId maps to an embedded part via the media map,
+/// and the draw size comes from the shape's CSS `style` width/height in pt
+/// (§19.1.2.19). The result is an inline `ImageRun`, feeding the same image
+/// pipeline as a DrawingML `<a:blip>` picture.
+///
+/// Returns `None` (leaving the pict to the text-box path) when:
+///   - no shape carries a `<v:imagedata r:id>` (it is a filled/text panel), or
+///   - the relevant shape is inside a `<v:group>` — a grouped shape's
+///     width/height are expressed in the GROUP's coordinate system
+///     (`coordsize`), not points, so treating them as pt would badly mis-size
+///     the image. Resolving the group transform (child offset × group scale) is
+///     a separate VML-group feature; until then a grouped imagedata is skipped
+///     rather than mis-rendered, matching the prior behaviour, or
+///   - the rId does not resolve, or the shape has no positive pt dimensions.
+fn parse_vml_pict_image(
+    pict: roxmltree::Node,
+    media_map: &HashMap<String, String>,
+) -> Option<ImageRun> {
+    let is_shape = |n: &roxmltree::Node| {
+        n.is_element() && matches!(n.tag_name().name(), "shape" | "rect" | "roundrect" | "oval")
+    };
+    // The first shape carrying an <v:imagedata r:id>, that is NOT nested in a
+    // <v:group> (grouped geometry is in group units, handled elsewhere).
+    let shape = pict.descendants().find(|n| {
+        is_shape(n)
+            && n.children()
+                .any(|c| c.is_element() && c.tag_name().name() == "imagedata")
+            && !n
+                .ancestors()
+                .any(|a| a.is_element() && a.tag_name().name() == "group")
+    })?;
+
+    let imagedata = shape
+        .children()
+        .find(|c| c.is_element() && c.tag_name().name() == "imagedata")?;
+    let rid = attr_ns(
+        &imagedata,
+        relationships::TRANSITIONAL,
+        relationships::STRICT,
+        "id",
+    )?;
+    let image_path = media_map.get(rid)?.clone();
+    let mime_type = mime_from_ext(&image_path).to_string();
+
+    let style = shape.attribute("style").unwrap_or("");
+    let width_pt = vml_css_length_pt(style, "width").unwrap_or(0.0);
+    let height_pt = vml_css_length_pt(style, "height").unwrap_or(0.0);
+    if width_pt <= 0.0 || height_pt <= 0.0 {
+        return None;
+    }
+
+    Some(ImageRun {
+        image_path,
+        mime_type,
+        svg_image_path: None,
+        src_rect: None,
+        width_pt,
+        height_pt,
+        anchor: false,
+        anchor_x_pt: 0.0,
+        anchor_y_pt: 0.0,
+        anchor_x_from_margin: false,
+        anchor_y_from_para: false,
+        color_replace_from: None,
+        wrap_mode: None,
+        dist_top: 0.0,
+        dist_bottom: 0.0,
+        dist_left: 0.0,
+        dist_right: 0.0,
+        wrap_side: None,
+        allow_overlap: true,
+        anchor_x_align: None,
+        anchor_y_align: None,
+        anchor_x_relative_from: None,
+        anchor_y_relative_from: None,
+    })
+}
+
 /// Extract the preview image from an embedded OLE object (`<w:object>`,
 /// §17.3.3.19 CT_Object). Word represents the object's on-page appearance as a
 /// legacy VML `<v:shape>` (or `<v:rect>`/`<v:roundrect>`/`<v:oval>`) carrying a
@@ -5300,17 +5407,6 @@ fn parse_object_ole_image(
         n.is_element() && matches!(n.tag_name().name(), "shape" | "rect" | "roundrect" | "oval")
     });
     let style = shape.and_then(|s| s.attribute("style")).unwrap_or("");
-    let css_pt = |prop: &str| -> Option<f64> {
-        for decl in style.split(';') {
-            let mut kv = decl.splitn(2, ':');
-            let k = kv.next()?.trim();
-            let v = kv.next()?.trim();
-            if k.eq_ignore_ascii_case(prop) {
-                return v.trim_end_matches("pt").trim().parse::<f64>().ok();
-            }
-        }
-        None
-    };
     let dxa_pt = |name: &str| -> Option<f64> {
         attr_ns(
             &object,
@@ -5321,8 +5417,10 @@ fn parse_object_ole_image(
         .and_then(|v| v.trim().parse::<f64>().ok())
         .map(|twentieths| twentieths / 20.0)
     };
-    let width_pt = css_pt("width").or_else(|| dxa_pt("dxaOrig")).unwrap_or(0.0);
-    let height_pt = css_pt("height")
+    let width_pt = vml_css_length_pt(style, "width")
+        .or_else(|| dxa_pt("dxaOrig"))
+        .unwrap_or(0.0);
+    let height_pt = vml_css_length_pt(style, "height")
         .or_else(|| dxa_pt("dyaOrig"))
         .unwrap_or(0.0);
     if width_pt <= 0.0 || height_pt <= 0.0 {
@@ -13708,6 +13806,165 @@ mod ole_object_tests {
             "the <w:drawing> child wins; the VML fallback must not also emit"
         );
         assert_eq!(imgs[0].image_path, "word/media/image1.png");
+    }
+}
+
+/// Legacy VML `<w:pict>` picture and text-watermark fixtures (ECMA-376 Part 4,
+/// §19.1.2 VML Reference). Covers a bare `<w:pict>` carrying a
+/// `<v:shape><v:imagedata>` (a non-OLE inline VML image) and a
+/// `<v:textpath>` text watermark, which Word emits in a header.
+#[cfg(test)]
+mod vml_pict_tests {
+    use super::*;
+
+    const VML_NS: &str = concat!(
+        r#" xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main""#,
+        r#" xmlns:v="urn:schemas-microsoft-com:vml""#,
+        r#" xmlns:o="urn:schemas-microsoft-com:office:office""#,
+        r#" xmlns:w10="urn:schemas-microsoft-com:office:word""#,
+        r#" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships""#
+    );
+
+    /// Parse a `<w:document>` fixture and return every DocRun across its
+    /// paragraphs, in document order.
+    fn all_runs(body_xml: &str, media: &HashMap<String, String>) -> Vec<DocRun> {
+        let doc = roxmltree::Document::parse(body_xml).unwrap();
+        let body = doc
+            .root_element()
+            .descendants()
+            .find(|n| n.tag_name().name() == "body")
+            .unwrap();
+        let mut num_map = NumberingMap::default();
+        parse_body_elements(
+            body,
+            &StyleMap::default(),
+            &mut num_map,
+            media,
+            &HashMap::new(),
+            &HashMap::new(),
+            &ThemeColors::default(),
+            &HashMap::new(),
+        )
+        .into_iter()
+        .filter_map(|e| match e {
+            BodyElement::Paragraph(p) => Some(p),
+            _ => None,
+        })
+        .flat_map(|p| p.runs.into_iter())
+        .collect()
+    }
+
+    fn image_runs(body_xml: &str, media: &HashMap<String, String>) -> Vec<ImageRun> {
+        all_runs(body_xml, media)
+            .into_iter()
+            .filter_map(|r| match r {
+                DocRun::Image(img) => Some(img),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn shape_runs(body_xml: &str, media: &HashMap<String, String>) -> Vec<ShapeRun> {
+        all_runs(body_xml, media)
+            .into_iter()
+            .filter_map(|r| match r {
+                DocRun::Shape(s) => Some(*s),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// §19.1.2.11 imagedata — a bare `<w:pict>` (no `<w:object>` wrapper) whose
+    /// `<v:shape>` carries a `<v:imagedata r:id>` is a non-OLE inline VML image.
+    /// It must surface as an inline `ImageRun` sized from the shape's CSS `style`
+    /// (width/height in pt, §19.1.2.19 style), resolved through the media map.
+    #[test]
+    fn bare_pict_imagedata_emits_inline_image() {
+        let body = format!(
+            r##"<w:document{ns}><w:body>
+              <w:p><w:r><w:pict>
+                <v:shape id="s1" type="#_x0000_t75" style="width:120pt;height:90pt">
+                  <v:imagedata r:id="rIdImg" o:title="logo"/>
+                </v:shape>
+              </w:pict></w:r></w:p>
+            </w:body></w:document>"##,
+            ns = VML_NS,
+        );
+        let mut media = HashMap::new();
+        media.insert("rIdImg".to_string(), "word/media/image1.png".to_string());
+
+        let imgs = image_runs(&body, &media);
+        assert_eq!(imgs.len(), 1, "one inline image from the bare pict");
+        assert_eq!(imgs[0].image_path, "word/media/image1.png");
+        assert!(!imgs[0].anchor, "an inline (position-static) VML image");
+        assert!(
+            (imgs[0].width_pt - 120.0).abs() < 1e-6,
+            "w {}",
+            imgs[0].width_pt
+        );
+        assert!(
+            (imgs[0].height_pt - 90.0).abs() < 1e-6,
+            "h {}",
+            imgs[0].height_pt
+        );
+        // It must NOT also produce a text-box ShapeRun (the previous behaviour
+        // treated any pict shape as a panel).
+        assert!(
+            shape_runs(&body, &media).is_empty(),
+            "an imagedata pict is an image, not a shape panel"
+        );
+    }
+
+    /// A bare `<w:pict>` imagedata with a dangling `r:id` (not in the media map)
+    /// emits nothing — the part cannot be located, so it is skipped rather than
+    /// producing a path-less image.
+    #[test]
+    fn bare_pict_imagedata_dangling_rid_emits_nothing() {
+        let body = format!(
+            r##"<w:document{ns}><w:body>
+              <w:p><w:r><w:pict>
+                <v:shape id="s1" type="#_x0000_t75" style="width:120pt;height:90pt">
+                  <v:imagedata r:id="rIdMissing"/>
+                </v:shape>
+              </w:pict></w:r></w:p>
+            </w:body></w:document>"##,
+            ns = VML_NS,
+        );
+        let media = HashMap::new();
+        assert!(image_runs(&body, &media).is_empty());
+        assert!(shape_runs(&body, &media).is_empty());
+    }
+
+    /// A `<v:imagedata>` living inside a `<v:group>` uses the GROUP's coordinate
+    /// system (`coordsize`), not points, for the shape's width/height. Resolving
+    /// that requires the full VML group transform, which is a separate feature —
+    /// so a grouped imagedata is left unresolved here (no mis-sized image) rather
+    /// than treating the group-unit dimensions as points. (sample-1's header
+    /// background is exactly this grouped form.)
+    #[test]
+    fn grouped_pict_imagedata_is_not_mis_sized() {
+        let body = format!(
+            r##"<w:document{ns}><w:body>
+              <w:p><w:r><w:pict>
+                <v:group id="g1" style="position:absolute;width:612pt;height:792pt"
+                         coordsize="77724,100584">
+                  <v:shape id="s1" type="#_x0000_t75" style="width:77724;height:100584">
+                    <v:imagedata r:id="rIdBg" o:title="background"/>
+                  </v:shape>
+                </v:group>
+              </w:pict></w:r></w:p>
+            </w:body></w:document>"##,
+            ns = VML_NS,
+        );
+        let mut media = HashMap::new();
+        media.insert("rIdBg".to_string(), "word/media/image50.png".to_string());
+        // No image run with a 77724pt width (the group-unit value taken as pt).
+        let imgs = image_runs(&body, &media);
+        assert!(
+            imgs.iter().all(|i| i.width_pt < 5000.0),
+            "a grouped imagedata must not be sized from group units as pt: {:?}",
+            imgs.iter().map(|i| i.width_pt).collect::<Vec<_>>()
+        );
     }
 }
 

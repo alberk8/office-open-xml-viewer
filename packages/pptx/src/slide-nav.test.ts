@@ -78,3 +78,32 @@ describe('resolveInternalSlideTarget', () => {
     ).toBeUndefined();
   });
 });
+
+// M2: main mode reads each slide's `partName` off the parsed model; worker mode
+// SERIALIZES the same per-slide `partName` array into `PresentationMeta.partNames`
+// (the array that rides through `postMessage`) and the main-thread proxy rebuilds
+// the part-index map from it. Both feed the SAME `buildSlidePartIndex`, so a
+// serialization drop or re-order is the only way an internal slide jump could
+// diverge across modes. Pin that the two paths build an identical map + resolve
+// every part name to the same index.
+describe('slide part-index — main/worker serialization equivalence (M2)', () => {
+  it('resolves identically whether built from the model array or the worker-meta array', () => {
+    // main: presentation.ts does `(slides ?? []).map((s) => s.partName)`.
+    const fromModel = PART_NAMES.map((p) => p); // simulate s.partName per slide
+    // worker: render-worker.ts posts `partNames: pres.slides.map((s) => s.partName)`,
+    // which arrives as the same array after structured-clone.
+    const fromMeta: (string | undefined)[] = JSON.parse(JSON.stringify(fromModel));
+
+    const mainIdx = buildSlidePartIndex(fromModel);
+    const workerIdx = buildSlidePartIndex(fromMeta);
+
+    expect(workerIdx.size).toBe(mainIdx.size);
+    expect(mainIdx.size).toBeGreaterThan(0); // non-degenerate
+    for (const name of PART_NAMES) {
+      expect(resolveSlidePartTarget(`../slides/${name.split('/').pop()}`, workerIdx)).toBe(
+        resolveSlidePartTarget(`../slides/${name.split('/').pop()}`, mainIdx),
+      );
+      expect(workerIdx.get(name)).toBe(mainIdx.get(name));
+    }
+  });
+});

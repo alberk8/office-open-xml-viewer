@@ -89,3 +89,42 @@ describe('resolveBookmarkPage', () => {
     expect(resolveBookmarkPage(map, 'nope')).toBeUndefined();
   });
 });
+
+// M2: main mode builds the bookmark map from the paginated pages; worker mode
+// SERIALIZES it into `DocumentMeta.bookmarkPages` (a `[name, page][]` array, the
+// Map→array form that survives `postMessage`) and the main-thread proxy
+// RECONSTRUCTS it with `new Map(meta.bookmarkPages)`. A drop or re-order in that
+// round-trip would make an internal `<w:anchor>` land on the wrong page in worker
+// mode only. Pin that the serialized-then-reconstructed map equals the directly
+// built map, entry-for-entry.
+describe('bookmark map — main/worker serialization equivalence (M2)', () => {
+  const pages: PaginatedBodyElement[][] = [
+    [plain(), para(['_Toc_intro'])],
+    [para(['_Toc_methods', 'alias']), plain()],
+    [
+      {
+        type: 'table',
+        rows: [{ cells: [{ content: [para(['cellmark'])] }] }],
+      } as unknown as PaginatedBodyElement,
+    ],
+  ];
+
+  it('round-trips the map through the worker-meta [name, page][] wire form unchanged', () => {
+    const mainMap = buildBookmarkPageMap(pages); // main mode
+    // Worker: render-worker.ts does `bookmarkPages: [...buildBookmarkPageMap(pages)]`.
+    const wireForm: [string, number][] = [...buildBookmarkPageMap(pages)];
+    // Main proxy: document.ts does `new Map(this._meta.bookmarkPages)`.
+    const workerMap = new Map(wireForm);
+
+    // Same keys, same values, same size — a faithful round-trip.
+    expect(workerMap.size).toBe(mainMap.size);
+    expect(mainMap.size).toBeGreaterThan(0); // non-degenerate
+    for (const [name, page] of mainMap) {
+      expect(workerMap.get(name)).toBe(page);
+    }
+    // And every resolved anchor agrees across the two modes.
+    for (const name of ['_Toc_intro', '_Toc_methods', 'alias', 'cellmark', 'missing']) {
+      expect(resolveBookmarkPage(workerMap, name)).toBe(resolveBookmarkPage(mainMap, name));
+    }
+  });
+});

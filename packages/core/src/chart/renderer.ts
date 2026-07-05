@@ -703,8 +703,12 @@ function catLabelsVisible(chart: ChartModel): boolean {
   return chart.catAxisTickLabelPos !== 'none';
 }
 
-/** 90° in 60000ths of a degree — the boundary of the `ST_FixedAngle`
- *  (ECMA-376 §20.1.10.23) text-rotation range `(-90°, 90°)`. */
+/** 90° in 60000ths of a degree. `ST_FixedAngle` (ECMA-376 §20.1.10.23) bounds
+ *  a fixed-range angle to the OPEN interval "greater than -5400000 / less than
+ *  5400000", so ±5400000 itself lies outside the schema type — but Office's
+ *  Format-Axis "Custom angle" control accepts -90°…+90° INCLUSIVE, so the code
+ *  below deliberately uses a closed boundary (`> LIMIT` rejects, `== LIMIT`
+ *  honors) to keep genuine ±90° (vertical) axis labels working. */
 const FIXED_ANGLE_LIMIT_60K = 5_400_000;
 
 /** Category-axis label rotation in RADIANS (canvas convention), from
@@ -714,16 +718,18 @@ const FIXED_ANGLE_LIMIT_60K = 5_400_000;
  *
  *  `bodyPr@rot` is typed `ST_Angle` (a restriction of XML Schema `int`, so any
  *  integer is schema-valid), but a *text* rotation is only meaningful within
- *  the `ST_FixedAngle` (§20.1.10.23) range `(-90°, 90°)` — the band Office's
- *  Format-Axis "Custom angle" control uses. Office writes `rot="-60000000"`
- *  (-1000°, ≈2.8 full turns) as a sentinel for "auto / horizontal" axis text
- *  and renders those labels horizontal; the identical value even appears on the
- *  numeric value axis in sample-1/sample-24, whose labels are indisputably
- *  horizontal in the Word/Excel PDF ground truth. So a rot whose magnitude
- *  exceeds ±90° is outside the valid text-rotation domain and is treated as no
- *  rotation (0°) rather than reduced mod 360 (which would map -1000° → +80°,
- *  near-vertical — wrong per sample-24.pdf). Genuine in-range rotations
- *  (-45° = -2700000, -90° = -5400000) are honored unchanged. */
+ *  the `ST_FixedAngle` (§20.1.10.23) fixed-angle domain — an open interval
+ *  (-90°, 90°) at the schema level, which Office's Format-Axis "Custom angle"
+ *  control widens to -90°…+90° inclusive (we follow the UI's closed range; see
+ *  {@link FIXED_ANGLE_LIMIT_60K}). Office writes `rot="-60000000"` (-1000°,
+ *  ≈2.8 full turns) as a sentinel for "auto / horizontal" axis text and renders
+ *  those labels horizontal; the identical value even appears on the numeric
+ *  value axis in sample-1/sample-24, whose labels are indisputably horizontal
+ *  in the Word/Excel PDF ground truth. So a rot whose magnitude exceeds ±90°
+ *  is outside the valid text-rotation domain and is treated as no rotation
+ *  (0°) rather than reduced mod 360 (which would map -1000° → +80°,
+ *  near-vertical — wrong per sample-24.pdf). Genuine rotations within the
+ *  closed range (-45° = -2700000, -90° = -5400000) are honored unchanged. */
 function catLabelRotationRad(chart: ChartModel): number {
   const rot = chart.catAxisLabelRotation;
   if (rot == null || rot === 0) return 0;

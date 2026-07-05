@@ -1414,20 +1414,18 @@ function drawPageFootnotes(
   const noteById = indexNotes(doc.footnotes);
 
   // Collect referenced footnote ids in document (reading) order, de-duplicated.
+  // Descends into table cells / nested tables (§17.4.7) so a footnote referenced
+  // only from inside a table is still drawn at the page bottom (issue #840).
   const ids: string[] = [];
   const seen = new Set<string>();
-  const scan = (els: PaginatedBodyElement[]) => {
-    for (const el of els) {
-      if (el.type !== 'paragraph') continue;
-      for (const id of footnoteRefsInRuns((el as unknown as DocParagraph).runs)) {
-        if (!seen.has(id) && noteById.has(id)) {
-          seen.add(id);
-          ids.push(id);
-        }
+  for (const el of elements) {
+    for (const id of footnoteRefsInElement(el)) {
+      if (!seen.has(id) && noteById.has(id)) {
+        seen.add(id);
+        ids.push(id);
       }
     }
-  };
-  scan(elements);
+  }
   if (ids.length === 0) return;
 
   // Total block height (pt). The last note's trailing spaceAfter overflows the
@@ -1581,6 +1579,30 @@ function footnoteRefsInRuns(runs: DocRun[]): string[] {
     if (nr && nr.kind === 'footnote' && nr.id) ids.push(nr.id);
   }
   return ids;
+}
+
+/** Collect, in document (reading) order, every footnote id referenced anywhere
+ *  in a body element — including inside table cells and nested tables (ECMA-376
+ *  §17.4.7). §17.11.10 anchors a footnote to the bottom of the page holding its
+ *  reference no matter WHERE in the story the reference sits, so both the
+ *  reserve pass and the draw scan must descend into tables (a reference that
+ *  lives only in a cell would otherwise reserve no space and never be drawn —
+ *  issue #840). Paragraphs contribute their own runs' refs; a table contributes
+ *  every cell's content recursively. */
+function footnoteRefsInElement(el: BodyElement | CellElement): string[] {
+  if (el.type === 'paragraph') {
+    return footnoteRefsInRuns(el.runs);
+  }
+  if (el.type === 'table') {
+    const ids: string[] = [];
+    for (const r of el.rows) {
+      for (const c of r.cells) {
+        for (const ce of c.content) ids.push(...footnoteRefsInElement(ce));
+      }
+    }
+    return ids;
+  }
+  return [];
 }
 
 /** Measure one footnote's content block (pt). `total` is every paragraph's full
@@ -2071,6 +2093,20 @@ export function computePages(
     const r = reserveAt(pages.length - 1);
     return fullContentH() - (footnoteReservePt[pages.length - 1] ?? 0) - r.bottom - r.top;
   };
+  // ECMA-376 §17.11 — sum the reserve height (pt) for a set of newly-referenced
+  // notes, charging the separator region only to the first note on a page (when
+  // that page has no reserve yet). Shared by the paragraph and table placement
+  // paths so a footnote referenced from either reserves body space consistently.
+  const sumReserve = (ids: string[]): number => {
+    let sum = 0;
+    for (let k = 0; k < ids.length; k++) {
+      const note = noteById.get(ids[k]);
+      if (!note) continue;
+      const firstOnPage = (footnoteReservePt[pages.length - 1] ?? 0) === 0 && k === 0;
+      sum += footnoteReserveHeightPt(note, measureState, colW(), firstOnPage);
+    }
+    return sum;
+  };
   const startPageBookkeeping = () => {
     footnoteReservePt[pages.length - 1] = 0;
     pageNoteIds = new Set<string>();
@@ -2552,7 +2588,14 @@ export function computePages(
       const paragraphAnchorY = measureState.y;
       registerAnchorFloats(para, measureState, paragraphAnchorY);
 
-      const h = estimateParagraphHeight(measureState, para, colW(), suppressBefore, colX());
+      // §17.3.1.7 border-box merge: the bottom-border extent is only reserved when
+      // this paragraph's bottom edge is actually drawn. It is suppressed when the
+      // NEXT in-flow element is a paragraph that shares this border box (a
+      // sectionBreak / table / any non-paragraph breaks the run → not shared).
+      const nextEl = body[i + 1];
+      const nextShares = nextEl?.type === 'paragraph'
+        && parasShareBorderBox(para, nextEl);
+      const h = estimateParagraphHeight(measureState, para, colW(), suppressBefore, colX(), nextShares);
 
       // ECMA-376 §17.11: a footnote shares the page with its reference, so the
       // body must stop short of the footnote area. Measure the footnotes this
@@ -2561,19 +2604,6 @@ export function computePages(
       // don't fit, both move to the next page together.
       let newRefIds: string[] = [];
       let addReservePt = 0;
-      // Sum the reserve for a set of newly-referenced notes, charging the
-      // separator region only to the first note on a page (when that page has
-      // no reserve yet).
-      const sumReserve = (ids: string[]): number => {
-        let sum = 0;
-        for (let k = 0; k < ids.length; k++) {
-          const note = noteById.get(ids[k]);
-          if (!note) continue;
-          const firstOnPage = (footnoteReservePt[pages.length - 1] ?? 0) === 0 && k === 0;
-          sum += footnoteReserveHeightPt(note, measureState, colW(), firstOnPage);
-        }
-        return sum;
-      };
       if (haveFootnotes) {
         const seen = new Set<string>();
         for (const id of footnoteRefsInRuns(para.runs)) {
@@ -2810,7 +2840,12 @@ export function computePages(
             const layout = computeTableLayout(tbl, cW, measureState);
             const tableH = layout.rowHeights.reduce((s, x) => s + x, 0);
             const box = computeFloatTableBox(tp, measureState, measureState.y, layout.tableW, tableH);
-            return { box, layout, contentWPt: cW / measureState.scale };
+            // RAW (pre-clamp) box: for a page/margin anchor computeFloatTableBox
+            // shifts a too-tall box UP to the container bottom, which would hide the
+            // overflow; skipVClamp keeps its absolute tblpY top so the split below
+            // can find where the table crosses the text region (sample-28 p.15).
+            const rawBox = computeFloatTableBox(tp, measureState, measureState.y, layout.tableW, tableH, true);
+            return { box, rawBox, layout, contentWPt: cW / measureState.scale };
           });
         const first = measureFloat();
         // Distance from the table's in-flow top (measureState.y == paraTop) down
@@ -2825,18 +2860,47 @@ export function computePages(
         const tableOverflowsHere =
           isTextAnchored && tableBottomOff > 0 && y + tableBottomOff > effContentH();
 
-        if (isTextAnchored && tableOverflowsHere) {
-          // ── Row-split across pages (Word ground truth, issue #674) ──
-          // Greedy-fit the rows from the anchor down to the body bottom, spilling
-          // the remainder onto continuation pages. Registers one wrap FloatRect
-          // per slice and leaves the body cursor at the FINAL continuation page's
-          // body top so the trailing anchor paragraph flows from there.
+        // ── Page/margin-anchored overflow (Word ground truth, sample-28 p.15) ──
+        // §17.4.57 defines a page/margin anchor's tblpY as an ABSOLUTE in-page
+        // position; the geometry (clampAbsBoxIntoContainer) shifts a box UP when its
+        // bottom would fall past the container, keeping it on one page (sample-18 Sec
+        // B, a table SHORTER than the text region). But when the table is TALLER than
+        // the body text region it cannot fit even clamped to the top — Word then
+        // ROW-SPLITS it exactly like a block/text-anchored table (measured from
+        // sample-28's competitor-info form: the Word PDF divides it across pages
+        // 15→16, first slice from its absolute tblpY down to the page bottom, the
+        // remainder continuing from the next page's body top). We detect that by the
+        // table height exceeding the full text region (bodyTop→bodyBottom), not the
+        // physical page: a floating table's rows live in the text area, so a table
+        // taller than it must paginate. The first slice sits at the RAW absolute
+        // tblpY (rawBox, un-clamped); continuations flow from the body top (handled
+        // as text-anchored slices by splitFloatTableAcrossPages).
+        const rawTopRel = first.rawBox.y - bodyTopPt();
+        const pageAnchoredOverflows =
+          !isTextAnchored && first.rawBox.h > fullContentH();
+
+        if ((isTextAnchored && tableOverflowsHere) || pageAnchoredOverflows) {
+          // ── Row-split across pages (Word ground truth, issue #674 + sample-28) ──
+          // Greedy-fit the rows from the slice-1 top down to the body bottom, spilling
+          // the remainder onto continuation pages. Registers one wrap FloatRect per
+          // slice and leaves the body cursor at the FINAL continuation page's body top
+          // so the trailing anchor paragraph flows from there.
+          //   • vertAnchor="text": slice 1 sits at the in-flow anchor + tblpY
+          //     (first.box.y − measureState.y).
+          //   • vertAnchor="page"/"margin" (sample-28 p.15): slice 1 sits at the RAW
+          //     absolute tblpY (rawTopRel, content-relative), un-clamped, so its rows
+          //     start at the same in-page position Word shows before the split point.
+          // Continuation slices are body-top-anchored in BOTH cases (forced to
+          // vertAnchor="text"/tblpY=0 inside splitFloatTableAcrossPages).
+          const slice1TopOffset = isTextAnchored
+            ? first.box.y - measureState.y
+            : rawTopRel - y;
           const endY = splitFloatTableAcrossPages(
             tbl,
             tp,
             first.layout.colWidths, // scale-1 (px==pt) column grid, constant across slices
             first.layout.rowHeights,
-            first.box.y - measureState.y, // tblpY offset (pt) of slice 1 from anchor
+            slice1TopOffset,
             first.contentWPt,
             () => y,
             () => colTopY,
@@ -2857,8 +2921,13 @@ export function computePages(
                 const sliceTp = (sliceEl as unknown as DocTable).tblpPr as TblpPr;
                 const tableW = (sp.tableColWidthsPt ?? []).reduce((s, w) => s + w, 0) * measureState.scale;
                 const sliceH = (sp.tableRowHeightsPt ?? []).reduce((s, h) => s + h, 0) * measureState.scale;
+                // A still page/margin-anchored slice (slice 1 of a page-anchored
+                // split) resolves un-clamped so it lands at its raw tblpY; a
+                // text-anchored slice (every continuation, and text-anchored slice 1)
+                // is never clamped, so skipVClamp is a no-op there.
+                const skipVClamp = sliceTp.vertAnchor === 'page' || sliceTp.vertAnchor === 'margin';
                 const sliceBox = computeFloatTableBox(
-                  sliceTp, measureState, measureState.y, tableW, sliceH,
+                  sliceTp, measureState, measureState.y, tableW, sliceH, skipVClamp,
                 );
                 const side = floatTableWrapSide(sliceBox, measureState);
                 registerTableFloat(sliceBox, sliceTp, measureState, side, tbl.overlap !== 'never');
@@ -2877,7 +2946,8 @@ export function computePages(
           continue;
         }
 
-        // Fits (or page/margin-anchored): single element, box registered in place.
+        // Fits (or page/margin-anchored, shorter than the text region): single
+        // element, box registered in place.
         // Register the wrap float against the column band so the box x / wrap side
         // match the column the table sits in. (page/margin: the box may be clamped
         // up by computeFloatTableBox; the float band follows the clamped box.)
@@ -2903,11 +2973,39 @@ export function computePages(
       const { colWidthsPt: tblColWidthsPt, rowHeightsPt: rowHs } =
         computeTablePtLayout(measureState, tbl, tblContentWPt);
       const h = rowHs.reduce((s, x) => s + x, 0);
-      // Footnote references inside table cells are not folded into the reserve
-      // (the per-page reserve is driven by body paragraphs); they still draw at
-      // page bottom via the renderer's page scan. effContentH() respects any
-      // reserve already accumulated on this page.
-      const tableContentH = effContentH();
+      // ECMA-376 §17.11.10 — a footnote referenced from inside a table cell is
+      // drawn at the bottom of the page holding the table, so the body area must
+      // shrink by the note height just as it does for a body-paragraph reference
+      // (issue #840). Collect the table's not-yet-reserved footnote ids and fold
+      // their height into BOTH the fit decision and the committed page reserve.
+      // (A row-split table reserves on the page where it ends — the same
+      // approximation a split footnote-bearing paragraph uses above; §17.11.10's
+      // per-row placement across a split is a documented residual.)
+      let tblNewRefIds: string[] = [];
+      let tblReservePt = 0;
+      if (haveFootnotes) {
+        const seen = new Set<string>();
+        for (const id of footnoteRefsInElement(el)) {
+          if (pageNoteIds.has(id) || seen.has(id) || !noteById.has(id)) continue;
+          seen.add(id);
+          tblNewRefIds.push(id);
+        }
+        tblReservePt = sumReserve(tblNewRefIds);
+      }
+      // effContentH() respects any reserve already accumulated on this page; the
+      // table's own footnote reserve is subtracted on top so the note clears the
+      // table content.
+      const tableContentH = effContentH() - tblReservePt;
+      const commitTableReserve = () => {
+        if (!haveFootnotes || tblNewRefIds.length === 0) return;
+        // Re-filter against the landing page (a split may have advanced pages, so
+        // the separator region is charged only if that page had no note yet).
+        tblNewRefIds = tblNewRefIds.filter((id) => !pageNoteIds.has(id));
+        const addPt = sumReserve(tblNewRefIds);
+        const idx = pages.length - 1;
+        footnoteReservePt[idx] = (footnoteReservePt[idx] ?? 0) + addPt;
+        for (const id of tblNewRefIds) pageNoteIds.add(id);
+      };
       if (h > tableContentH) {
         // Taller than a full column: split row-by-row so the overflow continues
         // into the next column / page instead of being clipped (ECMA-376 table
@@ -2933,6 +3031,7 @@ export function computePages(
         );
         y = endY;
         measureState.y = bodyTopPt() + endY;
+        commitTableReserve();
       } else {
         // §17.6.4 column balancing (wantsBalanceBreak) OR a table that doesn't fit
         // the rest of this column ⇒ advance to the next column / page.
@@ -2942,6 +3041,7 @@ export function computePages(
         pushTagged(el as PaginatedBodyElement);
         y += h;
         measureState.y += h;
+        commitTableReserve();
       }
       prevPara = null;
     }
@@ -3205,7 +3305,15 @@ function buildMeasureState(
     ctx,
     scale: 1,
     dpr: 1,
-    contentX: 0,
+    // Mirror the PAINT pass seed (renderDocumentToCanvas: `contentX =
+    // sec.marginLeft × scale`; scale is 1 here). contentX/contentW carry the
+    // current text column, and §20.4.3.4 `relativeFrom="column"` anchors
+    // resolve against them (xContainer). Seeding 0 made the MEASURE pass place
+    // body-level column anchors a full marginLeft LEFT of where the paint pass
+    // draws them, so floats entered/left the wrap band only during pagination
+    // and paragraphs split differently from the painted layout (PR #844 review
+    // F1; pinned by paginate-column-anchor.test.ts).
+    contentX: section.marginLeft,
     contentW: section.pageWidth - section.marginLeft - section.marginRight,
     y: 0,
     pageH: section.pageHeight,
@@ -3247,6 +3355,9 @@ function estimateParagraphHeight(
   contentWPt: number,
   suppressSpaceBefore = false,
   paraXPt = 0,
+  /** §17.3.1.7: the next in-flow paragraph shares this paragraph's border box, so
+   *  its bottom edge is suppressed (the box continues) and reserves no extent. */
+  nextSharesBottomBorder = false,
 ): number {
   // ECMA-376 §17.3.1.12 / Part 4 §14.11.2 — the transitional left/right indent
   // attributes are logical start/end, so they swap physical sides in a bidi
@@ -3335,7 +3446,14 @@ function estimateParagraphHeight(
       }
     }
   }
-  cursor += para.spaceAfter;
+  // §17.3.1.7: a BOTTOM border extends `space + width/2` below the text box; the
+  // next paragraph must clear it (bottomBorderExtentPt). spaceAfter (trailing
+  // whitespace) already pushes content down, so reserve only the amount by which
+  // the border pokes PAST spaceAfter — MAX, not SUM — matching Word (which does not
+  // stack the border extent on top of a larger spaceAfter). Suppressed when a
+  // same-border paragraph follows (the box continues; no bottom edge is drawn).
+  const bottomExtent = nextSharesBottomBorder ? 0 : bottomBorderExtentPt(para.borders);
+  cursor += Math.max(para.spaceAfter, bottomExtent);
   return cursor - startY;
 }
 
@@ -3783,6 +3901,19 @@ export function resolveColumnWidths(table: DocTable, contentWPt: number, state: 
 
   const grid = table.colWidths;
 
+  // Overflow cap for the fit passes below. A BLOCK table is confined to its text
+  // column band (`contentWPt`). A FLOATING table (§17.4.57 `<w:tblpPr>`) is
+  // positioned absolutely, out of flow — Word keeps its declared `<w:tblW>`/
+  // `<w:tblGrid>` width even past the column band, letting the box extend into
+  // the page margins (sample-28's page-anchored forms: a fixed grid of 523.75pt
+  // and autofit-preferred grids of 522pt on a 451.35pt band all render at full
+  // grid width, centered across the margins — Word-PDF measured). The physical
+  // page is the only hard constraint, so a float's cap is the page width. The
+  // preferred-width BASES are unchanged (pct still resolves against the column
+  // band, §17.18.90); only the overflow clamp is relaxed. Same principle as the
+  // negative-`tblInd` budget widening in renderTable (§17.4.50).
+  const fitCapPt = table.tblpPr ? Math.max(contentWPt, state.pageWidth) : contentWPt;
+
   // Per-column minimum content width (pt). Single-column cells set a hard floor;
   // a gridSpan cell's min is distributed across its columns in proportion to the
   // tblGrid so a wide spanning cell does not over-inflate any one column.
@@ -3820,13 +3951,13 @@ export function resolveColumnWidths(table: DocTable, contentWPt: number, state: 
   // preferred width keeps proportionally more, matching Word's PDF layout.
   const fitToContent = (widths: number[]): number[] => {
     const total = widths.reduce((s, w) => s + w, 0);
-    if (total <= contentWPt || total <= 0) return widths;
+    if (total <= fitCapPt || total <= 0) return widths;
     const minTotal = minW.reduce((s, w) => s + w, 0);
-    if (minTotal >= contentWPt) {
+    if (minTotal >= fitCapPt) {
       // Even the minimums overflow — scale the minimums so the table still
       // fits (content clips, as Word does when forced narrower than its words).
-      const s = contentWPt / minTotal;
-      return minTotal > 0 ? minW.map((w) => w * s) : widths.map(() => contentWPt / n);
+      const s = fitCapPt / minTotal;
+      return minTotal > 0 ? minW.map((w) => w * s) : widths.map(() => fitCapPt / n);
     }
     // Iteratively pin columns to their min and redistribute the rest by
     // preferred-width proportion. Converges in ≤ n passes (each pass pins at
@@ -3835,7 +3966,7 @@ export function resolveColumnWidths(table: DocTable, contentWPt: number, state: 
     const out = widths.slice();
     const pinned = new Array(n).fill(false);
     for (let pass = 0; pass < n; pass++) {
-      let free = contentWPt;
+      let free = fitCapPt;
       let weightSum = 0;
       for (let c = 0; c < n; c++) {
         if (pinned[c]) free -= out[c];
@@ -3861,12 +3992,13 @@ export function resolveColumnWidths(table: DocTable, contentWPt: number, state: 
 
   // Fixed layout: tblGrid is authoritative (ECMA-376 §17.4.52) and content is
   // clipped, never grown — so scale proportionally to fit, ignoring min content
-  // widths (which only govern the autofit branch below).
+  // widths (which only govern the autofit branch below). The cap is the column
+  // band for a block table, the page width for a floating one (see fitCapPt).
   if (table.layout === 'fixed') {
     const g = grid.slice();
     const total = g.reduce((s, w) => s + w, 0);
-    if (total > contentWPt && total > 0) {
-      const s = contentWPt / total;
+    if (total > fitCapPt && total > 0) {
+      const s = fitCapPt / total;
       return g.map((w) => w * s);
     }
     return g;
@@ -4219,13 +4351,23 @@ export function splitFloatTableAcrossPages(
     }
 
     // Build the slice element: a subset of rows, its own tblpPr (slice 1 keeps the
-    // original in-flow anchor; continuations anchor at the body top via tblpY=0).
+    // original in-flow anchor; continuations anchor at the body top). A continuation
+    // ALWAYS starts at the fresh page's body top, so it is forced to vertAnchor="text"
+    // with tblpY=0: computeFloatTableBox then places it at paraTop (= measureState.y,
+    // which advancePage reset to the body top). For a text-anchored source this is a
+    // no-op ({ ...tp, tblpY: 0 } already vertAnchor="text"); for a page/margin source
+    // (sample-28 p.15) it is what moves the remainder to the body top instead of the
+    // absolute page/margin origin. Only the VERTICAL anchor is overridden — horzAnchor
+    // / tblpXSpec are kept so the horizontal placement (e.g. centered on the margin)
+    // is preserved across slices.
     // §17.4.78 tblHeader repeats are DELIBERATELY not applied: no fixture shows Word
     // repeating a floating table's header rows on continuation bands (unlike a block
     // table), and sample-18/21 have no header rows — so the safe, observed behaviour
     // is to carry each row exactly once (UNOBSERVED for headers; revisit with a
     // header fixture if one surfaces).
-    const sliceTp: TblpPr = firstSlice ? tp : { ...tp, tblpY: 0 };
+    const sliceTp: TblpPr = firstSlice
+      ? tp
+      : { ...tp, vertAnchor: 'text', tblpY: 0, tblpYSpec: undefined };
     const sliceEl = {
       ...table,
       type: 'table',
@@ -4777,9 +4919,14 @@ function renderEmptyMarkParagraph(
     drawParaBorders(ctx, contentX + indLeft, markRectTop, paraW, emptyH, para.borders, scale, state.dpr, borderMerge);
   }
   // Only the slice covering the FINAL line emits spaceAfter. With no inline
-  // lines there is a single slice, so this is the whole paragraph.
+  // lines there is a single slice, so this is the whole paragraph. §17.3.1.7: a
+  // drawn bottom border extends `space + width/2` below the mark box; reserve the
+  // amount it pokes past spaceAfter (MAX) so the next paragraph clears it — mirrors
+  // estimateParagraphHeight, keeping paint and pagination in lockstep.
   const isFinalSlice = !lineSlice || lineSlice.end >= totalLines;
-  if (isFinalSlice) state.y += para.spaceAfter * scale;
+  if (isFinalSlice) {
+    state.y += Math.max(para.spaceAfter, bottomBorderExtentPt(para.borders, borderMerge)) * scale;
+  }
   // wrapNone anchor images anchor relative to the paragraph (ayFromPara); when
   // the mark line flowed below a float band the paragraph (and its wrapNone
   // image) drops by the same amount, so shift the anchor base by flowShift while
@@ -5437,9 +5584,14 @@ function renderParagraph(
   }
 
   // spaceAfter is paragraph-level; only emit it on the slice that covers
-  // the FINAL line of the paragraph (or when no slice is set at all).
+  // the FINAL line of the paragraph (or when no slice is set at all). §17.3.1.7: a
+  // drawn bottom border extends `space + width/2` below the text box; reserve the
+  // amount it pokes past spaceAfter (MAX) so the next paragraph clears the rule —
+  // mirrors estimateParagraphHeight / renderEmptyMarkParagraph.
   const isFinalSlice = !lineSlice || lineSlice.end >= lines.length;
-  if (isFinalSlice) state.y += para.spaceAfter * scale;
+  if (isFinalSlice) {
+    state.y += Math.max(para.spaceAfter, bottomBorderExtentPt(para.borders, borderMerge)) * scale;
+  }
 
   // Anchor images are absolutely positioned — draw after inline flow.
   // Skip this for continuation slices: anchor positioning is paragraph-relative
@@ -8116,10 +8268,11 @@ function measureCellContentHeightPx(
   // The mark itself is still painted by renderCellContent; being empty it adds no
   // visible content, so excluding it from sizing cannot hide anything.
   const measured = trimTrailingStructuralMarker(cell.content);
-  // measureCellElementHeight always includes paragraph spaceBefore+spaceAfter;
-  // sumCellContentHeight folds in contextualSuppressed (§17.3.1.33) and the
-  // prevSpaceAfter/spaceBefore overlap collapse to match the paint pass's
-  // renderCellContent. Spacing is converted from pt to px with `scale`.
+  // measureCellElementHeight always includes paragraph spaceBefore plus
+  // max(spaceAfter, bottom-border extent) — the same trailing advance the paint
+  // pass emits (§17.3.1.7); sumCellContentHeight folds in contextualSuppressed
+  // (§17.3.1.33) and the prevSpaceAfter/spaceBefore overlap collapse to match the
+  // paint pass's renderCellContent. Spacing is converted from pt to px with `scale`.
   return (cm.top + cm.bottom) * scale + sumCellContentHeight(
     measured,
     (ce) => measureCellElementHeight(state, ce, contentW, scale),
@@ -8695,8 +8848,13 @@ function measureCellElementHeight(
 ): number {
   if (ce.type === 'paragraph') {
     const para = ce as unknown as DocParagraph;
+    // §17.3.1.7: the paint pass (renderCellContent → renderParagraph) advances
+    // `max(spaceAfter, bottomBorderExtentPt)` below the text box so following
+    // content clears a drawn bottom border. Mirror it here, or a bordered cell
+    // paragraph paints taller than the cell measures (B2: single measurer).
+    // renderCellContent never passes a borderMerge, so no suppression term.
     return measureParaHeight(state, para, innerWPx, scale)
-      + (para.spaceBefore + para.spaceAfter) * scale;
+      + (para.spaceBefore + Math.max(para.spaceAfter, bottomBorderExtentPt(para.borders))) * scale;
   }
   // Nested table — estimateTableHeight works in pt; convert to px.
   const tbl = ce as unknown as DocTable;
@@ -9079,6 +9237,32 @@ function drawParaBorders(
   }
   drawEdge(borders.left,   x - sp(borders.left), y,        x - sp(borders.left), y + h);
   drawEdge(borders.right,  x + w + sp(borders.right), y,   x + w + sp(borders.right), y + h);
+}
+
+/** ECMA-376 §17.3.1.7 — the vertical extent (in scale-1 points) a paragraph's
+ *  BOTTOM border adds BELOW the text box, so following content clears it.
+ *
+ *  §17.3.1.7 places the bottom border `w:space` points below the text ("the space
+ *  after the bottom of the text … before this border is drawn"), and §17.3.4 gives
+ *  the border its own width (`w:sz`, eighths of a point). {@link drawParaBorders}
+ *  strokes the line CENTERED on `textBottom + space`, so its outer (bottom) edge is
+ *  at `textBottom + space + width/2`. Word reserves that whole extent in the flow —
+ *  a bottom-bordered paragraph pushes the next paragraph BELOW the border rather
+ *  than letting the following line box overlap it (the spec is silent on the flow
+ *  reservation; this is Word's observed layout, verified against sample-14's
+ *  reference-list rule, whose `space=1 sz=12` rule sat ~1.75 pt too high without it).
+ *
+ *  Returns 0 when there is no visible bottom edge, or when a same-border paragraph
+ *  follows (the bottom edge is suppressed by the §17.3.1.7 merge — the box
+ *  continues into the next paragraph, so nothing is drawn here to clear). */
+function bottomBorderExtentPt(
+  borders: ParagraphBorders | null | undefined,
+  merge?: ParaBorderMerge,
+): number {
+  if (!borders || merge?.suppressBottom) return 0;
+  const b = borders.bottom;
+  if (!b || b.style === 'none') return 0;
+  return (b.space ?? 0) + (b.width ?? 0) / 2;
 }
 
 // ===== Utilities =====

@@ -154,7 +154,7 @@ describe('splitTableAcrossPages — table stamp (B2 table stage 1b)', () => {
     // then 50, then 60 — one row per later page (each > 65-startY residual).
     splitTableAcrossPages(
       t, rowHs, 0, 65, pages, newPage,
-      undefined, undefined, undefined, undefined, undefined, undefined,
+      undefined, undefined, undefined, undefined, undefined, undefined, undefined,
       { colWidthsPt, contentWPt: 500 },
     );
 
@@ -187,7 +187,7 @@ describe('splitTableAcrossPages — table stamp (B2 table stage 1b)', () => {
     // header(15) + as many body as fit in 60-15=45 ⇒ 2 body (40).
     splitTableAcrossPages(
       t, rowHs, 0, 60, pages, newPage,
-      undefined, undefined, undefined, undefined, undefined, undefined,
+      undefined, undefined, undefined, undefined, undefined, undefined, undefined,
       { colWidthsPt: [200, 300], contentWPt: 500 },
     );
     const slices = pages.map((p) => p[0]).filter(Boolean);

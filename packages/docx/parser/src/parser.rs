@@ -3283,23 +3283,46 @@ fn parse_run_inner(
                 }
             }
             "pict" => {
-                // Legacy VML drawing (ECMA-376 Part 4 §14.1): <w:pict> wraps a
-                // <v:shape>/<v:rect>/<v:roundrect> with optional <v:textbox>.
-                // Word still emits these for simple text boxes. We surface the
-                // shape's fill/stroke/size and its txbxContent as a ShapeRun so
-                // the existing shape renderer draws the panel + RTL body text.
-                if let Some(shp) = parse_vml_pict(style_map, child, theme, media_map) {
+                // Legacy VML drawing (ECMA-376 Part 4 §19.1.2): a `<w:pict>`
+                // wraps a `<v:shape>`/`<v:rect>`/`<v:roundrect>` carrying one of
+                // several payloads. Dispatch by payload:
+                //   1. `<v:imagedata r:id>` (§19.1.2.11) — a non-OLE inline VML
+                //      picture. Surface it as an inline `ImageRun` through the
+                //      ordinary image pipeline.
+                //   2. `<v:textbox><w:txbxContent>` or a filled/stroked panel —
+                //      surface the shape's fill/stroke/size and its body text as
+                //      a `ShapeRun` (the existing text-box path).
+                // The imagedata form is tried first so a picture pict is not
+                // mistaken for an (empty) text-box panel.
+                if let Some(img) = parse_vml_pict_image(child, media_map) {
+                    runs.push(DocRun::Image(img));
+                } else if let Some(shp) = parse_vml_pict(style_map, child, theme, media_map) {
                     runs.push(DocRun::Shape(Box::new(shp)));
                 }
             }
             "object" => {
-                // Embedded OLE object (§17.3.3.19 CT_Object). We can't run the
-                // embedded application, but Word bakes a preview image into a
-                // legacy VML `<v:shape><v:imagedata r:id>` for exactly this case.
-                // Surface that preview through the ordinary inline-image pipeline
-                // (the preview is usually EMF/WMF, which core already rasterizes)
-                // instead of silently dropping the object.
-                if let Some(img) = parse_object_ole_image(child, media_map) {
+                // Embedded OLE object (§17.3.3.19 CT_Object). The schema is
+                // `sequence(drawing?, choice(control|objectLink|objectEmbed|
+                // movie)?)`: the OPTIONAL first child is a modern `<w:drawing>`
+                // carrying the object's DrawingML static representation, and the
+                // choice names the actual embedding. Precedence:
+                //   1. If a `<w:drawing>` child is present, it IS the on-page
+                //      picture — delegate to the DrawingML picture path
+                //      (§17.3.3.9). Word emits this in its back-compat output
+                //      alongside a legacy VML fallback, so taking the drawing
+                //      first also prevents a double-draw.
+                //   2. Otherwise fall back to the legacy VML preview Word bakes
+                //      into a `<v:shape><v:imagedata r:id>` (usually EMF/WMF,
+                //      which core rasterizes), surfaced through the inline-image
+                //      pipeline instead of being silently dropped.
+                let drawing = child
+                    .children()
+                    .find(|n| n.is_element() && n.tag_name().name() == "drawing");
+                if let Some(drawing) = drawing {
+                    for r in parse_inline_drawing(style_map, drawing, media_map, chart_map, theme) {
+                        runs.push(r);
+                    }
+                } else if let Some(img) = parse_object_ole_image(child, media_map) {
                     runs.push(DocRun::Image(img));
                 }
             }
@@ -5139,58 +5162,54 @@ fn extract_simple_paragraph_text(
 /// below the preceding content.
 ///
 /// Note: a bare `<w:pict>` carrying a `<v:imagedata>` (a non-OLE inline VML
-/// image, not a text box) is not resolved here — that remains an existing gap.
-/// The OLE-object case (`<w:object>` with a VML preview) is handled separately;
-/// see `parse_object_ole_image`.
+/// picture) is resolved by `parse_vml_pict_image` BEFORE this function runs, so
+/// an imagedata shape never reaches here — this path only builds fill/stroke/
+/// text-box panels. The OLE-object case (`<w:object>` with a VML preview) is
+/// handled separately; see `parse_object_ole_image`.
 fn parse_vml_pict(
     style_map: &StyleMap,
     pict: roxmltree::Node,
     theme: &ThemeColors,
     media_map: &HashMap<String, String>,
 ) -> Option<ShapeRun> {
-    // v:shape / v:rect / v:roundrect — any VML shape element with geometry.
+    // v:shape / v:rect / v:roundrect — any VML shape element with geometry. A
+    // shape whose payload is a `<v:imagedata>` is a PICTURE, not a text/fill
+    // panel (it is drawn by parse_vml_pict_image, or intentionally skipped when
+    // its image can't be resolved); such a shape must not be turned into an
+    // empty rectangle here, so it is excluded from the candidate set.
     let shape = pict.descendants().find(|n| {
-        n.is_element() && matches!(n.tag_name().name(), "shape" | "rect" | "roundrect" | "oval")
+        n.is_element()
+            && matches!(n.tag_name().name(), "shape" | "rect" | "roundrect" | "oval")
+            && !n
+                .children()
+                .any(|c| c.is_element() && c.tag_name().name() == "imagedata")
     })?;
 
     // CSS-like `style`: "position:relative;width:300pt;height:60pt;…"
     let style = shape.attribute("style").unwrap_or("");
-    let css_pt = |prop: &str| -> Option<f64> {
-        for decl in style.split(';') {
-            let mut kv = decl.splitn(2, ':');
-            let k = kv.next()?.trim();
-            let v = kv.next()?.trim();
-            if k.eq_ignore_ascii_case(prop) {
-                // strip a trailing "pt" unit; VML lengths default to pt here.
-                let num = v.trim_end_matches("pt").trim();
-                return num.parse::<f64>().ok();
-            }
-        }
-        None
-    };
-    let width_pt = css_pt("width").unwrap_or(0.0);
-    let height_pt = css_pt("height").unwrap_or(0.0);
+    let width_pt = vml_css_length_pt(style, "width").unwrap_or(0.0);
+    let height_pt = vml_css_length_pt(style, "height").unwrap_or(0.0);
     if width_pt <= 0.0 || height_pt <= 0.0 {
         return None;
     }
 
-    // VML colors: `fillcolor` / `strokecolor` are "#rrggbb" (or named); we keep
-    // the 6-hex form the renderer expects (no leading '#').
-    let hex6 = |c: &str| -> Option<String> {
-        let s = c.trim().trim_start_matches('#');
-        if s.len() == 6 && s.chars().all(|ch| ch.is_ascii_hexdigit()) {
-            Some(s.to_ascii_lowercase())
-        } else {
-            None
-        }
-    };
+    // VML colors: `fillcolor` / `strokecolor` are "#rrggbb" or a named color; we
+    // keep the 6-hex form the renderer expects (no leading '#').
     let fill = shape
         .attribute("fillcolor")
-        .and_then(hex6)
+        .and_then(vml_color_hex6)
         .map(|color| ShapeFill::Solid { color });
-    let stroke = shape.attribute("strokecolor").and_then(hex6);
-    // VML default stroke weight is 0.75pt when a stroke color is present and no
-    // explicit weight is given (Part 4 §14.1.2.21 strokeweight default).
+    // `stroked="f"` (or "false") disables the stroke regardless of strokecolor
+    // (§19.1.2 shape stroked attribute). Otherwise a strokecolor implies a
+    // stroke; VML's default weight is 0.75pt (Part 4 §19.1.2.21 strokeweight).
+    let stroked_off = shape
+        .attribute("stroked")
+        .is_some_and(|v| matches!(v.trim(), "f" | "false" | "0"));
+    let stroke = if stroked_off {
+        None
+    } else {
+        shape.attribute("strokecolor").and_then(vml_color_hex6)
+    };
     let stroke_width = if stroke.is_some() {
         shape
             .descendants()
@@ -5207,17 +5226,72 @@ fn parse_vml_pict(
         0.0
     };
 
-    // Body text from <v:textbox><w:txbxContent>.
-    let text_blocks: Vec<ShapeText> = shape
-        .descendants()
-        .find(|n| n.is_element() && n.tag_name().name() == "txbxContent")
-        .map(|content| {
-            children_w_flat(content, "p")
-                .into_iter()
-                .filter_map(|p| extract_simple_paragraph_text(style_map, p, theme, media_map))
-                .collect()
-        })
-        .unwrap_or_default();
+    // ECMA-376 Part 4 §19.1.2.5 `<v:fill opacity>` — fill alpha (default opaque).
+    let fill_opacity = shape
+        .children()
+        .find(|n| n.is_element() && n.tag_name().name() == "fill")
+        .and_then(|f| f.attribute("opacity"))
+        .and_then(parse_vml_opacity);
+
+    // §19.1.2.23 `<v:textpath>` — WordArt text (a watermark). When present this
+    // shape draws stretched rotated text instead of a fill/stroke panel + body.
+    let text_path = shape
+        .children()
+        .find(|n| n.is_element() && n.tag_name().name() == "textpath")
+        .and_then(parse_vml_textpath);
+
+    // §19.1.2.19 style `rotation` — degrees clockwise (default 0).
+    let rotation = vml_css_length_pt(style, "rotation").unwrap_or(0.0);
+
+    // §19.1.2.19 style positioning. `mso-position-horizontal/vertical` give the
+    // alignment (absolute|left|center|right|inside|outside); their `-relative`
+    // companions give the container (margin|page|text|char|line). Map them onto
+    // the shared anchor model the renderer already understands (align + relativeFrom).
+    let map_align = |v: &str| match v {
+        "center" => Some("center".to_string()),
+        "left" | "inside" => Some("left".to_string()),
+        "right" | "outside" => Some("right".to_string()),
+        _ => None, // "absolute" ⇒ use the numeric margin-left/top offset instead
+    };
+    let map_valign = |v: &str| match v {
+        "center" => Some("center".to_string()),
+        "top" | "inside" => Some("top".to_string()),
+        "bottom" | "outside" => Some("bottom".to_string()),
+        _ => None,
+    };
+    let anchor_x_align = vml_css_str(style, "mso-position-horizontal").and_then(map_align);
+    let anchor_y_align = vml_css_str(style, "mso-position-vertical").and_then(map_valign);
+    // `text` and `char`/`line` relative-froms map to paragraph-relative flow; we
+    // only forward the page/margin containers the watermark cares about.
+    let map_rel = |v: &str| match v {
+        "margin" => Some("margin".to_string()),
+        "page" => Some("page".to_string()),
+        _ => None,
+    };
+    let anchor_x_relative_from =
+        vml_css_str(style, "mso-position-horizontal-relative").and_then(map_rel);
+    let anchor_y_relative_from =
+        vml_css_str(style, "mso-position-vertical-relative").and_then(map_rel);
+
+    // §19.1.2.19 style `z-index` — a negative value places the shape BEHIND the
+    // document text (a watermark), matching wp:anchor behindDoc semantics.
+    let behind_doc = vml_css_length_pt(style, "z-index").is_some_and(|z| z < 0.0);
+
+    // Body text from <v:textbox><w:txbxContent> (none for a textpath watermark).
+    let text_blocks: Vec<ShapeText> = if text_path.is_some() {
+        Vec::new()
+    } else {
+        shape
+            .descendants()
+            .find(|n| n.is_element() && n.tag_name().name() == "txbxContent")
+            .map(|content| {
+                children_w_flat(content, "p")
+                    .into_iter()
+                    .filter_map(|p| extract_simple_paragraph_text(style_map, p, theme, media_map))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
 
     Some(ShapeRun {
         width_pt,
@@ -5225,16 +5299,22 @@ fn parse_vml_pict(
         anchor_x_pt: 0.0,
         anchor_y_pt: 0.0,
         anchor_x_from_margin: true,
-        anchor_y_from_para: true,
-        behind_doc: false,
+        anchor_y_from_para: !behind_doc,
+        anchor_x_align,
+        anchor_y_align,
+        anchor_x_relative_from,
+        anchor_y_relative_from,
+        behind_doc,
         z_order: 0,
         subpaths: Vec::new(),
         preset_geometry: Some("rect".to_string()),
         adj_values: Vec::new(),
         fill,
+        fill_opacity,
         stroke,
         stroke_width,
-        rotation: 0.0,
+        rotation,
+        text_path,
         // VML t202 text-box default insets are the OOXML defaults (§21.1.2.1.1).
         text_blocks,
         text_anchor: None,
@@ -5243,6 +5323,201 @@ fn parse_vml_pict(
         text_inset_r: 91440.0 / 12700.0,
         text_inset_b: 45720.0 / 12700.0,
         ..Default::default()
+    })
+}
+
+/// Read a length from a VML CSS `style` string (ECMA-376 Part 4 §19.1.2.19
+/// "style" — a semicolon-delimited `name:value` list). Returns the numeric value
+/// with a trailing `pt` unit stripped; VML lengths in a `<w:pict>` default to
+/// points, so a bare number is taken as pt. Non-`pt` units (px/cm/…) and
+/// percentages are not converted here (callers that need them handle it).
+/// Property match is case-insensitive per the CSS2 grammar.
+fn vml_css_length_pt(style: &str, prop: &str) -> Option<f64> {
+    for decl in style.split(';') {
+        let mut kv = decl.splitn(2, ':');
+        let k = kv.next()?.trim();
+        let v = match kv.next() {
+            Some(v) => v.trim(),
+            None => continue,
+        };
+        if k.eq_ignore_ascii_case(prop) {
+            return v.trim_end_matches("pt").trim().parse::<f64>().ok();
+        }
+    }
+    None
+}
+
+/// Read a raw string property from a VML CSS `style` string (§19.1.2.19),
+/// case-insensitive on the property name, value trimmed. `None` when absent.
+fn vml_css_str<'a>(style: &'a str, prop: &str) -> Option<&'a str> {
+    for decl in style.split(';') {
+        let mut kv = decl.splitn(2, ':');
+        let k = kv.next()?.trim();
+        let v = match kv.next() {
+            Some(v) => v.trim(),
+            None => continue,
+        };
+        if k.eq_ignore_ascii_case(prop) {
+            return Some(v);
+        }
+    }
+    None
+}
+
+/// Resolve a VML color value (ECMA-376 Part 4 §19.1.2 — `fillcolor` /
+/// `strokecolor`, or a CSS color word) to the renderer's 6-hex form WITHOUT a
+/// leading `#`. Accepts `#rrggbb` / `rrggbb` hex and the CSS/VML named colors
+/// (`silver`, `black`, `red`, …) resolved through the shared
+/// `ooxml_common::theme::preset_color` table. `None` for an unrecognized value
+/// (e.g. `windowText`, a palette-relative token we don't model here).
+fn vml_color_hex6(c: &str) -> Option<String> {
+    let s = c.trim().trim_start_matches('#');
+    if s.len() == 6 && s.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        return Some(s.to_ascii_lowercase());
+    }
+    ooxml_common::theme::preset_color(s.trim()).map(|hex| hex.to_ascii_lowercase())
+}
+
+/// Parse a VML `<v:fill opacity>` value (§19.1.2.5). The opacity is a number in
+/// [0.0, 1.0] (default 1.0). Per the spec it may ALSO be written in 1/65536-ths
+/// with a trailing `f` (e.g. `52429f` = 52429/65536 ≈ 0.8). Returns the decoded
+/// fraction, or `None` when unparseable.
+fn parse_vml_opacity(raw: &str) -> Option<f64> {
+    let raw = raw.trim();
+    if let Some(num) = raw.strip_suffix('f') {
+        return num.trim().parse::<f64>().ok().map(|n| n / 65536.0);
+    }
+    raw.parse::<f64>().ok()
+}
+
+/// Parse a `<v:textpath>` (§19.1.2.23) into a `TextPath`: its `string` (the
+/// WordArt text) plus the font family / weight / style extracted from the
+/// element's CSS `style` (`font-family`, `font-weight`, `font-style`, and the
+/// `bold`/`italic` keywords of the `font` shorthand). Quotes around the family
+/// are stripped. Returns `None` when the element carries no `string`.
+fn parse_vml_textpath(textpath: roxmltree::Node) -> Option<TextPath> {
+    let string = textpath.attribute("string")?.to_string();
+    let style = textpath.attribute("style").unwrap_or("");
+
+    // font-family: prefer the explicit property, else the last token of the
+    // `font` shorthand (`style variant weight size/line family`). Strip quotes.
+    let strip_quotes = |s: &str| s.trim().trim_matches(|c| c == '"' || c == '\'').to_string();
+    let font_family = vml_css_str(style, "font-family")
+        .map(strip_quotes)
+        .or_else(|| {
+            vml_css_str(style, "font").and_then(|shorthand| {
+                // The family is everything after the size token; a simple,
+                // robust take is the substring after the last size-like token.
+                // Fall back to the last whitespace-delimited token.
+                shorthand
+                    .rsplit(|c: char| c.is_whitespace())
+                    .find(|t| !t.is_empty())
+                    .map(strip_quotes)
+            })
+        })
+        .filter(|f| !f.is_empty());
+
+    let font_lc = vml_css_str(style, "font")
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let bold = vml_css_str(style, "font-weight")
+        .map(|w| w.eq_ignore_ascii_case("bold") || w.trim().parse::<u32>().is_ok_and(|n| n >= 600))
+        .unwrap_or(false)
+        || font_lc.split_whitespace().any(|t| t == "bold");
+    let italic = vml_css_str(style, "font-style")
+        .map(|s| s.eq_ignore_ascii_case("italic") || s.eq_ignore_ascii_case("oblique"))
+        .unwrap_or(false)
+        || font_lc
+            .split_whitespace()
+            .any(|t| t == "italic" || t == "oblique");
+
+    Some(TextPath {
+        string,
+        font_family,
+        bold,
+        italic,
+    })
+}
+
+/// Parse a bare legacy VML `<w:pict>` picture — a `<v:shape>` (or
+/// `<v:rect>`/`<v:roundrect>`/`<v:oval>`) carrying a `<v:imagedata r:id>`
+/// (ECMA-376 Part 4 §19.1.2.11 imagedata) with NO surrounding `<w:object>`. This
+/// is the non-OLE inline VML image form (e.g. a header picture Word emits as VML
+/// rather than DrawingML). The rId maps to an embedded part via the media map,
+/// and the draw size comes from the shape's CSS `style` width/height in pt
+/// (§19.1.2.19). The result is an inline `ImageRun`, feeding the same image
+/// pipeline as a DrawingML `<a:blip>` picture.
+///
+/// Returns `None` (leaving the pict to the text-box path) when:
+///   - no shape carries a `<v:imagedata r:id>` (it is a filled/text panel), or
+///   - the relevant shape is inside a `<v:group>` — a grouped shape's
+///     width/height are expressed in the GROUP's coordinate system
+///     (`coordsize`), not points, so treating them as pt would badly mis-size
+///     the image. Resolving the group transform (child offset × group scale) is
+///     a separate VML-group feature; until then a grouped imagedata is skipped
+///     rather than mis-rendered, matching the prior behaviour, or
+///   - the rId does not resolve, or the shape has no positive pt dimensions.
+fn parse_vml_pict_image(
+    pict: roxmltree::Node,
+    media_map: &HashMap<String, String>,
+) -> Option<ImageRun> {
+    let is_shape = |n: &roxmltree::Node| {
+        n.is_element() && matches!(n.tag_name().name(), "shape" | "rect" | "roundrect" | "oval")
+    };
+    // The first shape carrying an <v:imagedata r:id>, that is NOT nested in a
+    // <v:group> (grouped geometry is in group units, handled elsewhere).
+    let shape = pict.descendants().find(|n| {
+        is_shape(n)
+            && n.children()
+                .any(|c| c.is_element() && c.tag_name().name() == "imagedata")
+            && !n
+                .ancestors()
+                .any(|a| a.is_element() && a.tag_name().name() == "group")
+    })?;
+
+    let imagedata = shape
+        .children()
+        .find(|c| c.is_element() && c.tag_name().name() == "imagedata")?;
+    let rid = attr_ns(
+        &imagedata,
+        relationships::TRANSITIONAL,
+        relationships::STRICT,
+        "id",
+    )?;
+    let image_path = media_map.get(rid)?.clone();
+    let mime_type = mime_from_ext(&image_path).to_string();
+
+    let style = shape.attribute("style").unwrap_or("");
+    let width_pt = vml_css_length_pt(style, "width").unwrap_or(0.0);
+    let height_pt = vml_css_length_pt(style, "height").unwrap_or(0.0);
+    if width_pt <= 0.0 || height_pt <= 0.0 {
+        return None;
+    }
+
+    Some(ImageRun {
+        image_path,
+        mime_type,
+        svg_image_path: None,
+        src_rect: None,
+        width_pt,
+        height_pt,
+        anchor: false,
+        anchor_x_pt: 0.0,
+        anchor_y_pt: 0.0,
+        anchor_x_from_margin: false,
+        anchor_y_from_para: false,
+        color_replace_from: None,
+        wrap_mode: None,
+        dist_top: 0.0,
+        dist_bottom: 0.0,
+        dist_left: 0.0,
+        dist_right: 0.0,
+        wrap_side: None,
+        allow_overlap: true,
+        anchor_x_align: None,
+        anchor_y_align: None,
+        anchor_x_relative_from: None,
+        anchor_y_relative_from: None,
     })
 }
 
@@ -5258,10 +5533,10 @@ fn parse_vml_pict(
 /// silent-skip rather than emitting a zero-sized or path-less image.
 ///
 /// Note: CT_Object (§17.3.3.19) may hold a modern `<w:drawing>` as its first
-/// child instead of (or beside) the VML fallback; Word's real output is
-/// back-compat and VML-dominant, so only the VML preview path is handled here.
-/// Delegating a `<w:drawing>`-first CT_Object to the DrawingML picture path is a
-/// follow-up.
+/// child instead of (or beside) the VML fallback. The `object` run dispatcher
+/// takes that drawing first (delegating to `parse_inline_drawing`); this
+/// function is only reached when there is NO `<w:drawing>` child, so it handles
+/// the pure legacy-VML preview form.
 fn parse_object_ole_image(
     object: roxmltree::Node,
     media_map: &HashMap<String, String>,
@@ -5285,17 +5560,6 @@ fn parse_object_ole_image(
         n.is_element() && matches!(n.tag_name().name(), "shape" | "rect" | "roundrect" | "oval")
     });
     let style = shape.and_then(|s| s.attribute("style")).unwrap_or("");
-    let css_pt = |prop: &str| -> Option<f64> {
-        for decl in style.split(';') {
-            let mut kv = decl.splitn(2, ':');
-            let k = kv.next()?.trim();
-            let v = kv.next()?.trim();
-            if k.eq_ignore_ascii_case(prop) {
-                return v.trim_end_matches("pt").trim().parse::<f64>().ok();
-            }
-        }
-        None
-    };
     let dxa_pt = |name: &str| -> Option<f64> {
         attr_ns(
             &object,
@@ -5306,8 +5570,10 @@ fn parse_object_ole_image(
         .and_then(|v| v.trim().parse::<f64>().ok())
         .map(|twentieths| twentieths / 20.0)
     };
-    let width_pt = css_pt("width").or_else(|| dxa_pt("dxaOrig")).unwrap_or(0.0);
-    let height_pt = css_pt("height")
+    let width_pt = vml_css_length_pt(style, "width")
+        .or_else(|| dxa_pt("dxaOrig"))
+        .unwrap_or(0.0);
+    let height_pt = vml_css_length_pt(style, "height")
         .or_else(|| dxa_pt("dyaOrig"))
         .unwrap_or(0.0);
     if width_pt <= 0.0 || height_pt <= 0.0 {
@@ -13595,6 +13861,364 @@ mod ole_object_tests {
             imgs.is_empty(),
             "a dangling v:imagedata rId ⇒ no image run, got {}",
             imgs.len()
+        );
+    }
+
+    /// §17.3.3.19 CT_Object — the FIRST child may be a modern `<w:drawing>` (the
+    /// DrawingML static representation), per the schema
+    /// `sequence(drawing?, choice(control|objectLink|objectEmbed|movie)?)`. When
+    /// present, the object's on-page appearance is that inline picture, so it
+    /// must be delegated to the DrawingML picture path (`parse_inline_drawing`) —
+    /// not the VML `<v:imagedata>` fallback. This exercises a `<w:object>` whose
+    /// first child is a `<w:drawing><wp:inline>` blip picture.
+    #[test]
+    fn object_with_drawing_first_child_emits_inline_picture() {
+        let body = format!(
+            r##"<w:document{ns}
+                xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
+                xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+                xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">
+              <w:body>
+              <w:p><w:r><w:object w:dxaOrig="3000" w:dyaOrig="1500">
+                <w:drawing>
+                  <wp:inline>
+                    <wp:extent cx="1905000" cy="952500"/>
+                    <a:graphic><a:graphicData
+                        uri="http://schemas.openxmlformats.org/drawingml/2006/picture">
+                      <pic:pic><pic:blipFill>
+                        <a:blip r:embed="rIdDraw"/>
+                      </pic:blipFill></pic:pic>
+                    </a:graphicData></a:graphic>
+                  </wp:inline>
+                </w:drawing>
+                <o:OLEObject Type="Embed" ProgID="Excel.Sheet.12" r:id="rIdData"/>
+              </w:object></w:r></w:p>
+            </w:body></w:document>"##,
+            ns = OLE_NS,
+        );
+        let mut media = HashMap::new();
+        media.insert("rIdDraw".to_string(), "word/media/image1.png".to_string());
+
+        let imgs = image_runs(&body, &media);
+        assert_eq!(imgs.len(), 1, "the modern <w:drawing> child is the picture");
+        assert_eq!(imgs[0].image_path, "word/media/image1.png");
+        // 1905000 EMU / 12700 = 150pt, 952500 / 12700 = 75pt (from <wp:extent>,
+        // NOT the object's dxaOrig — the drawing carries its own natural size).
+        assert!(
+            (imgs[0].width_pt - 150.0).abs() < 1e-6,
+            "width from wp:extent, got {}",
+            imgs[0].width_pt
+        );
+        assert!(
+            (imgs[0].height_pt - 75.0).abs() < 1e-6,
+            "height from wp:extent, got {}",
+            imgs[0].height_pt
+        );
+    }
+
+    /// A `<w:object>` that carries BOTH a modern `<w:drawing>` first child AND a
+    /// legacy VML `<v:imagedata>` fallback (Word's back-compat output) must NOT
+    /// double-emit — the `<w:drawing>` wins and the VML fallback is skipped, so
+    /// exactly one image run surfaces.
+    #[test]
+    fn object_with_drawing_and_vml_fallback_does_not_double_emit() {
+        let body = format!(
+            r##"<w:document{ns}
+                xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
+                xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+                xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">
+              <w:body>
+              <w:p><w:r><w:object w:dxaOrig="3000" w:dyaOrig="1500">
+                <w:drawing>
+                  <wp:inline>
+                    <wp:extent cx="1905000" cy="952500"/>
+                    <a:graphic><a:graphicData
+                        uri="http://schemas.openxmlformats.org/drawingml/2006/picture">
+                      <pic:pic><pic:blipFill>
+                        <a:blip r:embed="rIdDraw"/>
+                      </pic:blipFill></pic:pic>
+                    </a:graphicData></a:graphic>
+                  </wp:inline>
+                </w:drawing>
+                <v:shape id="s5" type="#_x0000_t75" style="width:150pt;height:75pt">
+                  <v:imagedata r:id="rIdPrev" o:title=""/>
+                </v:shape>
+                <o:OLEObject Type="Embed" ProgID="Excel.Sheet.12" ShapeID="s5" r:id="rIdData"/>
+              </w:object></w:r></w:p>
+            </w:body></w:document>"##,
+            ns = OLE_NS,
+        );
+        let mut media = HashMap::new();
+        media.insert("rIdDraw".to_string(), "word/media/image1.png".to_string());
+        media.insert("rIdPrev".to_string(), "word/media/image2.emf".to_string());
+
+        let imgs = image_runs(&body, &media);
+        assert_eq!(
+            imgs.len(),
+            1,
+            "the <w:drawing> child wins; the VML fallback must not also emit"
+        );
+        assert_eq!(imgs[0].image_path, "word/media/image1.png");
+    }
+}
+
+/// Legacy VML `<w:pict>` picture and text-watermark fixtures (ECMA-376 Part 4,
+/// §19.1.2 VML Reference). Covers a bare `<w:pict>` carrying a
+/// `<v:shape><v:imagedata>` (a non-OLE inline VML image) and a
+/// `<v:textpath>` text watermark, which Word emits in a header.
+#[cfg(test)]
+mod vml_pict_tests {
+    use super::*;
+
+    const VML_NS: &str = concat!(
+        r#" xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main""#,
+        r#" xmlns:v="urn:schemas-microsoft-com:vml""#,
+        r#" xmlns:o="urn:schemas-microsoft-com:office:office""#,
+        r#" xmlns:w10="urn:schemas-microsoft-com:office:word""#,
+        r#" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships""#
+    );
+
+    /// Parse a `<w:document>` fixture and return every DocRun across its
+    /// paragraphs, in document order.
+    fn all_runs(body_xml: &str, media: &HashMap<String, String>) -> Vec<DocRun> {
+        let doc = roxmltree::Document::parse(body_xml).unwrap();
+        let body = doc
+            .root_element()
+            .descendants()
+            .find(|n| n.tag_name().name() == "body")
+            .unwrap();
+        let mut num_map = NumberingMap::default();
+        parse_body_elements(
+            body,
+            &StyleMap::default(),
+            &mut num_map,
+            media,
+            &HashMap::new(),
+            &HashMap::new(),
+            &ThemeColors::default(),
+            &HashMap::new(),
+        )
+        .into_iter()
+        .filter_map(|e| match e {
+            BodyElement::Paragraph(p) => Some(p),
+            _ => None,
+        })
+        .flat_map(|p| p.runs.into_iter())
+        .collect()
+    }
+
+    fn image_runs(body_xml: &str, media: &HashMap<String, String>) -> Vec<ImageRun> {
+        all_runs(body_xml, media)
+            .into_iter()
+            .filter_map(|r| match r {
+                DocRun::Image(img) => Some(img),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn shape_runs(body_xml: &str, media: &HashMap<String, String>) -> Vec<ShapeRun> {
+        all_runs(body_xml, media)
+            .into_iter()
+            .filter_map(|r| match r {
+                DocRun::Shape(s) => Some(*s),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// §19.1.2.11 imagedata — a bare `<w:pict>` (no `<w:object>` wrapper) whose
+    /// `<v:shape>` carries a `<v:imagedata r:id>` is a non-OLE inline VML image.
+    /// It must surface as an inline `ImageRun` sized from the shape's CSS `style`
+    /// (width/height in pt, §19.1.2.19 style), resolved through the media map.
+    #[test]
+    fn bare_pict_imagedata_emits_inline_image() {
+        let body = format!(
+            r##"<w:document{ns}><w:body>
+              <w:p><w:r><w:pict>
+                <v:shape id="s1" type="#_x0000_t75" style="width:120pt;height:90pt">
+                  <v:imagedata r:id="rIdImg" o:title="logo"/>
+                </v:shape>
+              </w:pict></w:r></w:p>
+            </w:body></w:document>"##,
+            ns = VML_NS,
+        );
+        let mut media = HashMap::new();
+        media.insert("rIdImg".to_string(), "word/media/image1.png".to_string());
+
+        let imgs = image_runs(&body, &media);
+        assert_eq!(imgs.len(), 1, "one inline image from the bare pict");
+        assert_eq!(imgs[0].image_path, "word/media/image1.png");
+        assert!(!imgs[0].anchor, "an inline (position-static) VML image");
+        assert!(
+            (imgs[0].width_pt - 120.0).abs() < 1e-6,
+            "w {}",
+            imgs[0].width_pt
+        );
+        assert!(
+            (imgs[0].height_pt - 90.0).abs() < 1e-6,
+            "h {}",
+            imgs[0].height_pt
+        );
+        // It must NOT also produce a text-box ShapeRun (the previous behaviour
+        // treated any pict shape as a panel).
+        assert!(
+            shape_runs(&body, &media).is_empty(),
+            "an imagedata pict is an image, not a shape panel"
+        );
+    }
+
+    /// A bare `<w:pict>` imagedata with a dangling `r:id` (not in the media map)
+    /// emits nothing — the part cannot be located, so it is skipped rather than
+    /// producing a path-less image.
+    #[test]
+    fn bare_pict_imagedata_dangling_rid_emits_nothing() {
+        let body = format!(
+            r##"<w:document{ns}><w:body>
+              <w:p><w:r><w:pict>
+                <v:shape id="s1" type="#_x0000_t75" style="width:120pt;height:90pt">
+                  <v:imagedata r:id="rIdMissing"/>
+                </v:shape>
+              </w:pict></w:r></w:p>
+            </w:body></w:document>"##,
+            ns = VML_NS,
+        );
+        let media = HashMap::new();
+        assert!(image_runs(&body, &media).is_empty());
+        assert!(shape_runs(&body, &media).is_empty());
+    }
+
+    /// A `<v:imagedata>` living inside a `<v:group>` uses the GROUP's coordinate
+    /// system (`coordsize`), not points, for the shape's width/height. Resolving
+    /// that requires the full VML group transform, which is a separate feature —
+    /// so a grouped imagedata is left unresolved here (no mis-sized image) rather
+    /// than treating the group-unit dimensions as points. (sample-1's header
+    /// background is exactly this grouped form.)
+    #[test]
+    fn grouped_pict_imagedata_is_not_mis_sized() {
+        let body = format!(
+            r##"<w:document{ns}><w:body>
+              <w:p><w:r><w:pict>
+                <v:group id="g1" style="position:absolute;width:612pt;height:792pt"
+                         coordsize="77724,100584">
+                  <v:shape id="s1" type="#_x0000_t75" style="width:77724;height:100584">
+                    <v:imagedata r:id="rIdBg" o:title="background"/>
+                  </v:shape>
+                </v:group>
+              </w:pict></w:r></w:p>
+            </w:body></w:document>"##,
+            ns = VML_NS,
+        );
+        let mut media = HashMap::new();
+        media.insert("rIdBg".to_string(), "word/media/image50.png".to_string());
+        // No image run with a 77724pt width (the group-unit value taken as pt).
+        let imgs = image_runs(&body, &media);
+        assert!(
+            imgs.iter().all(|i| i.width_pt < 5000.0),
+            "a grouped imagedata must not be sized from group units as pt: {:?}",
+            imgs.iter().map(|i| i.width_pt).collect::<Vec<_>>()
+        );
+    }
+
+    /// §19.1.2.23 textpath — Word's canonical text watermark: a
+    /// `PowerPlusWaterMarkObject` `<v:shape type="#_x0000_t136">` positioned
+    /// absolute + centred in the margin box, rotated, `stroked="f"`, with a
+    /// `<v:fill opacity>` and a `<v:textpath string="…" style="font-family:…">`.
+    /// It must surface as a ShapeRun carrying the text_path (string + font),
+    /// rotation (§19.1.2.19), fill colour, and fill_opacity (§19.1.2.5) — the
+    /// renderer draws the stretched rotated semi-transparent text.
+    #[test]
+    fn watermark_textpath_shape_carries_text_rotation_and_opacity() {
+        let body = format!(
+            r##"<w:document{ns}><w:body>
+              <w:p><w:r><w:pict>
+                <v:shape id="PowerPlusWaterMarkObject1" type="#_x0000_t136"
+                  style="position:absolute;margin-left:0;margin-top:0;width:415pt;height:207.5pt;rotation:315;z-index:-251657216;mso-position-horizontal:center;mso-position-horizontal-relative:margin;mso-position-vertical:center;mso-position-vertical-relative:margin"
+                  fillcolor="silver" stroked="f">
+                  <v:fill opacity=".5"/>
+                  <v:textpath style="font-family:&quot;Calibri&quot;;font-size:1pt"
+                    string="DRAFT"/>
+                </v:shape>
+              </w:pict></w:r></w:p>
+            </w:body></w:document>"##,
+            ns = VML_NS,
+        );
+        let shapes = shape_runs(&body, &HashMap::new());
+        assert_eq!(shapes.len(), 1, "one watermark shape");
+        let s = &shapes[0];
+        let tp = s.text_path.as_ref().expect("text_path must be present");
+        assert_eq!(tp.string, "DRAFT");
+        assert_eq!(
+            tp.font_family.as_deref(),
+            Some("Calibri"),
+            "quotes stripped"
+        );
+        assert!((s.width_pt - 415.0).abs() < 1e-6, "w {}", s.width_pt);
+        assert!((s.height_pt - 207.5).abs() < 1e-6, "h {}", s.height_pt);
+        // rotation:315 deg (clockwise) from the shape style.
+        assert!((s.rotation - 315.0).abs() < 1e-6, "rotation {}", s.rotation);
+        // fillcolor silver → hex, opacity .5.
+        match &s.fill {
+            Some(ShapeFill::Solid { color }) => assert_eq!(color, "c0c0c0", "silver → c0c0c0"),
+            other => panic!("expected silver solid fill, got {other:?}"),
+        }
+        assert!(
+            (s.fill_opacity.unwrap() - 0.5).abs() < 1e-6,
+            "opacity {:?}",
+            s.fill_opacity
+        );
+        // It is a WordArt text path, not a text-box panel.
+        assert!(s.text_blocks.is_empty(), "no txbx body text");
+        // stroked="f" ⇒ no stroke.
+        assert_eq!(s.stroke_width, 0.0, "stroked=f ⇒ no stroke");
+        // Centred in the margin box (§19.1.2.19 mso-position-*).
+        assert_eq!(s.anchor_x_align.as_deref(), Some("center"));
+        assert_eq!(s.anchor_y_align.as_deref(), Some("center"));
+        assert_eq!(s.anchor_x_relative_from.as_deref(), Some("margin"));
+        assert_eq!(s.anchor_y_relative_from.as_deref(), Some("margin"));
+        // Negative z-index ⇒ behind the body text.
+        assert!(s.behind_doc, "negative z-index ⇒ behindDoc");
+    }
+
+    /// §19.1.2.5 opacity — the "52429f" form (1/65536-ths, trailing `f`) decodes
+    /// to 0.8; an absent `<v:fill opacity>` ⇒ fully opaque (`fill_opacity` =
+    /// None). Also checks an unquoted `font-family`.
+    #[test]
+    fn watermark_opacity_fraction_form_decodes() {
+        let mk = |fill: &str| {
+            format!(
+                r##"<w:document{ns}><w:body>
+                  <w:p><w:r><w:pict>
+                    <v:shape id="PowerPlusWaterMarkObject1" type="#_x0000_t136"
+                      style="position:absolute;width:400pt;height:200pt" fillcolor="red" stroked="f">
+                      {fill}
+                      <v:textpath style="font-family:Arial" string="CONFIDENTIAL"/>
+                    </v:shape>
+                  </w:pict></w:r></w:p>
+                </w:body></w:document>"##,
+                ns = VML_NS,
+                fill = fill,
+            )
+        };
+        let f_form = shape_runs(&mk(r#"<v:fill opacity="52429f"/>"#), &HashMap::new());
+        assert!(
+            (f_form[0].fill_opacity.unwrap() - 0.8).abs() < 1e-3,
+            "52429f → 0.8, got {:?}",
+            f_form[0].fill_opacity
+        );
+        let no_fill = shape_runs(&mk(""), &HashMap::new());
+        assert!(
+            no_fill[0].fill_opacity.is_none(),
+            "no <v:fill opacity> ⇒ opaque (None)"
+        );
+        assert_eq!(
+            no_fill[0]
+                .text_path
+                .as_ref()
+                .unwrap()
+                .font_family
+                .as_deref(),
+            Some("Arial")
         );
     }
 }

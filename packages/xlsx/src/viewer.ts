@@ -11,6 +11,7 @@ import {
   computeValidationPanelPosition,
   type ResolvedList,
 } from './validation-list.js';
+import type { WireSizeOverrides } from './worker-protocol.js';
 import {
   buildOutlineLayout,
   toggleGroupHidden,
@@ -375,6 +376,23 @@ export class XlsxViewer {
    *  Keyed by band index; per current worksheet (cleared on sheet switch). */
   private stashedRowHeights = new Map<number, number | undefined>();
   private stashedColWidths = new Map<number, number | undefined>();
+  /**
+   * Per-sheet cumulative record of every view-only size mutation (outline
+   * collapse/expand, drag-to-resize #567), keyed by sheet index. Value = the
+   * band's current model size, or `null` when the model has no entry (default
+   * size). Serialized as {@link WireSizeOverrides} with every worker
+   * `renderViewport` so the worker's local sheet cache converges to the
+   * main-thread model — without it the worker keeps drawing the file's
+   * original sizes and the grid bitmap goes stale under the (up-to-date)
+   * gutter and overlays. Entries are updated in place and never removed
+   * (idempotent re-application); the whole store resets when a new workbook
+   * loads. Main mode never reads it (the main renderer draws from the mutated
+   * model directly).
+   */
+  private sizeOverrideStore = new Map<
+    number,
+    { rows: Map<number, number | null>; cols: Map<number, number | null> }
+  >();
   private canvasArea: HTMLDivElement;
   private scrollHost: HTMLDivElement;
   private spacer: HTMLDivElement;
@@ -801,8 +819,10 @@ export class XlsxViewer {
       }
       this.wb = wb;
       previous?.destroy();
-      // A new workbook invalidates any prior find state.
+      // A new workbook invalidates any prior find state and every accumulated
+      // view-only size override (sheet indices now name different sheets).
       this._find.invalidate();
+      this.sizeOverrideStore.clear();
       this.buildTabs();
       this.opts.onReady?.(this.wb.sheetNames);
       await this.showSheet(this._initialSheet());
@@ -1247,6 +1267,36 @@ export class XlsxViewer {
         }
       }
     }
+    // Mirror the post-mutation model value into the worker override channel so
+    // a worker-mode grid actually re-lays the band (main mode ignores this).
+    this.recordSizeOverride(axis, index);
+  }
+
+  /** Record band `index`'s CURRENT model size (or `null` = no entry) in the
+   *  per-sheet override store. Called after every view-only size mutation —
+   *  outline hide/show above and drag-to-resize (#567) — so worker renders
+   *  converge to the main model. */
+  private recordSizeOverride(axis: OutlineAxis, index: number): void {
+    const ws = this.currentWorksheet;
+    if (!ws) return;
+    let entry = this.sizeOverrideStore.get(this.currentSheet);
+    if (!entry) {
+      entry = { rows: new Map(), cols: new Map() };
+      this.sizeOverrideStore.set(this.currentSheet, entry);
+    }
+    if (axis === 'row') entry.rows.set(index, ws.rowHeights[index] ?? null);
+    else entry.cols.set(index, ws.colWidths[index] ?? null);
+  }
+
+  /** The current sheet's override store serialized for the wire, or undefined
+   *  when nothing has been mutated (keeps the request payload unchanged). */
+  private wireSizeOverrides(): WireSizeOverrides | undefined {
+    const entry = this.sizeOverrideStore.get(this.currentSheet);
+    if (!entry || (entry.rows.size === 0 && entry.cols.size === 0)) return undefined;
+    const o: WireSizeOverrides = {};
+    if (entry.rows.size > 0) o.rows = Object.fromEntries(entry.rows);
+    if (entry.cols.size > 0) o.cols = Object.fromEntries(entry.cols);
+    return o;
   }
 
   /** Update the `collapsed` flag on a band's model entry so the outline rebuild
@@ -1726,10 +1776,12 @@ export class XlsxViewer {
       const ptX = this.screenX(clientX - rect.left, 0);
       const sizePx = Math.max(RESIZE_MIN_PX, Math.round((ptX - drag.originScaled) / cs));
       ws.colWidths[drag.index] = pxToColWidth(sizePx, drag.mdw);
+      this.recordSizeOverride('col', drag.index);
     } else {
       const ptY = clientY - rect.top;
       const sizePx = Math.max(RESIZE_MIN_PX, Math.round((ptY - drag.originScaled) / cs));
       ws.rowHeights[drag.index] = pxToRowHeight(sizePx);
+      this.recordSizeOverride('row', drag.index);
     }
 
     sheetAxisCache.delete(ws); // sizes changed → rebuild the cumulative-offset axes
@@ -3220,7 +3272,15 @@ export class XlsxViewer {
     if (this._mode === 'worker') {
       // Render the viewport off the main thread and paint the returned bitmap.
       // The selection overlay (geometry-based, from getCellRect) is unaffected.
-      const bmp = await this.workbook.renderViewportToBitmap(this.currentSheet, viewport, renderOpts);
+      // Attach the cumulative view-only size overrides (outline collapse/
+      // expand, drag resize) so the worker re-lays the mutated bands — its
+      // local sheet cache never sees main-thread model writes on its own.
+      const sizeOverrides = this.wireSizeOverrides();
+      const bmp = await this.workbook.renderViewportToBitmap(
+        this.currentSheet,
+        viewport,
+        sizeOverrides ? { ...renderOpts, sizeOverrides } : renderOpts,
+      );
       // Drop a stale frame: if a newer render was requested while this bitmap was
       // in flight (scroll moved on, the sheet switched, a zoom changed), painting
       // it would overwrite the fresher frame. Close it to free the GPU memory

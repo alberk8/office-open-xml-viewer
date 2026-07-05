@@ -1,7 +1,7 @@
 use serde::Serialize;
 use std::collections::BTreeMap;
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct Workbook {
     pub sheets: Vec<SheetMeta>,
@@ -11,6 +11,20 @@ pub struct Workbook {
     /// JSON when false (the default 1900 system) for wire parity.
     #[serde(skip_serializing_if = "std::ops::Not::not", default)]
     pub date1904: bool,
+    /// #773 partial degradation: a WORKBOOK-LEVEL degradation that leaves every
+    /// sheet openable. Set when a shared workbook part was PRESENT but corrupt —
+    /// most commonly `xl/sharedStrings.xml` (§18.4.9): a broken shared-string
+    /// table silently blanks every string cell across ALL sheets, so unlike a
+    /// per-sheet break it can't be attributed to one `Worksheet::placeholder`.
+    /// Surfacing it here (tagged with the offending part, e.g.
+    /// `"xl/sharedStrings.xml: <detail>"`) makes the loss visible instead of
+    /// silent, while every sheet still renders its non-string content. `None`
+    /// (and omitted from JSON) when every shared part read cleanly, so existing
+    /// workbook snapshots are byte-for-byte unchanged. Also carries a
+    /// container-open error (`"(zip container): …"`) for the whole-container
+    /// degradation (#774).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parse_error: Option<String>,
 }
 
 /// Sheet visibility (`<sheet state>`, ECMA-376 §18.2.19 `ST_SheetState`).

@@ -8376,16 +8376,47 @@ function renderTable(table: DocTable, state: RenderState): void {
     return;
   }
 
-  const { contentX, contentW } = state;
-  const { colWidths, tableW, rowHeights } = computeTableLayout(table, contentW, state);
+  const { contentX, contentW, scale } = state;
+
+  // ECMA-376 §17.4.50 `<w:tblInd>` — indentation added before the table's LEADING
+  // edge, shifting it into the text margin. It applies ONLY when the resolved `jc`
+  // is left/leading (§17.4.50: "if the resulting justification … is not left …
+  // this property shall be ignored"). A NEGATIVE indent pulls the table OUTWARD
+  // past the leading margin toward the page edge (sample-28's header banner). Such
+  // a table legitimately extends into the page margins and keeps its full
+  // preferred width, so widen the layout budget to the whole page (otherwise
+  // `resolveColumnWidths`' content-width fit would scale the banner down to the
+  // narrower text column and it would never reach the page edge).
+  const applyInd = table.tblInd != null && table.jc === 'left';
+  const layoutBudget =
+    applyInd && (table.tblInd as number) < 0 ? state.pageWidth * scale : contentW;
+  const { colWidths, tableW, rowHeights } = computeTableLayout(table, layoutBudget, state);
 
   // Horizontal table alignment on the page (w:tblPr/w:jc).
-  const tableX =
+  let tableX =
     table.jc === 'center'
       ? contentX + Math.max(0, (contentW - tableW) / 2)
       : table.jc === 'right'
         ? contentX + Math.max(0, contentW - tableW)
         : contentX;
+
+  if (applyInd) {
+    // §17.4.50 places the table's LEADING edge `tblInd` inward from the leading
+    // text margin (so a NEGATIVE indent pushes it OUTWARD into the margin).
+    // `drawTableRows` always takes the physical LEFT origin (`tableX`) and mirrors
+    // the columns internally for RTL, so resolve the leading edge to a left origin:
+    //   • LTR — leading edge = LEFT text margin (contentX). Left origin =
+    //     contentX + tblInd.
+    //   • RTL (`bidiVisual`) — leading edge = RIGHT text margin
+    //     (contentX + contentW). Its RIGHT edge sits `tblInd` inward from there,
+    //     i.e. rightEdge = contentX + contentW − tblInd, so the left origin is
+    //     rightEdge − tableW.
+    const indPx = (table.tblInd as number) * scale;
+    tableX =
+      table.bidiVisual === true
+        ? contentX + contentW - indPx - tableW
+        : contentX + indPx;
+  }
 
   const y = drawTableRows(table, colWidths, tableW, rowHeights, tableX, state.y, state);
 

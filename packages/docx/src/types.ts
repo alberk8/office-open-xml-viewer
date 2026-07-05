@@ -1297,6 +1297,14 @@ export interface DocTable {
   cellMarginRight: number;
   /** table horizontal alignment on the page: 'left' | 'center' | 'right'. */
   jc: string;
+  /** ECMA-376 §17.4.50 `<w:tblInd>` — indentation added before the table's
+   *  LEADING edge (left in an LTR table, right in an RTL/`bidiVisual` table), in
+   *  pt. SIGNED: a negative value pulls the table outward past the leading margin
+   *  toward the page edge (Word writes this for a header banner that must reach
+   *  the physical page edge). `type="dxa"` only; `pct`/`auto` are dropped by the
+   *  parser per §17.4.50. Absent ⇒ no direct indent. The renderer applies it only
+   *  when the resolved `jc` is left/leading (§17.4.50). */
+  tblInd?: number;
   /** ECMA-376 §17.4.52 `<w:tblLayout w:type>` — 'fixed' | 'autofit'. Absent
    *  (undefined) ⇒ spec default 'autofit'. Both paths size columns from the
    *  tblGrid (§17.4.48) scaled to fit: 'fixed' uses the grid verbatim; 'autofit'

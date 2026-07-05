@@ -6556,6 +6556,23 @@ fn parse_table(
         .and_then(|j| attr_w(j, "val"))
         .unwrap_or_else(|| "left".to_string());
 
+    // ECMA-376 §17.4.50 `<w:tblInd>` — indentation added BEFORE the table's
+    // LEADING edge (left in an LTR table, right in an RTL/`bidiVisual` table),
+    // shifting the table into the text margin. The value is a common table
+    // measurement (§17.4.87 CT_TblWidth); only `type="dxa"` is a length — `pct`
+    // and `auto` are ignored per §17.4.50. `w:w` is signed twips: a NEGATIVE value
+    // pulls the table OUTWARD past the leading margin toward the page edge (Word
+    // writes this for a header banner that must reach the physical page edge).
+    // The renderer applies it only when the resolved `jc` is left/leading
+    // (§17.4.50: "if the resulting justification … is not left … this property
+    // shall be ignored"). Omitted ⇒ None (style-hierarchy inheritance is a
+    // follow-up; direct inline is the common case and what sample-28 uses).
+    let tbl_ind = tbl_pr
+        .and_then(|p| child_w(p, "tblInd"))
+        .filter(|n| attr_w(*n, "type").map(|t| t == "dxa").unwrap_or(true))
+        .and_then(|n| attr_w(n, "w"))
+        .map(|v| twips_to_pt(&v));
+
     // ECMA-376 §17.4.52 w:tblLayout/@w:type — "fixed" | "autofit". Absent ⇒ None
     // (renderer applies the spec default "autofit").
     let layout = tbl_pr
@@ -6635,6 +6652,7 @@ fn parse_table(
         cell_margin_left: cm_left,
         cell_margin_right: cm_right,
         jc,
+        tbl_ind,
         layout,
         width_pt: tbl_w_pt,
         width_pct: tbl_w_pct,
@@ -7292,6 +7310,51 @@ mod tests {
         );
         assert_eq!(t.width_pt, None);
         assert_eq!(t.width_pct, None);
+    }
+
+    // ECMA-376 §17.4.50 — `<w:tblInd w:type="dxa">` surfaces as signed pt.
+    #[test]
+    fn tbl_ind_dxa_surfaces_as_pt() {
+        let t = parse_tbl(
+            r#"<w:tblPr><w:tblInd w:w="1440" w:type="dxa"/></w:tblPr>
+               <w:tblGrid><w:gridCol w:w="5000"/></w:tblGrid>
+               <w:tr><w:tc><w:p/></w:tc></w:tr>"#,
+        );
+        assert_eq!(t.tbl_ind, Some(72.0)); // 1440 twips = 72 pt
+    }
+
+    // ECMA-376 §17.4.50 — a NEGATIVE tblInd (table pulled outward toward the page
+    // edge, as sample-28's header banner uses) round-trips its sign.
+    #[test]
+    fn tbl_ind_negative_dxa_round_trips_sign() {
+        let t = parse_tbl(
+            r#"<w:tblPr><w:tblInd w:w="-1301" w:type="dxa"/></w:tblPr>
+               <w:tblGrid><w:gridCol w:w="5000"/></w:tblGrid>
+               <w:tr><w:tc><w:p/></w:tc></w:tr>"#,
+        );
+        assert_eq!(t.tbl_ind, Some(-65.05)); // -1301 twips = -65.05 pt
+    }
+
+    // ECMA-376 §17.4.50 — `type="pct"`/`auto` are NOT lengths and must be ignored.
+    #[test]
+    fn tbl_ind_pct_is_ignored() {
+        let t = parse_tbl(
+            r#"<w:tblPr><w:tblInd w:w="500" w:type="pct"/></w:tblPr>
+               <w:tblGrid><w:gridCol w:w="5000"/></w:tblGrid>
+               <w:tr><w:tc><w:p/></w:tc></w:tr>"#,
+        );
+        assert_eq!(t.tbl_ind, None);
+    }
+
+    // Omitting `<w:tblInd>` leaves the direct indent unset (None).
+    #[test]
+    fn tbl_ind_absent_is_none() {
+        let t = parse_tbl(
+            r#"<w:tblPr/>
+               <w:tblGrid><w:gridCol w:w="5000"/></w:tblGrid>
+               <w:tr><w:tc><w:p/></w:tc></w:tr>"#,
+        );
+        assert_eq!(t.tbl_ind, None);
     }
 
     // Regression guard for the direct-rPr merge path. `apply_direct_run` now

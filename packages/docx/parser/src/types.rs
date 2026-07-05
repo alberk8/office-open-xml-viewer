@@ -1714,6 +1714,14 @@ pub struct DocTable {
     pub cell_margin_right: f64,
     /// table horizontal alignment on the page: "left" | "center" | "right" (w:tblPr/w:jc).
     pub jc: String,
+    /// ECMA-376 §17.4.50 `<w:tblInd>` — indentation added before the table's
+    /// LEADING edge (left in LTR, right in RTL/`bidi_visual`), in pt (signed —
+    /// a negative value pulls the table outward past the leading margin toward
+    /// the page edge). `type="dxa"` only; `pct`/`auto` are ignored per §17.4.50.
+    /// `None` ⇒ no direct indent (the renderer adds nothing). Applied by the
+    /// renderer only when the resolved `jc` is left/leading.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tbl_ind: Option<f64>,
     /// ECMA-376 §17.4.52 `<w:tblLayout w:type>`. "fixed" or "autofit".
     /// Absent in the source ⇒ None, which the renderer treats as the spec
     /// default "autofit" (size columns by preferred widths). When "fixed" the

@@ -1,7 +1,7 @@
 import { XlsxWorkbook } from './workbook.js';
-import type { ViewportRange, Worksheet, XlsxComment } from './types.js';
-import type { LoadOptions } from '@silurus/ooxml-core';
-import { nextVisibleIndex, resolveVisibleIndex, countVisible, zoomStepScale } from '@silurus/ooxml-core';
+import type { Hyperlink, ViewportRange, Worksheet, XlsxComment } from './types.js';
+import type { HyperlinkTarget, LoadOptions } from '@silurus/ooxml-core';
+import { nextVisibleIndex, resolveVisibleIndex, countVisible, zoomStepScale, openExternalHyperlink } from '@silurus/ooxml-core';
 import { HEADER_W, HEADER_H, colWidthToPx, rowHeightToPx, pxToColWidth, pxToRowHeight, getMdwForWorksheet, rtlMirrorX } from './renderer.js';
 import { findListValidationAt } from './data-validation.js';
 import { parseA1 } from './a1.js';
@@ -114,6 +114,16 @@ export interface XlsxViewerOptions extends LoadOptions {
   onError?: (err: Error) => void;
   /** Called when the selected cell range changes. null means no selection. */
   onSelectionChange?: (selection: CellRange | null) => void;
+  /**
+   * IX1 (design decision — NOT user-confirmed, integrator may veto). Fires when a
+   * cell carrying a hyperlink (ECMA-376 §18.3.1.47) is clicked. Default when
+   * omitted: external → {@link openExternalHyperlink} (new tab, sanitised,
+   * noopener); internal (`location`) → navigate to the referenced sheet/cell
+   * when resolvable. When supplied, this callback fully owns the behaviour and
+   * receives the raw {@link HyperlinkTarget} verbatim (URL sanitisation is the
+   * default handler's job, so a blocked scheme still reaches a custom callback).
+   */
+  onHyperlinkClick?: (target: HyperlinkTarget) => void;
   /**
    * Color of the cell-selection highlight. A single CSS color drives both the
    * selection rectangle's border (drawn in this color) and its fill (the same
@@ -419,6 +429,11 @@ export class XlsxViewer {
   // presses inside the overlay-scrollbar band (a thumb drag must not select
   // the cell underneath).
   private pendingTap: { x: number; y: number; shiftKey: boolean; pointerId: number } | null = null;
+  // IX1 — mouse press bookkeeping for hyperlink activation: the down position and
+  // the cell under it. On pointerup, if the pointer did not move beyond the tap
+  // slop (a genuine click, not a drag-select), a hyperlink on that cell is
+  // dispatched. Touch/pen activate through the pendingTap path instead.
+  private pendingClick: { x: number; y: number; pointerId: number; cell: CellAddress } | null = null;
   // In-flight column/row resize drag (issue #567). `originScaled` is the fixed
   // LTR edge the resized band grows from (left edge for a column, top for a row)
   // in canvasArea CSS px; `mdw` is captured once so the live px→model-unit
@@ -435,6 +450,11 @@ export class XlsxViewer {
   private commentPopup: HTMLDivElement;
   /** `"row:col"` → comment for the current sheet, rebuilt on every showSheet. */
   private commentMap = new Map<string, XlsxComment>();
+  /** IX1 — `"row:col"` → hyperlink for the current sheet, rebuilt on every
+   *  showSheet. Keys mirror the renderer's `hyperlinkMap` (1-based row/col, the
+   *  first cell of a hyperlink `ref` range per the parser), so a `getCellAt`
+   *  {row,col} looks up directly. */
+  private hyperlinkMap = new Map<string, Hyperlink>();
   /** `"row:col"` of the cell whose popup is currently shown (or pending), so a
    *  pointermove within the same cell doesn't restart the show timer. */
   private commentPopupKey: string | null = null;
@@ -696,6 +716,7 @@ export class XlsxViewer {
     this.updateTabActive(index);
     this.currentWorksheet = await this.workbook.getWorksheet(index);
     this.buildCommentMap(this.currentWorksheet);
+    this.buildHyperlinkMap(this.currentWorksheet);
     this.updateSpacerSize(this.currentWorksheet);
     // Reset the horizontal scroll origin to the natural START of the sheet.
     // For RTL sheets the start column (col A) lives at the RIGHT, which means
@@ -1572,6 +1593,86 @@ export class XlsxViewer {
     }
   }
 
+  /** IX1 — index the current sheet's hyperlinks by `"row:col"` (1-based, first
+   *  cell of the `ref` range) so a clicked/hovered cell resolves in O(1). Keys
+   *  match the renderer's `hyperlinkMap` exactly (`${hl.row}:${hl.col}`). */
+  private buildHyperlinkMap(ws: Worksheet): void {
+    this.hyperlinkMap = new Map();
+    for (const hl of ws.hyperlinks ?? []) {
+      this.hyperlinkMap.set(`${hl.row}:${hl.col}`, hl);
+    }
+  }
+
+  /** IX1 — the hyperlink at a cell, or null. `getCellAt` returns 1-based
+   *  {row,col}, matching the parser/renderer keying. */
+  private hyperlinkAtCell(cell: CellAddress): Hyperlink | null {
+    return this.hyperlinkMap.get(`${cell.row}:${cell.col}`) ?? null;
+  }
+
+  /**
+   * IX1 — dispatch a click on a hyperlinked cell. Builds a
+   * {@link HyperlinkTarget} from the parsed hyperlink (external `url` wins over
+   * internal `location`, matching Excel: a `<hyperlink>` carrying both navigates
+   * to the external target) and routes it to the caller's `onHyperlinkClick`
+   * (which fully owns behaviour) or the built-in default. Returns true when a
+   * hyperlink was found and dispatched.
+   */
+  private dispatchHyperlink(cell: CellAddress): boolean {
+    const hl = this.hyperlinkAtCell(cell);
+    if (!hl) return false;
+    let target: HyperlinkTarget;
+    if (hl.url) {
+      target = { kind: 'external', url: hl.url };
+    } else if (hl.location) {
+      target = { kind: 'internal', ref: hl.location };
+    } else {
+      return false; // parser only emits a hyperlink with url or location
+    }
+    const custom = this.opts.onHyperlinkClick;
+    if (custom) {
+      custom(target);
+      return true;
+    }
+    // Built-in default. External: open in a new tab, sanitised against the safe
+    // scheme allowlist (a blocked scheme like `javascript:` is a no-op, not a
+    // navigation). Internal: best-effort sheet navigation, below.
+    if (target.kind === 'external') {
+      openExternalHyperlink(target.url);
+    } else {
+      this.navigateInternalHyperlink(target.ref);
+    }
+    return true;
+  }
+
+  /**
+   * IX1 default handler for an internal `location` target (§18.3.1.47): a defined
+   * name or a cell ref like `Sheet1!A1`. Best-effort: if the part before `!`
+   * names a sheet in the workbook, switch to it. There is no scroll-to-cell
+   * primitive on this viewer, so the cell part is not yet honoured (switching the
+   * sheet already lands the user on the right surface). A bare defined name that
+   * does not resolve to a sheet is a documented no-op.
+   */
+  private navigateInternalHyperlink(location: string): void {
+    const bang = location.lastIndexOf('!');
+    if (bang < 0) {
+      // TODO IX1: resolve defined name → sheet/cell (needs a workbook
+      // definedNames lookup the parser does not yet surface). Inert for now
+      // rather than guessing a destination.
+      return;
+    }
+    // Sheet names with special chars are quoted (`'My Sheet'!A1`) and inner
+    // single quotes doubled per ECMA-376 §18.17.2.4; unwrap for the name match.
+    let sheetPart = location.slice(0, bang);
+    if (sheetPart.startsWith("'") && sheetPart.endsWith("'")) {
+      sheetPart = sheetPart.slice(1, -1).replace(/''/g, "'");
+    }
+    const idx = this.sheetNames.indexOf(sheetPart);
+    if (idx >= 0) {
+      void this.goToSheet(idx);
+    }
+    // Unknown sheet → no-op (do not invent scrolling math; §CLAUDE spec-first).
+  }
+
   /** Show the popup for the comment on `cell` after the hover dwell, anchored to
    *  the cell's current on-screen rect. No-op when the cell carries no comment.
    *  Re-hovering the same cell does not restart the timer. */
@@ -1771,6 +1872,14 @@ export class XlsxViewer {
         return;
       }
 
+      // IX1 — remember the cell under a mouse press so a click (no drag) can
+      // activate its hyperlink on release. Recorded before selection so a
+      // shift-click extend still tracks the destination cell.
+      const downCell = this.getCellAt(e.clientX, e.clientY);
+      this.pendingClick = downCell
+        ? { x: e.clientX, y: e.clientY, pointerId: e.pointerId, cell: downCell }
+        : null;
+
       this.applyPointerSelection(e.clientX, e.clientY, e.shiftKey, e.pointerId, true);
     });
 
@@ -1804,6 +1913,16 @@ export class XlsxViewer {
         }
       }
 
+      // IX1 — a mouse press that turns into a drag (beyond the slop) is a
+      // selection, not a hyperlink click: drop the pending activation.
+      if (this.pendingClick && this.pendingClick.pointerId === e.pointerId) {
+        const dx = e.clientX - this.pendingClick.x;
+        const dy = e.clientY - this.pendingClick.y;
+        if (dx * dx + dy * dy > TAP_SLOP * TAP_SLOP) {
+          this.pendingClick = null;
+        }
+      }
+
       // Comment hover popup (mouse only — touch/pen have no hover, so they get
       // the popup on selection instead, below). Suppressed while drag-selecting
       // so the popup doesn't fight the selection rect. A header hover hides it.
@@ -1811,6 +1930,11 @@ export class XlsxViewer {
         const hovered = this.getCellAt(e.clientX, e.clientY);
         if (hovered) this.scheduleCommentPopup(hovered);
         else this.hideCommentPopup();
+        // IX1 — pointer cursor over a hyperlinked cell. Reached only when the
+        // pointer is NOT over a resize border (that path returns above), so the
+        // resize cursor is never clobbered. Otherwise clear back to default.
+        this.scrollHost.style.cursor =
+          hovered && this.hyperlinkAtCell(hovered) ? 'pointer' : '';
       }
 
       if (!this.isSelecting) return;
@@ -1862,8 +1986,26 @@ export class XlsxViewer {
               this.hideCommentPopup();
             }
           }
+          // IX1 — a touch/pen tap on a hyperlinked cell activates it.
+          if (this.activeCell) this.dispatchHyperlink(this.activeCell);
         }
         this.pendingTap = null;
+      }
+      // IX1 — a mouse click (press+release without a drag) on a hyperlinked cell
+      // activates it. The release must still land on the same cell the press did.
+      if (this.pendingClick && this.pendingClick.pointerId === e.pointerId) {
+        const dx = e.clientX - this.pendingClick.x;
+        const dy = e.clientY - this.pendingClick.y;
+        const upCell = this.getCellAt(e.clientX, e.clientY);
+        if (
+          dx * dx + dy * dy <= TAP_SLOP * TAP_SLOP &&
+          upCell &&
+          upCell.row === this.pendingClick.cell.row &&
+          upCell.col === this.pendingClick.cell.col
+        ) {
+          this.dispatchHyperlink(this.pendingClick.cell);
+        }
+        this.pendingClick = null;
       }
       this.isSelecting = false;
     });
@@ -1874,6 +2016,9 @@ export class XlsxViewer {
       }
       if (this.pendingTap && this.pendingTap.pointerId === e.pointerId) {
         this.pendingTap = null;
+      }
+      if (this.pendingClick && this.pendingClick.pointerId === e.pointerId) {
+        this.pendingClick = null;
       }
       this.isSelecting = false;
     });

@@ -561,7 +561,15 @@ export interface CellRange {
 export interface Hyperlink {
   col: number;
   row: number;
+  /** External target (ECMA-376 §18.3.1.47 `r:id`, resolved via worksheet rels).
+   *  `null` for a purely internal hyperlink. */
   url: string | null;
+  /** Internal target (§18.3.1.47 `location`): a defined name or a cell reference
+   *  such as `Sheet1!A1`. Present when the hyperlink navigates within the
+   *  workbook rather than to an external URL. */
+  location?: string | null;
+  /** Optional display text (§18.3.1.47 `display`). Not used for rendering. */
+  display?: string | null;
 }
 
 export interface ConditionalFormat {

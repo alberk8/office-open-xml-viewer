@@ -1891,12 +1891,13 @@ pub(crate) fn parse_sp_tree_node(
                                 return;
                             }
                             // No prebaked drawing → data-model fallback. `rels` are
-                            // the slide's, so `rels[dm_rid]` is the data part
-                            // (§21.4.2.22 relIds `r:dm`). Emits M (content list) or
-                            // S (placeholder); either way this graphicData is a
+                            // the referencing part's, so `rels[dm_rid]` resolved
+                            // against `slide_dir` is the data part (§21.4.2.22
+                            // relIds `r:dm`). Emits M (content list) or S
+                            // (placeholder); either way this graphicData is a
                             // diagram, so we return regardless of the outcome.
                             crate::smartart_fallback::emit_smartart_fallback(
-                                &dm_rid, &t, rels, theme, zip, out,
+                                &dm_rid, &t, slide_dir, rels, theme, zip, out,
                             );
                             return;
                         }

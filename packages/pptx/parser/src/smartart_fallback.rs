@@ -104,17 +104,20 @@ fn walk(
 }
 
 /// Entry point from the graphicFrame walker. `dm_rid` is the `<dgm:relIds r:dm>`
-/// value; `rels` are the *referencing part's* relationships (slide rels), so
-/// `rels[dm_rid]` is the data part target (ECMA-376 §21.4.2.22). Reads the data
-/// part, emits the M-stage content list, or the S-stage placeholder when the
-/// data model has no displayable text. Emits nothing (returns `false`) only when
-/// the data part itself cannot be read — the caller then leaves the frame empty
-/// exactly as before, so a non-diagram graphicData is never affected.
+/// value; `rels` are the *referencing part's* relationships and `part_dir` that
+/// part's directory (e.g. `ppt/slides`), so `rels[dm_rid]` resolved against
+/// `part_dir` is the data part (ECMA-376 §21.4.2.22). Reads the data part,
+/// emits the M-stage content list, or the S-stage placeholder when the data
+/// model is readable but has no displayable text. Emits nothing (returns
+/// `false`) when the relationship is missing or the data part cannot be
+/// read/parsed — the caller then leaves the frame empty exactly as before, so
+/// a non-diagram graphicData or a broken rel is never turned into output.
 ///
 /// Returns `true` when it produced at least one element.
 pub(crate) fn emit_smartart_fallback(
     dm_rid: &str,
     gf_xfrm: &Transform,
+    part_dir: &str,
     rels: &HashMap<String, String>,
     theme: &HashMap<String, String>,
     zip: &mut PptxZip,
@@ -123,7 +126,7 @@ pub(crate) fn emit_smartart_fallback(
     let Some(data_target) = rels.get(dm_rid) else {
         return false;
     };
-    let data_path = resolve_path("ppt/slides", data_target);
+    let data_path = resolve_path(part_dir, data_target);
     let Ok(data_xml) = read_zip_str(zip, &data_path) else {
         return false;
     };
@@ -606,7 +609,15 @@ mod tests {
         rels.insert("rId3".to_string(), "../diagrams/data1.xml".to_string());
         let theme = HashMap::new();
         let mut out = Vec::new();
-        let produced = emit_smartart_fallback("rId3", &frame(), &rels, &theme, &mut zip, &mut out);
+        let produced = emit_smartart_fallback(
+            "rId3",
+            &frame(),
+            "ppt/slides",
+            &rels,
+            &theme,
+            &mut zip,
+            &mut out,
+        );
         assert!(produced);
         assert_eq!(out.len(), 1, "one synthetic text-list shape");
         let SlideElement::Shape(shape) = &out[0] else {
@@ -662,7 +673,15 @@ mod tests {
         rels.insert("rId3".to_string(), "../diagrams/data1.xml".to_string());
         let theme = HashMap::new();
         let mut out = Vec::new();
-        emit_smartart_fallback("rId3", &frame(), &rels, &theme, &mut zip, &mut out);
+        emit_smartart_fallback(
+            "rId3",
+            &frame(),
+            "ppt/slides",
+            &rels,
+            &theme,
+            &mut zip,
+            &mut out,
+        );
         let SlideElement::Shape(shape) = &out[0] else {
             panic!("expected a shape");
         };
@@ -706,7 +725,15 @@ mod tests {
         rels.insert("rId3".to_string(), "../diagrams/data1.xml".to_string());
         let theme = HashMap::new();
         let mut out = Vec::new();
-        emit_smartart_fallback("rId3", &frame(), &rels, &theme, &mut zip, &mut out);
+        emit_smartart_fallback(
+            "rId3",
+            &frame(),
+            "ppt/slides",
+            &rels,
+            &theme,
+            &mut zip,
+            &mut out,
+        );
         let SlideElement::Shape(shape) = &out[0] else {
             panic!("expected a shape");
         };
@@ -736,7 +763,15 @@ mod tests {
         rels.insert("rId3".to_string(), "../diagrams/data1.xml".to_string());
         let theme = HashMap::new();
         let mut out = Vec::new();
-        emit_smartart_fallback("rId3", &frame(), &rels, &theme, &mut zip, &mut out);
+        emit_smartart_fallback(
+            "rId3",
+            &frame(),
+            "ppt/slides",
+            &rels,
+            &theme,
+            &mut zip,
+            &mut out,
+        );
         let SlideElement::Shape(shape) = &out[0] else {
             panic!("expected a shape");
         };
@@ -769,7 +804,15 @@ mod tests {
         rels.insert("rId3".to_string(), "../diagrams/data1.xml".to_string());
         let theme = HashMap::new();
         let mut out = Vec::new();
-        let produced = emit_smartart_fallback("rId3", &frame(), &rels, &theme, &mut zip, &mut out);
+        let produced = emit_smartart_fallback(
+            "rId3",
+            &frame(),
+            "ppt/slides",
+            &rels,
+            &theme,
+            &mut zip,
+            &mut out,
+        );
         assert!(produced);
         let SlideElement::Shape(shape) = &out[0] else {
             panic!("expected a shape");
@@ -791,7 +834,15 @@ mod tests {
         let rels = HashMap::new();
         let theme = HashMap::new();
         let mut out = Vec::new();
-        let produced = emit_smartart_fallback("rId3", &frame(), &rels, &theme, &mut zip, &mut out);
+        let produced = emit_smartart_fallback(
+            "rId3",
+            &frame(),
+            "ppt/slides",
+            &rels,
+            &theme,
+            &mut zip,
+            &mut out,
+        );
         assert!(!produced);
         assert!(out.is_empty());
     }

@@ -337,6 +337,10 @@ export {
   type SegStretch,
 } from './text/line-distribute';
 export { justifiedPiecePositions, type JustifiedPiece } from './text/justify-positions';
+// ECMA-376 §17.18.59 ST_NumberFormat rendering + §17.16.4.3.1 field-format switch
+// parsing — the shared numbering kernel (page numbers, list markers, …).
+export { formatOrdinalNumber, type NumberFormat } from './text/number-format';
+export { parseFieldFormatSwitch } from './text/field-format-switch';
 // Format-agnostic index navigation for hidden-item "skip" mode (pptx hidden
 // slides, xlsx hidden sheets): pure math over an isHidden(i) callback.
 export { nextVisibleIndex, resolveVisibleIndex, countVisible } from './nav/visible-index';

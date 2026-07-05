@@ -2,6 +2,8 @@ import { describe, it, expect, afterEach, vi } from 'vitest';
 import {
   deobfuscateOdttf,
   registerEmbeddedFonts,
+  unregisterEmbeddedFonts,
+  _resetEmbeddedRegistryForTests,
   type EmbeddedFontFace,
 } from './embedded.js';
 
@@ -12,6 +14,7 @@ afterEach(() => {
   G.document = ORIG.document;
   G.self = ORIG.self;
   G.FontFace = ORIG.FontFace;
+  _resetEmbeddedRegistryForTests(); // dedup registry is module-global
   vi.restoreAllMocks();
 });
 
@@ -114,6 +117,11 @@ function installFontFaceSet(opts: { failLoad?: (family: string) => boolean } = {
     add: (f: FakeFace) => {
       added.push(f);
     },
+    delete: (f: FakeFace) => {
+      const i = added.indexOf(f);
+      if (i >= 0) added.splice(i, 1);
+      return i >= 0;
+    },
     [Symbol.iterator]() {
       return added[Symbol.iterator]();
     },
@@ -214,7 +222,7 @@ describe('registerEmbeddedFonts', () => {
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('Flaky'));
   });
 
-  it('no-ops (no throw) when no FontFaceSet exists', async () => {
+  it('no-ops (returns []) when no FontFaceSet exists', async () => {
     delete G.document;
     delete G.self;
     delete G.FontFace;
@@ -222,7 +230,7 @@ describe('registerEmbeddedFonts', () => {
       registerEmbeddedFonts([
         { family: 'X', bytes: validHeader(), odttf: false, weight: 'normal', style: 'normal' },
       ]),
-    ).resolves.toBeUndefined();
+    ).resolves.toEqual([]);
   });
 
   it('registers into self.fonts when there is no document (worker context)', async () => {
@@ -246,5 +254,91 @@ describe('registerEmbeddedFonts', () => {
     ]);
     expect(added).toHaveLength(1);
     expect(added[0].family).toBe('WorkerFont');
+  });
+
+  it('returns the added FontFace objects for the caller to hold', async () => {
+    installFontFaceSet();
+    const held = await registerEmbeddedFonts([
+      { family: 'Held', bytes: validHeader(), odttf: false, weight: 'normal', style: 'normal' },
+    ]);
+    expect(held).toHaveLength(1);
+    expect((held[0] as unknown as FakeFace).family).toBe('Held');
+  });
+});
+
+// ---- dedup + destroy() cleanup (#762) --------------------------------------
+//
+// document.fonts is a process-global singleton, so opening the same embedded
+// font twice (two documents, or one document reopened in an SPA) must NOT add a
+// second byte-identical FontFace; and a document's destroy() must remove the
+// faces it registered so they don't accumulate forever.
+describe('registerEmbeddedFonts — dedup + unregisterEmbeddedFonts (#762)', () => {
+  const font = (family = 'Ubuntu'): EmbeddedFontFace => ({
+    family, bytes: validHeader(), odttf: false, weight: 'normal', style: 'normal',
+  });
+
+  it('does not add a byte-identical face twice (dedup by content signature)', async () => {
+    const { added } = installFontFaceSet();
+    // Simulate opening the same embedded font in two documents.
+    const a = await registerEmbeddedFonts([font()]);
+    const b = await registerEmbeddedFonts([font()]);
+    // Only ONE FontFace was added to the set; the second registration reused it.
+    expect(added).toHaveLength(1);
+    // Both callers hold the SAME shared FontFace reference.
+    expect(a).toHaveLength(1);
+    expect(b).toHaveLength(1);
+    expect(a[0]).toBe(b[0]);
+    // The single shared face is force-loaded exactly once (not per registration).
+    expect((added[0] as FakeFace).loadCalls).toBe(1);
+  });
+
+  it('distinct faces (different bytes) are NOT deduped', async () => {
+    const { added } = installFontFaceSet();
+    const other = new Uint8Array(validHeader());
+    other[8] ^= 0xff; // perturb a byte → different content signature
+    await registerEmbeddedFonts([font()]);
+    await registerEmbeddedFonts([{ ...font(), bytes: other }]);
+    expect(added).toHaveLength(2);
+  });
+
+  it('destroy() removes the document’s faces from the FontFaceSet', async () => {
+    const { added } = installFontFaceSet();
+    const held = await registerEmbeddedFonts([font()]);
+    expect(added).toHaveLength(1);
+    unregisterEmbeddedFonts(held); // what DocxDocument.destroy() calls
+    expect(added).toHaveLength(0); // face left the set
+  });
+
+  it('a shared font survives until the LAST holder releases it (refcount)', async () => {
+    const { added } = installFontFaceSet();
+    const a = await registerEmbeddedFonts([font()]); // document A
+    const b = await registerEmbeddedFonts([font()]); // document B (same font)
+    expect(added).toHaveLength(1);
+
+    unregisterEmbeddedFonts(a); // document A destroyed
+    // Still referenced by B → the face stays in the set.
+    expect(added).toHaveLength(1);
+
+    unregisterEmbeddedFonts(b); // document B destroyed
+    // Last holder gone → the face is removed.
+    expect(added).toHaveLength(0);
+  });
+
+  it('re-registering after a full release adds a fresh face (no stale registry entry)', async () => {
+    const { added } = installFontFaceSet();
+    const a = await registerEmbeddedFonts([font()]);
+    unregisterEmbeddedFonts(a);
+    expect(added).toHaveLength(0);
+    // Opening the same font again after everyone released it registers anew.
+    const b = await registerEmbeddedFonts([font()]);
+    expect(added).toHaveLength(1);
+    expect(b).toHaveLength(1);
+  });
+
+  it('unregisterEmbeddedFonts is a no-op for unknown / already-released faces', () => {
+    installFontFaceSet();
+    // A FontFace never registered here → nothing to remove, must not throw.
+    const stray = { family: 'Stray' } as unknown as FontFace;
+    expect(() => unregisterEmbeddedFonts([stray])).not.toThrow();
   });
 });

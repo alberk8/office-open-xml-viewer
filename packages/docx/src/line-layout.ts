@@ -160,12 +160,14 @@ export interface LayoutImageSeg {
    *  box. `undefined` ⇒ draw the full bitmap. */
   srcRect?: { l: number; t: number; r: number; b: number };
   /** ECMA-376 §21.2 — when set, this "image" box is actually a DrawingML chart.
-   *  The box flows and is sized exactly like an inline picture (via
-   *  {@link LayoutImageSeg.widthPt}/{@link LayoutImageSeg.heightPt}), but the
-   *  draw site paints it with the shared `renderChart` instead of blitting a
-   *  bitmap. `imagePath`/`mimeType` are empty sentinels for a chart seg — no
-   *  blip is fetched (the bitmap-prefetch walk keys off `run.type === 'image'`
-   *  and never sees a chart run). */
+   *  The box is sized like a picture (via {@link LayoutImageSeg.widthPt}/
+   *  {@link LayoutImageSeg.heightPt}) and painted with the shared `renderChart`
+   *  instead of blitting a bitmap: an inline chart seg flows with the text and
+   *  is drawn at its flow position; an anchored chart seg (`anchor: true`,
+   *  §20.4.2.3) is zero-width in the flow and the chart is drawn at its
+   *  absolute page box by `renderAnchorImages`. `imagePath`/`mimeType` are
+   *  empty sentinels for a chart seg — no blip is fetched (the bitmap-prefetch
+   *  walk keys off `run.type === 'image'` and never sees a chart run). */
   chart?: ChartModel;
   measuredWidth: number;
 }
@@ -1450,24 +1452,27 @@ export function buildSegments(runs: DocRun[], state: RenderState): LayoutSeg[] {
         measuredWidth: 0,
       });
     } else if (run.type === 'chart') {
-      // ECMA-376 §21.2 inline chart. Flow it as an inline picture box of the
-      // `<wp:extent>` natural size: the same LayoutImageSeg shape (empty
-      // `imagePath`/`mimeType` sentinels so `'imagePath' in seg` routes it
-      // through the image measurement/split path) but carrying the ChartModel,
-      // which the draw site paints with the shared `renderChart`. Anchor
-      // (floating) charts are not drawn yet — skip them so they occupy no box.
+      // ECMA-376 §21.2 chart. Flow it as a picture box of the `<wp:extent>`
+      // natural size: the same LayoutImageSeg shape (empty `imagePath`/
+      // `mimeType` sentinels so `'imagePath' in seg` routes it through the image
+      // measurement/split path) but carrying the ChartModel, which the draw site
+      // paints with the shared `renderChart`.
+      //
+      // A `<wp:anchor>` (floating) chart (§20.4.2.3) carries `anchor: true` and
+      // its parsed page-offset fields, exactly like an anchor ImageRun: the
+      // measure pass zeroes an anchor seg's width (it is not part of the inline
+      // flow) and `renderAnchorImages` draws it at the resolved absolute box.
       const chartRun = run as unknown as import('./types').ChartRun & { type: 'chart' };
-      if (chartRun.anchor) continue;
       segs.push({
         imagePath: '',
         mimeType: '',
         widthPt: chartRun.widthPt,
         heightPt: chartRun.heightPt,
-        anchor: false,
-        anchorXPt: 0,
-        anchorYPt: 0,
-        anchorXFromMargin: false,
-        anchorYFromPara: false,
+        anchor: chartRun.anchor ?? false,
+        anchorXPt: chartRun.anchorXPt ?? 0,
+        anchorYPt: chartRun.anchorYPt ?? 0,
+        anchorXFromMargin: chartRun.anchorXFromMargin ?? false,
+        anchorYFromPara: chartRun.anchorYFromPara ?? false,
         chart: chartRun.chart,
         measuredWidth: 0,
       });

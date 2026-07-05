@@ -76,6 +76,7 @@ describe('DocxDocument.destroy() — rejects in-flight worker requests', () => {
     // Fields destroy() clears after terminate(); undefined would throw.
     instance._imageCache = new Map();
     instance._embeddedFontFaces = [];
+    instance._googleFontFaces = [];
     instance._fetchImage = () => Promise.resolve(new Blob());
     return { doc: instance as unknown as DestroyProbe, bridge, worker };
   }

@@ -5,6 +5,7 @@ import { selectNotes } from './notes';
 import { selectHidden } from './hidden';
 import {
   preloadGoogleFonts,
+  unloadGoogleFonts,
   WorkerBridge,
   defaultDpr,
   isHTMLCanvas,
@@ -92,6 +93,12 @@ export class PptxPresentation {
   private _meta: PresentationMeta | null = null;
   private _mediaCache = new Map<string, Promise<Blob>>();
   private _imageCache = new Map<string, Promise<Blob>>();
+  /** Google-Fonts `FontFace` objects this deck preloaded into `document.fonts`
+   *  (main mode only — in worker mode the worker owns them and terminates with
+   *  its own FontFaceSet). Released in {@link destroy} so they do not leak into
+   *  the shared FontFaceSet for the lifetime of the SPA (deduped + refcounted in
+   *  core, so a web font shared with another open deck survives until both go). */
+  private _googleFontFaces: FontFace[] = [];
   /** One stable closure per instance: the decoded-bitmap and SVG caches key on
    *  this identity to scope decodes per deck (so two open decks never swap
    *  images for a shared zip path like ppt/media/image1.png). Reusing the same
@@ -162,7 +169,7 @@ export class PptxPresentation {
       opts.workerTimeoutMs,
     );
     if (mode === 'main' && opts.useGoogleFonts && pres._presentation) {
-      await preloadGoogleFonts(
+      pres._googleFontFaces = await preloadGoogleFonts(
         pptxFontPreloadNames(pres._presentation),
         PPTX_GOOGLE_FONTS,
       );
@@ -471,6 +478,14 @@ export class PptxPresentation {
     this._meta = null;
     this._mediaCache.clear();
     this._imageCache.clear();
+    // Release the Google-Fonts substitutes this deck preloaded into the shared
+    // FontFaceSet (main mode). Refcounted in core: a web font also used by another
+    // open deck stays until that one is destroyed too. Without this, every opened
+    // deck left its Google FontFace objects in `document.fonts` forever (SPA leak).
+    if (this._googleFontFaces.length > 0) {
+      unloadGoogleFonts(this._googleFontFaces);
+      this._googleFontFaces = [];
+    }
     // Release this deck's decoded raster bitmaps (GPU-backed) and SVG object
     // URLs promptly; both caches are keyed by `_fetchImage`.
     dropImageBitmapCache(this._fetchImage);

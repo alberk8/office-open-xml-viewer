@@ -219,9 +219,10 @@ describe('page-number restart + format — pagination stamp → computePageNumbe
   // A continuous restart section that is a MID-PAGE ISLAND — its content fits within
   // the page it starts on and NEVER owns a page top (the next section takes over the
   // following page's top). Its `w:start` therefore never surfaces as a displayed
-  // number; numbering stays sequential. This is sample-13's `start=2` continuous
-  // section (probed: it appears only on physical page 1, sandwiched between two other
-  // sections, owning no top) — which is why sample-13 stays [1, 2, 3, 4, 5].
+  // number; numbering stays sequential. No real sample has this shape (probed in the
+  // browser, sample-13's `start=2` continuous section begins exactly at a page
+  // boundary and OWNS that page's top with anchor offset 0 — see the module header
+  // of page-numbering.ts), so this arm is pinned here deterministically.
   it('a continuous restart island that owns no page top does not surface its start', () => {
     // section 1 = 2 lines; section 2 (start=99) = 2 lines ⇒ both share page 0 (4 of 5
     // lines). Section 2 owns no page top (it is the final section here, but its whole

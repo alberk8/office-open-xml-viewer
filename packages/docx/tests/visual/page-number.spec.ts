@@ -5,12 +5,13 @@ import { existsSync } from 'node:fs';
 // with pdftotext). Two shapes are covered:
 //
 // (1) NON-REGRESSION — sample-12/13 both carry `<w:pgNumType>` (sample-12: continuous
-//     start=1; sample-13: nextPage start=1 + a continuous start=2 island) plus a
-//     footer PAGE field, and Word prints SEQUENTIAL footers. No restart is VISIBLE:
+//     start=1; sample-13: nextPage start=1 + a continuous start=2) plus a footer
+//     PAGE field, and Word prints SEQUENTIAL footers. No restart is VISIBLE:
 //     start=1 on the first section is the identity, and sample-13's continuous
-//     start=2 section is a MID-PAGE ISLAND (it appears only on physical page 1,
-//     sandwiched between two other sections, and owns no page top — see the probe
-//     in page-numbering.ts's header), so its start never surfaces. The DISPLAYED
+//     start=2 section begins exactly AT a page boundary (probed: its content first
+//     appears on physical page 2, the SAME page whose top it owns — see the module
+//     header of page-numbering.ts), so its restart fires with anchor offset 0 and
+//     shows start=2, which equals the natural continuation (1+1). The DISPLAYED
 //     footer number therefore equals the physical page number. (sample-14 also
 //     carries pgNumType but its footer shares the bottom band with other numeric
 //     content, so the position heuristic can't isolate it; its structure — nextPage

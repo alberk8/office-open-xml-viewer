@@ -120,18 +120,17 @@ describe('computePageNumbering — ECMA-376 §17.6.12', () => {
   // owning every page top. Word's PDF for sample-13 shows sequential 1,2,3,4,5 and
   // this stub asserts the identity case (start=1 on physical page 1 ⇒ 1..N).
   //
-  // NOTE — this stub is NOT how real sample-13 paginates. Probed on the real file,
-  // its `start=2` continuous section is a MID-PAGE ISLAND: its content appears only
-  // on physical page 1, sandwiched between two other sections, and it OWNS no page
-  // top. A restart section that owns no top never surfaces its `w:start` as a
-  // displayed number, so numbering stays sequential regardless of the start VALUE.
-  // (Its 2 would coincide with the natural continuation anyway, but that is not why
-  // it stays sequential — it stays sequential because it owns no top.) The real-file
-  // behaviour is covered end-to-end by tests/visual/page-number.spec.ts (renders
-  // sample-13 and asserts 1..5); the SPILLOVER case where a continuous restart DOES
-  // own later page tops is pinned by sample-27 there and by the deterministic
-  // continuous-spillover cases in page-number-field-render.test.ts (#804). This stub
-  // pins only the start=1-identity arithmetic.
+  // NOTE — this stub is NOT how real sample-13 paginates. Probed on the real file
+  // (browser pagination), its `start=2` continuous section begins exactly AT a page
+  // boundary: its content first appears on physical page 2, the SAME page whose top
+  // it owns (it does not share page 1). Its restart therefore fires with anchor
+  // offset 0 and shows plain start=2 — which coincides with the natural continuation
+  // (1+1) — so numbering stays sequential. The real-file behaviour is covered
+  // end-to-end by tests/visual/page-number.spec.ts (renders sample-13 and asserts
+  // 1..5); the SPILLOVER case where a continuous restart's first-appearance page
+  // PRECEDES the first page it owns is pinned by sample-27 there and by the
+  // deterministic continuous-spillover cases in page-number-field-render.test.ts
+  // (#804). This stub pins only the start=1-identity arithmetic.
   it('reproduces sample-13: nextPage start=1 + continuous start=2 stays sequential', () => {
     const firstSection = {};
     const num: PageNumType = { start: 1 };

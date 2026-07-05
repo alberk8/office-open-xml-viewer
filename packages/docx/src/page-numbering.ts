@@ -43,12 +43,15 @@
 // anchors each restart to the section's first-APPEARANCE page (firstAppearanceBySection),
 // so the spillover page shows `start + (thisPage − firstAppearancePage)`.
 //
-// This is consistent with real sample-13 ([1, 2, 3, 4, 5]): its `w:start="2"`
-// continuous section is a MID-PAGE ISLAND — it appears only on physical page 1,
-// sandwiched between two other sections, and OWNS no page top. A restart that owns
-// no top never surfaces a displayed number, so numbering stays sequential. (Its
-// series value 2 would only ever be shown had it owned a page top, where — as it
-// happens — 2 also equals the natural continuation.)
+// This is consistent with real sample-13 ([1, 2, 3, 4, 5]): probed on the real file
+// (browser pagination), its `w:start="2"` continuous section begins exactly AT a
+// page boundary — its content first appears on physical page 2, the SAME page whose
+// top it owns (it does not share page 1). The anchor offset is therefore 0 and its
+// restart shows plain `start` = 2, which coincides with the natural continuation
+// (1+1), so numbering stays sequential. (The related shape — a continuous restart
+// that OWNS no page top at all, a mid-page island — never surfaces its start; no
+// real sample has that shape, so it is pinned deterministically in
+// page-number-field-render.test.ts.)
 
 import type { PaginatedBodyElement, PageNumType } from './types';
 import type { NumberFormat } from '@silurus/ooxml-core';

@@ -1426,4 +1426,9 @@ export interface RenderPageOptions {
    *  in their normal style (no author colour, no underline / strikethrough)
    *  — equivalent to Word's "Final / No Markup" view. */
   showTrackChanges?: boolean;
+  /** ECMA-376 §17.16.5.16 DATE / §17.16.5.72 TIME — the "current" instant a
+   *  DATE/TIME field formats through its `\@` date picture (§17.16.4.1). A `Date`
+   *  or epoch-ms number. Default = the real current time at render. Set a fixed
+   *  value for deterministic / reproducible DATE/TIME field output. */
+  currentDate?: Date | number;
 }

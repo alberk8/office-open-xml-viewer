@@ -341,6 +341,9 @@ export { justifiedPiecePositions, type JustifiedPiece } from './text/justify-pos
 // parsing — the shared numbering kernel (page numbers, list markers, …).
 export { formatOrdinalNumber, type NumberFormat } from './text/number-format';
 export { parseFieldFormatSwitch } from './text/field-format-switch';
+// ECMA-376 §17.16.4.1 date-and-time formatting ("picture") switch — evaluates a
+// DATE/TIME field's `\@ "…"` picture against a given instant (shared by docx/pptx).
+export { formatDateTimePicture, parseDateTimePictureSwitch } from './text/date-time-picture';
 // Format-agnostic index navigation for hidden-item "skip" mode (pptx hidden
 // slides, xlsx hidden sheets): pure math over an isHidden(i) callback.
 export { nextVisibleIndex, resolveVisibleIndex, countVisible } from './nav/visible-index';

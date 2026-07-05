@@ -924,7 +924,17 @@ pub struct CfValue {
 pub struct Hyperlink {
     pub col: u32,
     pub row: u32,
+    /// External target (ECMA-376 §18.3.1.47 `r:id` → resolved via worksheet
+    /// rels). `None` for a purely internal hyperlink.
     pub url: Option<String>,
+    /// Internal target (§18.3.1.47 `location` attribute): a defined name or a
+    /// cell reference such as `Sheet1!A1`. Inline — no rels resolution needed.
+    /// A `<hyperlink>` may carry `r:id` (external), `location` (internal), or
+    /// both.
+    pub location: Option<String>,
+    /// Optional display text (§18.3.1.47 `display`). Not used for rendering
+    /// (the cell value drives that) but preserved for callers.
+    pub display: Option<String>,
 }
 
 #[derive(Debug, Serialize)]

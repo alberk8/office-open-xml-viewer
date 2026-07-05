@@ -734,8 +734,15 @@ fn parse_si_node(node: &roxmltree::Node, theme_colors: &[String]) -> SharedStrin
         runs: if has_runs { Some(runs) } else { None },
     }
 }
-/// `(row, col, relationship id)` triples for cell hyperlinks pending rels resolution.
-type HyperlinkRids = Vec<(u32, u32, String)>;
+/// Pending cell-hyperlink descriptors, awaiting rels resolution of the external
+/// `r:id`. Each entry is `(col, row, rid, location, display)`:
+/// - `rid`: the external relationship id (§18.3.1.47 `r:id`), if present.
+/// - `location`: the inline internal target (§18.3.1.47 `location`) — a defined
+///   name or cell ref like `Sheet1!A1`. No rels lookup required.
+/// - `display`: the optional display text (§18.3.1.47 `display`).
+///
+/// A `<hyperlink>` may carry `rid`, `location`, or both, so both are optional.
+type HyperlinkRids = Vec<(u32, u32, Option<String>, Option<String>, Option<String>)>;
 
 fn parse_worksheet(
     xml: &str,
@@ -980,12 +987,19 @@ fn parse_worksheet(
                     // Only first cell of ref range
                     let ref_single = ref_str.split(':').next().unwrap_or(ref_str);
                     let (col, row) = parse_cell_ref(ref_single);
-                    if let Some(rid) = hl
+                    // §18.3.1.47: `r:id` is the external target (resolved later
+                    // via rels); `location` is the inline internal target
+                    // (defined name or cell ref). Either may be present — or
+                    // both — so capture whichever exist and skip only when both
+                    // are absent (nothing to navigate to).
+                    let rid = hl
                         .attributes()
                         .find(|a| a.name() == "id" && is_r_ns(a.namespace()))
-                        .map(|a| a.value().to_string())
-                    {
-                        hyperlink_rids.push((col, row, rid));
+                        .map(|a| a.value().to_string());
+                    let location = hl.attribute("location").map(|s| s.to_string());
+                    let display = hl.attribute("display").map(|s| s.to_string());
+                    if rid.is_some() || location.is_some() {
+                        hyperlink_rids.push((col, row, rid, location, display));
                     }
                 }
             }
@@ -1686,20 +1700,32 @@ fn load_hyperlinks(
     if hyperlink_rids.is_empty() {
         return Vec::new();
     }
-    let Some((sheet_dir, sheet_file)) = sheet_path.rsplit_once('/') else {
-        return Vec::new();
+    // Only read the sheet rels part when at least one hyperlink carries an
+    // external `r:id`. A worksheet whose hyperlinks are all internal
+    // (`location`-only) needs no rels lookup (§18.3.1.47).
+    let needs_rels = hyperlink_rids.iter().any(|(_, _, rid, _, _)| rid.is_some());
+    let rels = if needs_rels {
+        match sheet_path.rsplit_once('/') {
+            Some((sheet_dir, sheet_file)) => {
+                let rels_path = format!("xl/{}/_rels/{}.rels", sheet_dir, sheet_file);
+                read_zip_string(archive, &rels_path)
+                    .ok()
+                    .map(|xml| parse_rels_map(&xml))
+                    .unwrap_or_default()
+            }
+            None => Default::default(),
+        }
+    } else {
+        Default::default()
     };
-    let rels_path = format!("xl/{}/_rels/{}.rels", sheet_dir, sheet_file);
-    let rels = read_zip_string(archive, &rels_path)
-        .ok()
-        .map(|xml| parse_rels_map(&xml))
-        .unwrap_or_default();
     hyperlink_rids
         .into_iter()
-        .map(|(col, row, rid)| Hyperlink {
+        .map(|(col, row, rid, location, display)| Hyperlink {
             col,
             row,
-            url: rels.get(&rid).cloned(),
+            url: rid.as_deref().and_then(|r| rels.get(r).cloned()),
+            location,
+            display,
         })
         .collect()
 }
@@ -2503,6 +2529,73 @@ mod sheet_view_tests {
         assert!(
             p1 < p2 && p2 < p3,
             "colWidths keys must serialize in ascending order (1,2,3), got positions {p1},{p2},{p3} in {widths}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod hyperlink_tests {
+    use super::parse_worksheet;
+
+    const NS: &str = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
+    const R_NS: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+
+    /// ECMA-376 §18.3.1.47: `<hyperlink ref r:id>` is an *external* target
+    /// (`r:id` resolved via the sheet rels, populating `url`), while
+    /// `<hyperlink ref location>` is an *internal* target captured inline. The
+    /// parse step must record the pending `r:id` for the external link and the
+    /// inline `location` for the internal one. `parse_worksheet` returns the
+    /// pending `(col, row, rid, location, display)` descriptors before rels
+    /// resolution; both attributes must be threaded through.
+    #[test]
+    fn captures_external_rid_and_internal_location() {
+        let xml = format!(
+            r#"<worksheet xmlns="{NS}" xmlns:r="{R_NS}"><sheetData/>
+                 <hyperlinks>
+                   <hyperlink ref="A1" r:id="rId1" display="Anthropic"/>
+                   <hyperlink ref="B2" location="Sheet2!A1" display="Go to Sheet2"/>
+                 </hyperlinks>
+               </worksheet>"#
+        );
+        let (_ws, rids) = parse_worksheet(&xml, &[], &[], "Sheet1").expect("worksheet parses");
+
+        // `parse_cell_ref` yields 1-based (col, row): A1 → (1, 1), B2 → (2, 2).
+        // A1 → external: rid present (resolves to url later), no location.
+        let a1 = rids
+            .iter()
+            .find(|(c, r, ..)| *c == 1 && *r == 1)
+            .expect("A1 hyperlink captured");
+        assert_eq!(a1.2.as_deref(), Some("rId1"), "external r:id captured");
+        assert_eq!(a1.3, None, "external hyperlink has no inline location");
+        assert_eq!(a1.4.as_deref(), Some("Anthropic"), "display captured");
+
+        // B2 → internal: location present, no rid.
+        let b2 = rids
+            .iter()
+            .find(|(c, r, ..)| *c == 2 && *r == 2)
+            .expect("B2 hyperlink captured");
+        assert_eq!(b2.2, None, "internal hyperlink has no external r:id");
+        assert_eq!(
+            b2.3.as_deref(),
+            Some("Sheet2!A1"),
+            "internal location captured"
+        );
+        assert_eq!(b2.4.as_deref(), Some("Go to Sheet2"), "display captured");
+    }
+
+    /// A `<hyperlink>` with neither `r:id` nor `location` is not navigable and
+    /// must be skipped (nothing to record).
+    #[test]
+    fn skips_hyperlink_without_target() {
+        let xml = format!(
+            r#"<worksheet xmlns="{NS}"><sheetData/>
+                 <hyperlinks><hyperlink ref="C3" display="dead"/></hyperlinks>
+               </worksheet>"#
+        );
+        let (_ws, rids) = parse_worksheet(&xml, &[], &[], "Sheet1").expect("worksheet parses");
+        assert!(
+            rids.is_empty(),
+            "hyperlink with no r:id/location is skipped"
         );
     }
 }

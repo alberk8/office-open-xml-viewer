@@ -1403,25 +1403,6 @@ export class XlsxViewer implements ZoomableViewer {
     return this.isRtl ? rtlMirrorX(logicalX, w, this.canvasArea.clientWidth) : logicalX;
   }
 
-  /** Total UNSCALED (cs=1) px of the frozen row band / column band of a sheet:
-   *  the sum of the frozen rows' heights and frozen columns' widths. The header
-   *  (HEADER_W/HEADER_H) is NOT included — callers add it separately. Mirrors the
-   *  inline frozen-dimension loops in {@link getCellAt}; factored out so the
-   *  pointer-anchored zoom re-anchor measures the same fixed (non-scrolling)
-   *  lead-in past which the grid actually scrolls. */
-  private frozenExtent(ws: Worksheet): { frozenW: number; frozenH: number } {
-    const mdw = getMdwForWorksheet(ws);
-    let frozenH = 0;
-    for (let r = 1; r <= (ws.freezeRows ?? 0); r++) {
-      frozenH += rowHeightToPx(ws.rowHeights[r] ?? ws.defaultRowHeight);
-    }
-    let frozenW = 0;
-    for (let c = 1; c <= (ws.freezeCols ?? 0); c++) {
-      frozenW += colWidthToPx(ws.colWidths[c] ?? ws.defaultColWidth, mdw);
-    }
-    return { frozenW, frozenH };
-  }
-
   /** Park the scrollbar at the sheet's natural start: scrollLeft=0 for LTR,
    *  the right end for RTL (so col A shows first). */
   private resetHorizontalScroll(): void {
@@ -3166,35 +3147,35 @@ export class XlsxViewer implements ZoomableViewer {
       this.updateSpacerSize(this.currentWorksheet);
 
       if (gestureAnchor) {
-        // POINTER-ANCHORED zoom (both axes). The header + frozen band are drawn at
-        // a FIXED screen position and do NOT scroll (see getCellAt); the grid
-        // scrolls BELOW/RIGHT of them. Their on-screen size is the UNSCALED lead-in
-        // × cs, so it scales with the zoom. Work in a "virtual scroll" whose origin
-        // is the grid's top-left (canvasArea): T = scroll − leadIn·cs. In that space
-        // the scaling content is purely linear, so core's anchoredZoomOffset (anchor
-        // = the raw pointer offset from the grid top-left) keeps the cell under the
-        // cursor fixed; add the NEW-scale lead-in back to recover the native scroll.
-        const { frozenW, frozenH } = this.frozenExtent(this.currentWorksheet);
-        const leadX = HEADER_W + frozenW; // unscaled px from grid start to scroll origin (x)
-        const leadY = HEADER_H + frozenH; // …and (y)
+        // POINTER-ANCHORED zoom (both axes). The header + frozen band are drawn
+        // at a FIXED screen position and do NOT scroll (see getCellAt), but their
+        // on-screen size is the UNSCALED extent K × cs — a SCALING lead-in. From
+        // getCellAt, the logical row under screen-y `py` is
+        //   (py + scrollTop)/cs − K            (K = HEADER_H + frozenH)
+        // and requiring that to be invariant across cs makes the K·cs terms
+        // cancel exactly:
+        //   scrollTop' = ratio·(scrollTop + py) − py
+        // — i.e. the RAW pointer is the anchor and the clamp is the native
+        // [0, maxScroll] (see anchoredZoomOffset's LEAD-INS note; routing through
+        // a lead-in-shifted virtual scroll would distort the low clamp and floor
+        // scrollTop at K·cs near the sheet start).
 
         // Vertical: native scrollTop is start-anchored in both LTR/RTL.
         const maxTop = Math.max(0, this.scrollHost.scrollHeight - this.scrollHost.clientHeight);
-        const tTop = anchoredZoomOffset(prevScrollTop - leadY * prevScale, gestureAnchor.y, prevScale, next, {
-          maxScroll: maxTop - leadY * next,
+        this.scrollHost.scrollTop = anchoredZoomOffset(prevScrollTop, gestureAnchor.y, prevScale, next, {
+          maxScroll: maxTop,
         });
-        this.scrollHost.scrollTop = Math.min(maxTop, Math.max(0, tTop + leadY * next));
 
-        // Horizontal: anchor in the logical-LTR space the grid math uses, so RTL
-        // is handled by translating the pointer through screenX (an involution)
-        // and re-deriving the native scrollLeft from the effective (start-anchored)
+        // Horizontal: anchor in the logical-LTR space the grid math uses (the
+        // same cancellation holds for K = HEADER_W + frozenW), so RTL is handled
+        // by translating the pointer through screenX (an involution) and
+        // re-deriving the native scrollLeft from the effective (start-anchored)
         // position, exactly as the START-anchored branch does.
         const anchorLogicalX = this.screenX(gestureAnchor.x, 0);
         const maxLeftV = this.maxScrollLeft;
-        const tLeft = anchoredZoomOffset(prevEffective - leadX * prevScale, anchorLogicalX, prevScale, next, {
-          maxScroll: maxLeftV - leadX * next,
+        const newEffective = anchoredZoomOffset(prevEffective, anchorLogicalX, prevScale, next, {
+          maxScroll: maxLeftV,
         });
-        const newEffective = Math.min(maxLeftV, Math.max(0, tLeft + leadX * next));
         this.effectiveH = newEffective;
         this.scrollHost.scrollLeft = this.isRtl ? Math.max(0, maxLeftV - newEffective) : newEffective;
       } else {

@@ -54,7 +54,21 @@ interface Priv {
   canvasArea: { clientWidth: number; clientHeight: number; getBoundingClientRect(): DOMRect };
   scrollHost: FakeScrollHost;
   _pendingZoomAnchor: { x: number; y: number } | null;
-  frozenExtent(ws: Worksheet): { frozenW: number; frozenH: number };
+}
+
+/** Unscaled (cs=1) frozen band extent of `ws` — mirrors getCellAt's inline
+ *  loops. Used only to spell out the full logical-coordinate oracle below. */
+function frozenExtent(ws: Worksheet): { frozenW: number; frozenH: number } {
+  const mdw = getMdwForWorksheet(ws);
+  let frozenH = 0;
+  for (let r = 1; r <= (ws.freezeRows ?? 0); r++) {
+    frozenH += rowHeightToPx(ws.rowHeights[r] ?? ws.defaultRowHeight);
+  }
+  let frozenW = 0;
+  for (let c = 1; c <= (ws.freezeCols ?? 0); c++) {
+    frozenW += colWidthToPx(ws.colWidths[c] ?? ws.defaultColWidth, mdw);
+  }
+  return { frozenW, frozenH };
 }
 
 /** Construct a viewer, inject `ws`, and size the canvas area so fit math has a
@@ -222,7 +236,7 @@ describe('XlsxViewer IX9 zoom contract', () => {
     priv.scrollHost.scrollTop = 800;
     priv.scrollHost.scrollLeft = 600;
 
-    const { frozenW, frozenH } = priv.frozenExtent(ws);
+    const { frozenW, frozenH } = frozenExtent(ws);
     const py = 180; // pointer screen-y within the grid
     const px = 260; // pointer screen-x
     const csOld = 1;
@@ -241,6 +255,66 @@ describe('XlsxViewer IX9 zoom contract', () => {
     const logicalXAfter = (px + priv.scrollHost.scrollLeft) / csNew - (HEADER_W + frozenW);
     expect(logicalYAfter).toBeCloseTo(logicalYBefore, 2);
     expect(logicalXAfter).toBeCloseTo(logicalXBefore, 2);
+  });
+
+  // FROZEN PANES: the header + frozen band is a SCALING lead-in (drawn at ×cs),
+  // so it cancels out of the anchor equation — the raw pointer is the anchor and
+  // the SAME logical-cell invariance holds with freezeRows/freezeCols > 0.
+  it('a gesture-anchored zoom keeps the logical cell fixed with frozen panes', () => {
+    installDom();
+    const ws = makeSheet();
+    (ws as { freezeRows?: number }).freezeRows = 2;
+    (ws as { freezeCols?: number }).freezeCols = 1;
+    const { v, priv } = mount(ws, { cellScale: 1 });
+    priv.scrollHost.clientWidth = 400;
+    priv.scrollHost.clientHeight = 300;
+    priv.scrollHost.scrollWidth = 100000;
+    priv.scrollHost.scrollHeight = 100000;
+    priv.scrollHost.scrollTop = 800;
+    priv.scrollHost.scrollLeft = 600;
+
+    const { frozenW, frozenH } = frozenExtent(ws);
+    expect(frozenH).toBeGreaterThan(0); // the frozen band is real in this fixture
+    expect(frozenW).toBeGreaterThan(0);
+    const py = 220; // pointer inside the scrollable region (below header + frozen)
+    const px = 300;
+    const csOld = 1;
+    const logicalYBefore = (py + priv.scrollHost.scrollTop) / csOld - (HEADER_H + frozenH);
+    const logicalXBefore = (px + priv.scrollHost.scrollLeft) / csOld - (HEADER_W + frozenW);
+
+    priv._pendingZoomAnchor = { x: px, y: py };
+    v.setScale(1.5);
+    const csNew = v.getScale();
+    expect(csNew).toBe(1.5);
+
+    const logicalYAfter = (py + priv.scrollHost.scrollTop) / csNew - (HEADER_H + frozenH);
+    const logicalXAfter = (px + priv.scrollHost.scrollLeft) / csNew - (HEADER_W + frozenW);
+    expect(logicalYAfter).toBeCloseTo(logicalYBefore, 2);
+    expect(logicalXAfter).toBeCloseTo(logicalXBefore, 2);
+  });
+
+  // Near the sheet START the pointer-pinning offset may legitimately fall BELOW
+  // the scaled lead-in (header + frozen) — the clamp must be the native
+  // [0, maxScroll], not a K·cs floor (regression pin for the virtual-scroll
+  // detour, which clamped scrollTop up to K·cs_new near the top).
+  it('a gesture zoom near the sheet start is not floored at the scaled lead-in', () => {
+    installDom();
+    const ws = makeSheet();
+    const { v, priv } = mount(ws, { cellScale: 1 });
+    priv.scrollHost.clientWidth = 400;
+    priv.scrollHost.clientHeight = 300;
+    priv.scrollHost.scrollWidth = 100000;
+    priv.scrollHost.scrollHeight = 100000;
+    priv.scrollHost.scrollTop = 0; // at the very top
+    priv.scrollHost.scrollLeft = 0;
+
+    const py = 100;
+    priv._pendingZoomAnchor = { x: 50, y: py };
+    v.setScale(1.2);
+    // Exact pointer-pinned offset: ratio·(scrollTop + py) − py = 1.2·100 − 100.
+    expect(priv.scrollHost.scrollTop).toBeCloseTo(20, 6);
+    // The K·cs_new floor would have been HEADER_H·1.2 = 24 (> 20).
+    expect(priv.scrollHost.scrollTop).toBeLessThan(HEADER_H * 1.2);
   });
 
   it('a non-gesture setScale preserves the START-anchored top-left (unchanged)', () => {

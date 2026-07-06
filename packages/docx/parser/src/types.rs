@@ -1573,6 +1573,12 @@ pub struct ImageRun {
     /// matching Word's picture recolour.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub duotone: Option<Duotone>,
+    /// ECMA-376 §20.1.8.6 `<a:blip><a:alphaModFix@amt>` opacity as a fraction
+    /// (0.0–1.0). `None` = fully opaque (the common case). When set, the renderer
+    /// multiplies the picture's `globalAlpha` by this fraction, exactly as the
+    /// pptx/xlsx picture paths do.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub alpha: Option<f64>,
     /// Wrap mode for anchor images. One of:
     ///   "square" | "topAndBottom" | "none" | "tight" | "through"
     /// Inline images and anchors without an explicit wrap element use "none".

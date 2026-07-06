@@ -517,7 +517,20 @@ export type ShapeGeom =
       /** ECMA-376 §20.1.8.6 `<a:alphaModFix@amt>` opacity fraction (0..1) on the
        *  leaf pic. Absent ⇒ opaque. Applied via `globalAlpha`. */
       alpha?: number;
+      /** ECMA-376 §20.1.8.23 `<a:duotone>` recolour on the leaf pic. Absent ⇒
+       *  no effect. */
+      duotone?: Duotone;
     };
+
+/** ECMA-376 §20.1.8.23 `<a:duotone>` image effect, resolved to its two endpoint
+ *  colours (mirrors the shared Rust `ooxml_common::blip::Duotone`). `clr1` is the
+ *  dark endpoint (luminance 0), `clr2` the light endpoint (luminance 1); both are
+ *  6-char uppercase hex WITHOUT a leading `#`, with per-colour transforms already
+ *  applied by the parser. */
+export interface Duotone {
+  clr1: string;
+  clr2: string;
+}
 
 export interface PathInfo {
   w: number;
@@ -583,6 +596,10 @@ export interface ImageAnchor {
    *  picture composites over the cells beneath it (e.g. a pink translucent photo
    *  over a matching cell fill). */
   alpha?: number;
+  /** ECMA-376 §20.1.8.23 `<a:duotone>` recolour effect. Absent (the common case)
+   *  ⇒ no effect. When present, the renderer remaps the image along the
+   *  `clr1`→`clr2` luminance ramp before drawing. */
+  duotone?: Duotone;
 }
 
 export interface CellRange {

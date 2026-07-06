@@ -7,7 +7,8 @@ use ooxml_common::zip::read_zip_string;
 // a blip's `<a:extLst>`. Replaces xlsx's former local `mime_from_ext` (a strict
 // subset that lacked the `svg` arm and so dropped SVG parts).
 use ooxml_common::blip::{
-    blip_embed_rid, mime_from_ext, parse_blip_alpha, parse_src_rect, svg_blip_rid,
+    blip_embed_rid, mime_from_ext, parse_blip_alpha, parse_blip_duotone, parse_src_rect,
+    svg_blip_rid,
 };
 use ooxml_common::depth::{parse_guarded, DepthGuard};
 use ooxml_common::ns::{attr_ns, is_a_ns, is_xdr_ns, relationships};
@@ -55,6 +56,9 @@ pub(crate) fn parse_drawing_anchors(
     drawing_rels: &HashMap<String, String>,
     drawing_dir: &str,
     archive: &mut crate::XlsxZip,
+    // Positional clrScheme palette, for resolving a picture's `<a:duotone>`
+    // effect colours (§20.1.8.23).
+    theme_colors: &[String],
 ) -> Vec<ImageAnchor> {
     let Ok(doc) = parse_guarded(drawing_xml) else {
         return Vec::new();
@@ -78,8 +82,10 @@ pub(crate) fn parse_drawing_anchors(
         let mut native_ext_cy: i64 = 0;
         // ECMA-376 §20.1.8.55 `<a:srcRect>` source-image crop (None ⇒ uncropped).
         let mut src_rect: Option<SrcRect> = None;
-        // ECMA-376 §20.1.8.6 `<a:alphaModFix>` opacity (None ⇒ opaque).
+        // ECMA-376 §20.1.8.6 `<a:alphaModFix>` opacity (None ⇒ opaque) and
+        // §20.1.8.23 `<a:duotone>` recolour (None ⇒ no effect).
         let mut alpha: Option<f64> = None;
+        let mut duotone: Option<Duotone> = None;
         // ECMA-376 §20.5.2.33 `twoCellAnchor@editAs`. Possible values:
         // "twoCell" (default), "oneCell", "absolute". With "oneCell" Excel
         // preserves the picture's saved size from <xdr:spPr><a:xfrm><a:ext>
@@ -143,8 +149,16 @@ pub(crate) fn parse_drawing_anchors(
                         }
                         // `<a:srcRect>` is a sibling of `<a:blip>` inside blipFill.
                         src_rect = parse_src_rect(bf);
-                        // §20.1.8.6 `<a:alphaModFix>` overall opacity.
+                        // Blip effects: `<a:alphaModFix>` opacity (§20.1.8.6) and
+                        // `<a:duotone>` recolour (§20.1.8.23). The duotone colours
+                        // resolve through the shared DrawingML grammar using the
+                        // sheet's theme palette.
                         alpha = parse_blip_alpha(bf);
+                        duotone = parse_blip_duotone(
+                            bf,
+                            &XlsxSchemeResolver { theme_colors },
+                            ooxml_common::color::TintMode::PowerPointLinear,
+                        );
                     }
                     // <xdr:pic><xdr:spPr><a:xfrm><a:ext cx cy>: the picture's
                     // own saved EMU extent. Authoritative when editAs="oneCell".
@@ -213,6 +227,7 @@ pub(crate) fn parse_drawing_anchors(
             svg_image_path,
             src_rect,
             alpha,
+            duotone,
         });
     }
     anchors
@@ -1167,13 +1182,21 @@ pub(crate) fn collect_shapes(
             let svg_image_path = svg_rid.as_deref().and_then(|r| rid_urls.get(r)).cloned();
             let raster_path = pic_rid.as_deref().and_then(|r| rid_urls.get(r)).cloned();
 
-            // `<a:srcRect>` crop and `<a:alphaModFix>` opacity live in the leaf's
-            // `<xdr:blipFill>` (§20.1.8.55 / §20.1.8.6).
+            // `<a:srcRect>` crop, `<a:alphaModFix>` opacity and `<a:duotone>`
+            // recolour all live in the leaf's `<xdr:blipFill>` (§20.1.8.55 /
+            // §20.1.8.6 / §20.1.8.23).
             let leaf_blip_fill = child
                 .descendants()
                 .find(|n| n.is_element() && n.tag_name().name() == "blipFill");
             let src_rect = leaf_blip_fill.and_then(parse_src_rect);
             let alpha = leaf_blip_fill.and_then(parse_blip_alpha);
+            let duotone = leaf_blip_fill.and_then(|bf| {
+                parse_blip_duotone(
+                    bf,
+                    &XlsxSchemeResolver { theme_colors },
+                    ooxml_common::color::TintMode::PowerPointLinear,
+                )
+            });
 
             // Prefer the raster as `image_path`; fall back to the SVG when no
             // raster is embedded so an svg-only leaf is never dropped. Drop only
@@ -1215,6 +1238,7 @@ pub(crate) fn collect_shapes(
                     svg_image_path,
                     src_rect,
                     alpha,
+                    duotone,
                 },
                 text: None,
             });
@@ -1557,6 +1581,9 @@ pub(crate) fn build_drawing_rid_urls(
 pub(crate) fn load_sheet_images(
     archive: &mut crate::XlsxZip,
     sheet_path: &str, // e.g. "worksheets/sheet1.xml"
+    // Positional clrScheme palette, for resolving a picture's `<a:duotone>`
+    // effect colours (§20.1.8.23) via the shared DrawingML colour grammar.
+    theme_colors: &[String],
 ) -> Vec<ImageAnchor> {
     // sheet rels path:  xl/worksheets/_rels/sheet1.xml.rels
     let Some((sheet_dir, sheet_file)) = sheet_path.rsplit_once('/') else {
@@ -1606,7 +1633,13 @@ pub(crate) fn load_sheet_images(
             .map(|xml| parse_rels_map(&xml))
             .unwrap_or_default();
 
-        let mut anchors = parse_drawing_anchors(&drawing_xml, &drawing_rels, drawing_dir, archive);
+        let mut anchors = parse_drawing_anchors(
+            &drawing_xml,
+            &drawing_rels,
+            drawing_dir,
+            archive,
+            theme_colors,
+        );
         all_anchors.append(&mut anchors);
     }
     all_anchors
@@ -1946,6 +1979,7 @@ pub(crate) fn parse_ole_object_anchors(
             src_rect: None,
             // OLE object previews carry no blip effects.
             alpha: None,
+            duotone: None,
         });
     }
     anchors
@@ -2975,7 +3009,7 @@ mod blip_svg_tests {
         let data = build_media_zip(PNG_1X1, SVG);
         let cursor = Cursor::new(data.clone());
         let mut archive = zip::ZipArchive::new(cursor).unwrap();
-        let anchors = parse_drawing_anchors(&xml, rels, "xl/drawings", &mut archive);
+        let anchors = parse_drawing_anchors(&xml, rels, "xl/drawings", &mut archive, &[]);
         assert_eq!(anchors.len(), 1, "exactly one picture anchor expected");
         anchors.into_iter().next().unwrap()
     }
@@ -3008,7 +3042,7 @@ mod blip_svg_tests {
                 hidden = hidden_attr,
             );
             let mut archive = zip::ZipArchive::new(Cursor::new(data.clone())).unwrap();
-            let anchors = parse_drawing_anchors(&xml, &rels, "xl/drawings", &mut archive);
+            let anchors = parse_drawing_anchors(&xml, &rels, "xl/drawings", &mut archive, &[]);
             assert_eq!(anchors.len(), expect_len, "hidden={hidden_attr}");
         }
     }
@@ -3172,6 +3206,7 @@ mod blip_svg_tests {
             svg_image_path: Some("xl/media/image2.svg".to_string()),
             src_rect: None,
             alpha: None,
+            duotone: None,
         };
         let json = serde_json::to_string(&anchor).unwrap();
         assert!(json.contains("\"imagePath\":\"xl/media/image1.png\""));
@@ -3193,6 +3228,7 @@ mod blip_svg_tests {
             svg_image_path: None,
             src_rect: None,
             alpha: None,
+            duotone: None,
         };
         let json = serde_json::to_string(&geom).unwrap();
         assert!(json.contains("\"type\":\"image\""));
@@ -3891,7 +3927,7 @@ mod strict_namespace_tests {
 
         let data = build_media_zip(PNG_1X1);
         let mut archive = zip::ZipArchive::new(Cursor::new(data)).unwrap();
-        let anchors = parse_drawing_anchors(&xml, &rels, "xl/drawings", &mut archive);
+        let anchors = parse_drawing_anchors(&xml, &rels, "xl/drawings", &mut archive, &[]);
 
         assert_eq!(
             anchors.len(),

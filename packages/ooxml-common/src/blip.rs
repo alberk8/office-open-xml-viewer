@@ -166,6 +166,73 @@ pub fn parse_blip_alpha(blip_fill: Node<'_, '_>) -> Option<f64> {
     }
 }
 
+/// A `<a:duotone>` image effect (ECMA-376 §20.1.8.23) resolved to its two
+/// endpoint colours. `clr1` is the first `EG_ColorChoice` child (the dark
+/// endpoint, luminance 0), `clr2` the second (the light endpoint, luminance 1) —
+/// the spec says the effect "combines clr1 and clr2 through a linear
+/// interpolation" per pixel, so pixel luminance is the interpolation factor.
+/// Both are 6-char uppercase hex WITHOUT a `#`; any per-colour transforms
+/// (lumMod/lumOff/tint/satMod/shade/…) are already baked in by
+/// [`crate::color::parse_color_node`]. Shared across the docx/pptx/xlsx parsers.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Duotone {
+    /// First colour child — dark endpoint. 6-char hex, no `#`.
+    pub clr1: String,
+    /// Second colour child — light endpoint. 6-char hex, no `#`.
+    pub clr2: String,
+}
+
+/// Parse `<a:blipFill>`'s `<a:duotone>` (§20.1.8.23), resolving its two
+/// `EG_ColorChoice` children through the shared DrawingML colour grammar
+/// ([`crate::color::parse_color_node`]) so all per-colour transforms are applied.
+/// `resolver` supplies the host's `<a:schemeClr>` palette lookup and `tint_mode`
+/// selects the Word/PowerPoint `<a:tint>` interpretation, exactly as every other
+/// colour path in the parser does.
+///
+/// `<a:duotone>` is a sibling of `<a:blip>` inside `<a:blipFill>` (it is one of
+/// CT_BlipFillProperties' blip-effect children). Returns `None` when there is no
+/// duotone or fewer than two resolvable colours (a malformed effect is dropped
+/// rather than half-applied). The returned hexes carry NO `#` and are uppercase.
+pub fn parse_blip_duotone<R: crate::color::ThemeResolver + ?Sized>(
+    blip_fill: Node<'_, '_>,
+    resolver: &R,
+    tint_mode: crate::color::TintMode,
+) -> Option<Duotone> {
+    // `<a:duotone>` lives on the blip itself (a blip-effect child), with the
+    // srcRect/stretch/tile as its siblings. Some producers place it directly
+    // under blipFill; accept either by searching descendants of blipFill's
+    // immediate children shallowly.
+    let duotone = blip_fill
+        .children()
+        .find(|n| n.is_element() && n.tag_name().name() == "duotone")
+        .or_else(|| {
+            blip_fill
+                .children()
+                .find(|n| n.is_element() && n.tag_name().name() == "blip")
+                .and_then(|blip| {
+                    blip.children()
+                        .find(|n| n.is_element() && n.tag_name().name() == "duotone")
+                })
+        })?;
+    // The two EG_ColorChoice children, in document order. Each child IS a colour
+    // element (srgbClr/schemeClr/prstClr/…) — not a container wrapping one — so it
+    // is classified with `color_source_from_element` and resolved (transforms and
+    // all) via `resolve_color_source`, reusing the exact colour grammar every
+    // other path uses.
+    let mut colors = duotone
+        .children()
+        .filter(|n| n.is_element())
+        .filter_map(|node| crate::color::color_source_from_element(node))
+        .filter_map(|source| crate::color::resolve_color_source(source, resolver, tint_mode));
+    let clr1 = colors.next()?;
+    let clr2 = colors.next()?;
+    Some(Duotone {
+        clr1: clr1.to_uppercase(),
+        clr2: clr2.to_uppercase(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -276,6 +343,18 @@ mod tests {
         assert_eq!(mime_from_ext("x.EMF"), "image/emf");
     }
 
+    // A minimal ThemeResolver mapping a couple of scheme names, so the duotone
+    // scheme-color path is exercised without a full parser.
+    struct DuoResolver;
+    impl crate::color::ThemeResolver for DuoResolver {
+        fn resolve_scheme_color(&self, name: &str) -> Option<String> {
+            match name {
+                "accent1" => Some("4472C4".to_owned()),
+                _ => None,
+            }
+        }
+    }
+
     #[test]
     fn parse_blip_alpha_reads_amt_fraction() {
         // amt=70000 → 0.70 (the sample-9.xlsx alphaModFix).
@@ -296,5 +375,67 @@ mod tests {
             r#"<a:blipFill xmlns:a="{A_NS}"><a:blip><a:alphaModFix amt="100000"/></a:blip></a:blipFill>"#
         );
         assert!(parse_blip_alpha(Document::parse(&opaque).unwrap().root_element()).is_none());
+    }
+
+    #[test]
+    fn parse_blip_duotone_resolves_two_colours_with_transforms() {
+        // The sample-9.xlsx effect: clr1=black (prstClr), clr2=srgbClr DAB6BA with
+        // lumMod/lumOff/tint/satMod transforms. clr1 is the dark endpoint.
+        let xml = format!(
+            r#"<a:blipFill xmlns:a="{A_NS}">
+                 <a:blip r:embed="rId1" xmlns:r="{R_NS}"/>
+                 <a:duotone>
+                   <a:prstClr val="black"/>
+                   <a:srgbClr val="DAB6BA">
+                     <a:lumMod val="20000"/><a:lumOff val="80000"/>
+                     <a:tint val="45000"/><a:satMod val="400000"/>
+                   </a:srgbClr>
+                 </a:duotone>
+               </a:blipFill>"#
+        );
+        let doc = Document::parse(&xml).unwrap();
+        let duo = parse_blip_duotone(
+            doc.root_element(),
+            &DuoResolver,
+            crate::color::TintMode::PowerPointLinear,
+        )
+        .expect("duotone present");
+        // clr1 = black.
+        assert_eq!(duo.clr1, "000000");
+        // clr2 is DAB6BA lightened by the transforms → a light pink (all channels
+        // high, R the largest). We assert the shape, not an exact hex (the exact
+        // value depends on the shared transform math, reported separately).
+        let r = u8::from_str_radix(&duo.clr2[0..2], 16).unwrap();
+        let g = u8::from_str_radix(&duo.clr2[2..4], 16).unwrap();
+        let b = u8::from_str_radix(&duo.clr2[4..6], 16).unwrap();
+        assert!(r > 200, "clr2 R should be high (light pink), got {r}");
+        assert!(
+            r >= g && r >= b,
+            "clr2 should be pink (R largest): {}",
+            duo.clr2
+        );
+    }
+
+    #[test]
+    fn parse_blip_duotone_none_when_absent_or_single_colour() {
+        let none = format!(
+            r#"<a:blipFill xmlns:a="{A_NS}"><a:blip r:embed="rId1" xmlns:r="{R_NS}"/></a:blipFill>"#
+        );
+        assert!(parse_blip_duotone(
+            Document::parse(&none).unwrap().root_element(),
+            &DuoResolver,
+            crate::color::TintMode::PowerPointLinear
+        )
+        .is_none());
+        // Only one colour child ⇒ not a valid duotone; dropped.
+        let one = format!(
+            r#"<a:blipFill xmlns:a="{A_NS}"><a:duotone><a:srgbClr val="112233"/></a:duotone></a:blipFill>"#
+        );
+        assert!(parse_blip_duotone(
+            Document::parse(&one).unwrap().root_element(),
+            &DuoResolver,
+            crate::color::TintMode::PowerPointLinear
+        )
+        .is_none());
     }
 }

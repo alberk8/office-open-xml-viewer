@@ -1,4 +1,4 @@
-import type { HyperlinkTarget } from '@silurus/ooxml-core';
+import { overlayPercent, type HyperlinkTarget } from '@silurus/ooxml-core';
 import type { PptxTextRunInfo } from './renderer';
 
 /**
@@ -20,10 +20,19 @@ import type { PptxTextRunInfo } from './renderer';
  * (no hyperlink) is byte-identical to before. A JS click handler is used rather
  * than an `<a href>` so the URL never bypasses the viewer's sanitisation.
  *
- * @param layer     the overlay div.
+ * The overlay's coordinates are all PERCENTAGES of `cssWidth`/`cssHeight` (the
+ * slide's intended CSS-px box), never literal px, and the container's own
+ * `width`/`height` are left untouched (the caller sizes it `width:100%;
+ * height:100%` so it fills the wrapper). This lets the overlay track the canvas's
+ * ACTUAL rendered box even when a consumer scales the canvas down with external
+ * CSS (e.g. `width:100%!important;height:auto`): the wrapper (and therefore the
+ * `100%` container) shrinks with the canvas, and every `%`-placed child scales
+ * with it, so nothing overflows the wrapper into an ancestor's scroll area.
+ *
+ * @param layer     the overlay div (sized `width:100%;height:100%` by the caller).
  * @param runs      per-run + per-shape geometry from `renderSlide({ onTextRun })`.
- * @param cssWidth  the rendered canvas's CSS width (px, number).
- * @param cssHeight the rendered canvas's CSS height (px, number).
+ * @param cssWidth  the slide's intended CSS width (px, number) — the % denominator.
+ * @param cssHeight the slide's intended CSS height (px, number) — the % denominator.
  * @param onHyperlinkClick called with the run's resolved {@link HyperlinkTarget}
  *                         when a hyperlink span is clicked. Omit to leave links
  *                         non-interactive (spans stay plain, selectable text).
@@ -36,8 +45,6 @@ export function buildPptxTextLayer(
   onHyperlinkClick?: (target: HyperlinkTarget) => void,
 ): void {
   layer.innerHTML = '';
-  layer.style.width = `${cssWidth}px`;
-  layer.style.height = `${cssHeight}px`;
 
   // Group runs by shape (same shapeX/shapeY/rotation)
   type ShapeKey = string;
@@ -48,10 +55,15 @@ export function buildPptxTextLayer(
     const key = `${run.shapeX},${run.shapeY},${run.shapeW},${run.shapeH},${totalRot}`;
     if (!shapeMap.has(key)) {
       const div = document.createElement('div');
+      // The shape frame is placed as a % of the slide box so it tracks the
+      // canvas's actual rendered size; its width/height are % too, so the child
+      // spans (positioned as % of THIS box) scale with it. rotate() is applied to
+      // the %-sized box unchanged — the rotation centre is within the box, so it
+      // composes with the outer scale.
       div.style.cssText =
         `position:absolute;` +
-        `left:${run.shapeX}px;top:${run.shapeY}px;` +
-        `width:${run.shapeW}px;height:${run.shapeH}px;` +
+        `left:${overlayPercent(run.shapeX, cssWidth)};top:${overlayPercent(run.shapeY, cssHeight)};` +
+        `width:${overlayPercent(run.shapeW, cssWidth)};height:${overlayPercent(run.shapeH, cssHeight)};` +
         `pointer-events:all;overflow:hidden;`;
       if (totalRot !== 0) {
         div.style.transformOrigin = 'center center';
@@ -76,9 +88,14 @@ export function buildPptxTextLayer(
     // underline) — the span only supplies the hit region. `cursor:text` stays
     // the default for plain runs so selection UX is unchanged.
     const link = onHyperlinkClick ? run.hyperlink : undefined;
+    // Position the span as a % of its shape frame (shapeW/shapeH) so it tracks
+    // the frame when the whole overlay is scaled by external CSS. `font` /
+    // `line-height` stay px: they set the glyph metrics of the transparent hit
+    // text, which the browser lays out inside the box; the box position is what
+    // must track the canvas (byte-identical to the prior overlay at 100% scale).
     span.style.cssText =
       `position:absolute;` +
-      `left:${run.inShapeX}px;top:${run.inShapeY}px;` +
+      `left:${overlayPercent(run.inShapeX, shape.w)};top:${overlayPercent(run.inShapeY, shape.h)};` +
       `font:${run.font};line-height:${run.h}px;letter-spacing:0;` +
       `white-space:pre;color:transparent;cursor:${link ? 'pointer' : 'text'};`;
     if (link && onHyperlinkClick) {

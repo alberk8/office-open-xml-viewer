@@ -75,16 +75,23 @@ describe('buildPptxHighlightLayer', () => {
       { slices: [{ runIndex: 0, start: 4, end: 9 }], active: false }, // "quick"
     ];
     buildPptxHighlightLayer(layer as unknown as HTMLDivElement, runs, matches, 960, 540, measureForFont);
+    // The overlay container must NOT be pinned to a literal px size — it keeps
+    // its `width:100%;height:100%` so it tracks the canvas's actual rendered box.
+    expect(layer.style.width ?? '').toBe('');
+    expect(layer.style.height ?? '').toBe('');
     // One shape div, containing one box.
     expect(layer.children).toHaveLength(1);
     const shapeDiv = layer.children[0];
     expect(shapeDiv.children).toHaveLength(1);
     const box = shapeDiv.children[0];
-    // left = inShapeX (5) + "the " (28) = 33; top = inShapeY (8); width = 35.
-    expect(box.style.left).toBe('33px');
-    expect(box.style.top).toBe('8px');
-    expect(box.style.width).toBe('35px');
-    expect(box.style.height).toBe('16px');
+    // Box is placed as a PERCENTAGE of the shape frame (shapeW=100, shapeH=50)
+    // so it scales with the (percentage-sized, rotatable) group.
+    // left = (inShapeX 5 + "the " 28) / 100; top = inShapeY 8 / 50;
+    // width = 35 / 100; height = 16 / 50.
+    expect(box.style.left).toBe(`${(33 / 100) * 100}%`);
+    expect(box.style.top).toBe(`${(8 / 50) * 100}%`);
+    expect(box.style.width).toBe(`${(35 / 100) * 100}%`);
+    expect(box.style.height).toBe(`${(16 / 50) * 100}%`);
     expect(box.style.background).toBe(DEFAULT_FIND_HIGHLIGHT);
   });
 

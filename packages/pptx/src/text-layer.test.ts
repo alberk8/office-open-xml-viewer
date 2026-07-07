@@ -74,24 +74,32 @@ describe('buildPptxTextLayer (extracted from PptxViewer._buildTextLayer)', () =>
     buildPptxTextLayer(layer as unknown as HTMLDivElement, runs, 960, 540);
 
     expect(layer.innerHTML).toBe('');
-    expect(layer.style.width).toBe('960px');
-    expect(layer.style.height).toBe('540px');
+    // The overlay container must NOT be pinned to a literal px size: it stays at
+    // its creation `width:100%;height:100%` so it tracks the canvas's ACTUAL
+    // rendered box (external CSS may scale the canvas down responsively). The
+    // build must leave the container size untouched.
+    expect(layer.style.width ?? '').toBe('');
+    expect(layer.style.height ?? '').toBe('');
     // Same shape frame + rotation ⇒ ONE group div, holding both spans.
     expect(layer.children.length).toBe(1);
     const shapeDiv = layer.children[0];
     expect(shapeDiv.tag).toBe('div');
     expect(shapeDiv.style.position).toBe('absolute');
-    expect(shapeDiv.style.left).toBe('10px');
-    expect(shapeDiv.style.top).toBe('20px');
-    expect(shapeDiv.style.width).toBe('200px');
-    expect(shapeDiv.style.height).toBe('80px');
+    // The shape frame is placed as a PERCENTAGE of cssWidth/cssHeight so it
+    // scales with the container: left 10/960, top 20/540, w 200/960, h 80/540.
+    expect(shapeDiv.style.left).toBe(`${(10 / 960) * 100}%`);
+    expect(shapeDiv.style.top).toBe(`${(20 / 540) * 100}%`);
+    expect(shapeDiv.style.width).toBe(`${(200 / 960) * 100}%`);
+    expect(shapeDiv.style.height).toBe(`${(80 / 540) * 100}%`);
     expect(shapeDiv.style.overflow).toBe('hidden');
     expect(shapeDiv.children.map((c) => c.textContent)).toEqual(['A', 'B']);
     // Span uses the shipped `font` shorthand + line-height + letter-spacing reset.
+    // Its position inside the shape div is a PERCENTAGE of the shape's own
+    // box (shapeW/shapeH), so it scales with the rotated group.
     const spanA = shapeDiv.children[0];
     expect(spanA.style.position).toBe('absolute');
-    expect(spanA.style.left).toBe('2px');
-    expect(spanA.style.top).toBe('4px');
+    expect(spanA.style.left).toBe(`${(2 / 200) * 100}%`);
+    expect(spanA.style.top).toBe(`${(4 / 80) * 100}%`);
     expect(spanA.style.font).toBe('12px serif');
     expect(spanA.style['line-height']).toBe('12px');
     expect(spanA.style['letter-spacing']).toBe('0');

@@ -209,9 +209,13 @@ describe.skipIf(!skia || !pptxMod || !rendererMod || !findMod || !highlightMod |
       const shapeDiv = layer.children.find((d) => d.children.length > 0);
       expect(shapeDiv).toBeDefined();
       const box = shapeDiv!.children[0];
-      const left = parseFloat(box.style.left);
-      const width = parseFloat(box.style.width);
-      const top = parseFloat(box.style.top);
+      // buildPptxHighlightLayer positions a box as a PERCENTAGE of its shape
+      // frame (run.shapeW/run.shapeH) — the % denominators — so convert the
+      // parsed percentage back to px against that same basis before comparing
+      // to the run's real (px) in-shape geometry.
+      const left = (parseFloat(box.style.left) / 100) * run.shapeW;
+      const width = (parseFloat(box.style.width) / 100) * run.shapeW;
+      const top = (parseFloat(box.style.top) / 100) * run.shapeH;
       // The box sits in the shape's own frame at inShapeX + slice extent.
       expect(width).toBeGreaterThan(0);
       expect(left).toBeGreaterThanOrEqual(run.inShapeX - 0.5);

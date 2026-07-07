@@ -33,21 +33,36 @@
     // between the main <canvas> and the worker OffscreenCanvas must not fail an
     // exact-equality assertion). The run GEOMETRY is computed identically in both
     // modes (same renderer), so the rounded boxes must match exactly.
+    // Read RESOLVED pixel geometry (getBoundingClientRect), relative to the
+    // wrapper's top-left, rather than parsing the inline `style.left` string.
+    // The overlay coordinates are CSS PERCENTAGES (so the overlay tracks a
+    // canvas a consumer scales down), and a percentage is scale-invariant — it
+    // would not follow the zoom if read verbatim. The laid-out px position DOES
+    // follow the zoom (slide geometry px = EMU × scale), which is what this spec
+    // asserts, and is identical whether the CSS is px or %.
+    const wrapperRect = (host) => {
+      const wrapper = host.querySelector('div');
+      return wrapper.getBoundingClientRect();
+    };
     // Wrapper stacking order: [canvas, textLayer, highlightLayer].
     const serializeOverlay = (host) => {
       const textLayer = layersOf(host)[0];
       const out = [];
       if (textLayer) {
+        const wr = wrapperRect(host);
         for (const shape of textLayer.children) {
-          const sx = Math.round(parseFloat(shape.style.left) || 0);
-          const sy = Math.round(parseFloat(shape.style.top) || 0);
+          const sr = shape.getBoundingClientRect();
+          const sx = Math.round(sr.left - wr.left);
+          const sy = Math.round(sr.top - wr.top);
           for (const span of shape.querySelectorAll('span')) {
+            const spr = span.getBoundingClientRect();
             out.push({
               text: span.textContent,
               shapeLeft: sx,
               shapeTop: sy,
-              inLeft: Math.round(parseFloat(span.style.left) || 0),
-              inTop: Math.round(parseFloat(span.style.top) || 0),
+              // In-shape offset as resolved px (span rect relative to shape rect).
+              inLeft: Math.round(spr.left - sr.left),
+              inTop: Math.round(spr.top - sr.top),
             });
           }
         }
@@ -56,18 +71,22 @@
     };
     // IX2 highlight boxes (absolutely positioned divs in the LAST layer; pptx
     // groups them per shape like the text layer, so walk to the leaf divs that
-    // carry a background).
+    // carry a background). Read resolved px relative to the wrapper.
     const serializeHighlights = (host) => {
       const layers = layersOf(host);
       const layer = layers[layers.length - 1];
       if (!layer) return [];
+      const wr = wrapperRect(host);
       return [...layer.querySelectorAll('div')]
         .filter((b) => b.style.background)
-        .map((b) => ({
-          left: Math.round(parseFloat(b.style.left) || 0),
-          top: Math.round(parseFloat(b.style.top) || 0),
-          width: Math.round(parseFloat(b.style.width) || 0),
-        }));
+        .map((b) => {
+          const r = b.getBoundingClientRect();
+          return {
+            left: Math.round(r.left - wr.left),
+            top: Math.round(r.top - wr.top),
+            width: Math.round(r.width),
+          };
+        });
     };
 
     const capture = (host, viewer, canvas) => ({

@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    /* Reproduce the ooxml.silurus.dev demo layout: a scrollable stage with a
+       fixed max-height, holding a viewer whose canvas is scaled DOWN by external
+       CSS (the recommended responsive pattern). The `!important` overrides mimic
+       the site's `.demo-page { width:100%!important; height:auto!important }`. */
+    #stage {
+      max-width: 640px;
+      max-height: 360px;
+      overflow: auto;      /* the ancestor whose scroll{Width,Height} we assert */
+      border: 1px solid #ccc;
+      padding: 11px 22px;  /* asymmetric padding, like the site */
+    }
+    /* The consumer scales the canvas responsively — its rendered box (e.g.
+       ~596×335) is much smaller than the viewer's intended 960×540. */
+    #stage canvas {
+      display: block !important;
+      width: 100% !important;
+      max-width: 100% !important;
+      height: auto !important;
+      background: #fff;
+    }
+  </style>
+</head>
+<body>
+  <!-- Regression for the reported "single viewer with navigation" scrollbar bug:
+       the find-highlight + text-selection overlays must track the canvas's ACTUAL
+       (externally scaled) CSS size, so they never overflow the wrapper and push a
+       scrollbar onto the #stage scroll area. The spec reads document.body.dataset
+       measurements taken AFTER a find highlight + selection overlay are built. -->
+  <div id="stage"></div>
+  <script type="module">
+    import { PptxViewer } from '/src/index.ts';
+
+    const params = new URLSearchParams(location.search);
+    const name = params.get('pptx') ?? 'demo/sample-1';
+    const query = params.get('q') ?? 'a';
+
+    try {
+      const stage = document.getElementById('stage');
+      const canvas = document.createElement('canvas');
+      stage.appendChild(canvas);
+
+      const resp = await fetch(`/${name}.pptx`);
+      if (!resp.ok) throw new Error(`fetch ${name}.pptx -> ${resp.status}`);
+      const buf = await resp.arrayBuffer();
+
+      // width: 960 = the slide's intended CSS box; the external CSS scales the
+      // rendered canvas down to fit #stage. enableTextSelection builds the text
+      // overlay; findText builds the highlight overlay.
+      const viewer = new PptxViewer(canvas, {
+        width: 960,
+        enableTextSelection: true,
+        useGoogleFonts: true,
+      });
+      await viewer.load(buf);
+      await viewer.findText(query);
+      await viewer.findNext();
+
+      // Let layout settle so scrollWidth/scrollHeight reflect the final overlay.
+      await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+
+      // The overlay layers live inside the viewer's positioned wrapper (the
+      // canvas's parent). Read their laid-out size to prove they track the SCALED
+      // canvas, not the intended 960×540.
+      const wrapper = canvas.parentElement;
+      const overlayLayers = [...wrapper.children].filter((c) => c.tagName === 'DIV');
+      const overlayRects = overlayLayers.map((l) => {
+        const r = l.getBoundingClientRect();
+        return { w: Math.round(r.width), h: Math.round(r.height) };
+      });
+      const canvasRect = canvas.getBoundingClientRect();
+
+      document.body.dataset.result = JSON.stringify({
+        stageScrollWidth: stage.scrollWidth,
+        stageClientWidth: stage.clientWidth,
+        stageScrollHeight: stage.scrollHeight,
+        stageClientHeight: stage.clientHeight,
+        canvasCssWidth: Math.round(canvasRect.width),
+        canvasCssHeight: Math.round(canvasRect.height),
+        overlayRects,
+      });
+      viewer.destroy();
+      document.body.dataset.status = 'ready';
+    } catch (err) {
+      document.body.dataset.status = 'error';
+      document.body.dataset.errorMessage = err.message;
+      console.error('[responsive-overlay-fixture] error:', err);
+    }
+  </script>
+</body>
+</html>

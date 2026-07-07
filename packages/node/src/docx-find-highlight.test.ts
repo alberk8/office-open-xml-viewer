@@ -174,8 +174,8 @@ describe.skipIf(!skia || !docxMod || !rendererMod || !findMod || !highlightMod |
           layer: unknown,
           runs: Run[],
           matches: { slices: { runIndex: number; start: number; end: number }[]; active: boolean }[],
-          w: string,
-          h: string,
+          w: number,
+          h: number,
           measureForFont: (font: string) => (s: string) => number,
         ) => void;
       };
@@ -209,8 +209,8 @@ describe.skipIf(!skia || !docxMod || !rendererMod || !findMod || !highlightMod |
           layer as unknown as HTMLDivElement,
           runs,
           highlights,
-          '800px',
-          '1000px',
+          800,
+          1000,
           measureForFont,
         );
       } finally {
@@ -222,13 +222,20 @@ describe.skipIf(!skia || !docxMod || !rendererMod || !findMod || !highlightMod |
       // right ≤ run.x + run.w (+1px slack for sub-pixel rounding), top == run.y,
       // and a positive width. This is the pixel-level "highlight lands on the
       // glyphs" assertion.
+      //
+      // buildDocxHighlightLayer positions each box as a PERCENTAGE of the
+      // cssWidth/cssHeight passed above (800/1000) — the % denominators — so
+      // convert the parsed percentage back to px against that same basis before
+      // comparing to the run's real (px) render geometry.
+      const CSS_W = 800;
+      const CSS_H = 1000;
       const firstSlice = highlights.find((h) => h.slices.length)?.slices[0];
       expect(firstSlice).toBeDefined();
       const run = runs[firstSlice!.runIndex];
       const box = layer.children[0];
-      const left = parseFloat(box.style.left);
-      const width = parseFloat(box.style.width);
-      const top = parseFloat(box.style.top);
+      const left = (parseFloat(box.style.left) / 100) * CSS_W;
+      const width = (parseFloat(box.style.width) / 100) * CSS_W;
+      const top = (parseFloat(box.style.top) / 100) * CSS_H;
       expect(width).toBeGreaterThan(0);
       expect(left).toBeGreaterThanOrEqual(run.x - 0.5);
       expect(left + width).toBeLessThanOrEqual(run.x + run.w + 1);

@@ -1084,11 +1084,15 @@ describe('PptxScrollViewer — text selection (T5)', () => {
     await Promise.resolve();
     const wrapper = findSlotWrapper(scrollHost);
     const textLayer = findTextLayer(wrapper);
-    // Finding B: the overlay is sized to the CSS box (round(widthPx)/round(
-    // slideHeightPx)), NOT the canvas backing store. At base scale 1.0 the slide is
-    // 200px wide, 120px tall — assert those LITERAL numbers, not a fallback echo.
-    expect(textLayer.style.width).toBe('200px');
-    expect(textLayer.style.height).toBe('120px');
+    // The overlay container is NOT pinned to a literal px size: it keeps its
+    // creation `width:100%;height:100%` so it tracks the wrapper's actual box
+    // even when a consumer scales the canvas down with external CSS (the reported
+    // scrollbar bug). The wrapper IS sized to the CSS box (200×120 at base scale
+    // 1.0), NOT the canvas backing store — so `100%` resolves to the CSS box.
+    expect(textLayer.style.width).toBe('100%');
+    expect(textLayer.style.height).toBe('100%');
+    expect(wrapper.style.width).toBe('200px');
+    expect(wrapper.style.height).toBe('120px');
     v.destroy();
   });
 
@@ -1121,9 +1125,14 @@ describe('PptxScrollViewer — text selection (T5)', () => {
     // The canvas backing store IS 2× (dpr 2): 400×240.
     expect(canvas.width).toBe(400);
     expect(canvas.height).toBe(240);
-    // …but the overlay is the CSS box, 200×120 — half the backing store.
-    expect(textLayer.style.width).toBe('200px');
-    expect(textLayer.style.height).toBe('120px');
+    // …but the overlay container stays `100%` of the wrapper, and the wrapper is
+    // the CSS box (200×120) — half the backing store. `100%` of that box never
+    // copies the 2× backing store, so the overlay does not overflow the wrapper /
+    // inflate the scroll area.
+    expect(textLayer.style.width).toBe('100%');
+    expect(textLayer.style.height).toBe('100%');
+    expect(wrapper.style.width).toBe('200px');
+    expect(wrapper.style.height).toBe('120px');
     v.destroy();
   });
 
